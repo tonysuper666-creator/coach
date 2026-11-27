@@ -484,6 +484,7 @@ object ExamPointDrillGate {
         generatorModel: String,
         checkerModel: String,
         topicTitle: String = "",
+        requireChinese: Boolean = false,
     ): ExamPointAdmission {
         val discards = linkedMapOf<String, Int>()
         val choiceLocalDiscards = linkedMapOf<String, Int>()
@@ -504,7 +505,7 @@ object ExamPointDrillGate {
         var agreed = 0
         var choiceChecked = 0
         for (draft in drafts) {
-            val local = localChoiceFailure(draft, byPage, byBook, textbookIds, sourceTexts, topicTitle)
+            val local = localChoiceFailure(draft, byPage, byBook, textbookIds, sourceTexts, topicTitle, requireChinese)
                 ?: duplicateChoiceReason(draft, seenDrafts)
             if (local != null) {
                 drop(local)
@@ -627,11 +628,13 @@ object ExamPointDrillGate {
         textbookIds: Set<String>,
         sourceTexts: List<String>,
         @Suppress("UNUSED_PARAMETER") topicTitle: String = "",
+        requireChinese: Boolean = false,
     ): String? {
         if (draft.stem.isBlank() || draft.options.size != 4) return "malformed"
         if (draft.options.map { it.letter } != letters) return "malformed"
         if (draft.options.count { it.correct } != 1) return "malformed"
         if (draft.options.any { it.text.isBlank() || it.reason.isBlank() }) return "malformed"
+        if (requireChinese && !cjkRegex.containsMatchIn(draft.stem)) return "wrong_language"
         if (tocQuestionStemRegex.containsMatchIn(draft.stem)) return "toc_question"
         if (!CourseQualityGates.auditZeroOverlap(listOf(draft.stem), sourceTexts).passed) return "recall_stem"
         for (opt in draft.options) {
@@ -838,6 +841,7 @@ class ExamPointDrillPipeline(
     suspend fun generate(input: JsonObject): JsonObject {
         val topicId = input.str("topicId").ifBlank { "point" }
         val topicTitle = input.str("topicTitle").ifBlank { "这个考点" }
+        val requireChinese = input.str("outputLanguage").equals("zh", ignoreCase = true)
         val techniques = (input["examTechniques"] as? JsonArray).orEmpty()
             .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
         val essayWanted = ExamPointDrillGate.essayEligible(input.str("examFormat"), techniques)
@@ -873,7 +877,7 @@ class ExamPointDrillPipeline(
         val failedReasons = linkedMapOf<String, String>()
         val firstSeen = mutableListOf<ChoiceDraft>()
         for (draft in drafts) {
-            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle)
+            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle, requireChinese)
                 ?: ExamPointDrillGate.duplicateChoiceReason(draft, firstSeen)
             if (reason != null) failedReasons[draft.id] = reason else firstSeen += draft
         }
@@ -899,7 +903,7 @@ class ExamPointDrillPipeline(
         }
         val ready = mutableListOf<ChoiceDraft>()
         for (draft in drafts) {
-            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle)
+            val reason = ExamPointDrillGate.localChoiceFailure(draft, indexes.byPage, indexes.byBook, textbookIds, sourceTexts, topicTitle, requireChinese)
                 ?: ExamPointDrillGate.duplicateChoiceReason(draft, ready)
             if (reason == null) ready += draft
         }
@@ -944,6 +948,7 @@ class ExamPointDrillPipeline(
             generatorModel = first.model,
             checkerModel = checkerModel,
             topicTitle = topicTitle,
+            requireChinese = requireChinese,
         ).toJson()
     }
 
@@ -998,6 +1003,7 @@ class ExamPointDrillPipeline(
 
     private fun generatorSystem(essayWanted: Boolean) = """
         你在为备考写教学题。题干考理解，不考原句复述，不得连续摘抄材料里 8 个英文词或 12 个汉字。
+        语言要求：所有题干（stem）、选项（text）、理由（reason）以及论述提纲（thesis、claim）一律使用简体中文书写；专业术语、缩写和公式可在中文句子中保留英文原词；原句引用（citation.quote）必须保持材料原文语言逐字摘抄，不得翻译。
         每道题必须直接考查 topicTitle（当前考点本身），严禁拿同页出现的其他概念或定义凑数。如果材料里关于当前考点本身的实质内容不足，宁可少写（如写 3 道，或确实无内容时返回空数组 []），也不要偏题。
         写 3 到 5 道单选题，各题必须考查当前考点的不同角度（例如：核心机制、适用前提/边界、与相近概念区分、实证含义、情境应用），禁止多道题重复考同一个定义。
         严禁出「哪一节/哪一章/第几页讲 X」这类目录定位题；严禁把章末习题、判断题（True/False/Unclear）的待判陈述或分析题题设当作教材结论出处。
@@ -1029,7 +1035,7 @@ class ExamPointDrillPipeline(
         if (reasons.isNotEmpty()) {
             put("failureReasons", buildJsonObject { reasons.forEach { (id, r) -> put(id, r) } })
         }
-        put("note", "这些题存在出处对不上、引文过短、偏离当前考点、与前题重复、目录定位或复述原文的问题。请只重写点名的题，确保紧扣当前考点本身、与其余题考查不同角度，且每个选项的理由都有完整原文支持。不要假设哪个选项该对。")
+        put("note", "这些题存在出处对不上、引文过短、偏离当前考点、与前题重复、目录定位、复述原文或未使用中文（wrong_language）的问题。请只重写点名的题，确保所有题干、选项、理由和提纲使用简体中文（仅 citation.quote 保留材料原文语言），紧扣当前考点本身、与其余题考查不同角度，且每个选项的理由都有完整原文支持。不要假设哪个选项该对。")
         put("materials", materialsJson(blocks))
     }.toString()
 

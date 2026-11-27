@@ -527,6 +527,44 @@ class ExamPointDrillTest {
         assertEquals(listOf(44, 45), kept.map { it.page })
     }
 
+    @Test
+    fun chineseOutputLanguagePromptsChineseAndRepairsStrayEnglishStems() = runBlocking {
+        val bodyQuote = "Participants showed higher outpatient visits after coverage expansion."
+        val blocks = buildJsonArray { add(block("tb", "CORE_TEXTBOOK", bodyQuote, "Synthetic Textbook", page = 45)) }
+        val gen = script(haiku) { call ->
+            if (call == 1) {
+                buildJsonObject {
+                    put("choices", buildJsonArray {
+                        add(choiceObj("c1", "What happened to outpatient visits after coverage expanded?", "A", "Outpatient visits rose.", bodyQuote))
+                    })
+                    put("essay", kotlinx.serialization.json.JsonNull)
+                }.toString()
+            } else {
+                buildJsonObject {
+                    put("choices", buildJsonArray {
+                        add(choiceObj("c1", "覆盖范围扩大后，门诊就诊量出现了什么变化？", "A", "门诊就诊量有所上升。", bodyQuote))
+                    })
+                    put("essay", kotlinx.serialization.json.JsonNull)
+                }.toString()
+            }
+        }
+        val check = script(gpt) { votes(listOf("c1" to "A"), quote = bodyQuote) }
+        val topicInput = buildJsonObject {
+            put("topicId", "point-lang")
+            put("topicTitle", "Synthetic Coverage Experiment")
+            put("sourcesHash", "src-lang")
+            put("examFormat", "只考选择题")
+            put("outputLanguage", "zh")
+            put("blocks", blocks)
+        }
+        val body = ExamPointDrillPipeline(gen, check).generate(topicInput)
+        assertTrue(gen.systems.first().contains("一律使用简体中文书写"))
+        assertEquals(2, gen.prompts.size, "Stray English stem under outputLanguage=zh must trigger repair pass")
+        assertTrue(gen.prompts[1].contains("wrong_language"))
+        assertEquals(1, body.arr("choices").size)
+        assertTrue(body.arr("choices")[0].jsonObject.str("stem").contains("门诊"))
+    }
+
     private fun choiceObj(
         id: String,
         stem: String,

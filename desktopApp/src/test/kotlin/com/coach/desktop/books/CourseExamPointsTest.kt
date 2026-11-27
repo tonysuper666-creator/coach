@@ -746,4 +746,85 @@ class CourseExamPointsTest {
         assertTrue(280 in allLinkedTbPages, "Orphan chapter conclusion page 280 must be covered: $allLinkedTbPages")
         assertFalse(281 in allLinkedTbPages, "Stripped exercise page 281 must never be re-attached: $allLinkedTbPages")
     }
+
+    @Test
+    fun phraseInBothTableRowAndTextbookSectionIsRetainedAlongWithBodyBackedTermsAndTocSections() {
+        // Synthetic textbook where:
+        // 1. "Outpatient demand elasticity" appears BOTH as a numeric table row ("Outpatient demand elasticity: -0.31")
+        //    AND as a dedicated textbook section heading ("2.3 Outpatient demand elasticity") -> MUST be retained!
+        //    "Fresh tomatoes" appears ONLY as a numeric table row ("Fresh tomatoes: -4.6") -> MUST be filtered out!
+        // 2. "Regional Trial Experiment" appears once per deck across 3 weekly slide decks AND in textbook body prose -> MUST be retained!
+        // 3. Math-formula slide definitions ("Risk-averse: U(E[X]) > E[U(X)]"), short slide subtitles ("Expected value: Definition",
+        //    "Transition to outpatient care: 1980-2000"), textbook bulleted term definitions ("• Visual analogue scale (VAS). ...",
+        //    "• Time trade-off (TTO). ..."), and official TOC sections containing uppercase "IS" ("9.2 Indifference curves in IH–IS space")
+        //    or 5-word section titles ("1.2 Health is uncertain and contagious") MUST all be retained!
+        // 4. Non-topic prose sentences ("But this story relies on two critical assumptions", "A market equilibrium satisfies three conditions")
+        //    must still be filtered out!
+        val textbookPages = listOf(
+            ExamTeachingPage("tb", 33, CourseMaterialRole.CORE_TEXTBOOK, """
+                1.2 Health is uncertain and contagious
+                Uncertainty in health outcomes motivates formal risk-sharing contracts across households.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 50, CourseMaterialRole.CORE_TEXTBOOK, """
+                Table 2.1 Synthetic Elasticities
+                Outpatient demand elasticity: -0.31
+                Fresh tomatoes: -4.6
+                2.3 Outpatient demand elasticity
+                Outpatient demand elasticity measures how clinic visit counts change when user fees vary.
+                The Regional Trial Experiment randomized households across coinsurance tiers and tracked utilization over five years.
+                A sustained Transition to outpatient care reshaped hospital budgets across decades.
+                But this story relies on two critical assumptions: Prose sentence fragment.
+                A market equilibrium satisfies three conditions: Another prose sentence fragment.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 160, CourseMaterialRole.CORE_TEXTBOOK, """
+                Expected value equals the probability-weighted average across uncertain financial states.
+                A Risk-averse decision maker strictly prefers a certain payoff equal to the gamble's expected value.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 194, CourseMaterialRole.CORE_TEXTBOOK, """
+                9.2 Indifference curves in IH–IS space
+                Indifference curves in IH–IS space map constant expected utility across healthy and sick income states.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 320, CourseMaterialRole.CORE_TEXTBOOK, """
+                Quality weights can be elicited using three standard preference methods:
+                • Visual analogue scale (VAS). Respondents place a health state on a zero-to-one hundred line.
+                • Time trade-off (TTO). Respondents choose between fewer years in full health and longer life with illness.
+            """.trimIndent()),
+        )
+        val slidePages = listOf(
+            ExamTeachingPage("slides-w1", 1, CourseMaterialRole.LECTURE_SLIDES, "Regional Trial Experiment\nRandomized design and utilization findings."),
+            ExamTeachingPage("slides-w4", 1, CourseMaterialRole.LECTURE_SLIDES, "Expected value: Definition\nRisk-averse: U(E[X]) > E[U(X)]\nRegional Trial Experiment recap."),
+            ExamTeachingPage("slides-w5", 1, CourseMaterialRole.LECTURE_SLIDES, "Regional Trial Experiment\nMoral hazard evidence from coinsurance arms."),
+            ExamTeachingPage("slides-w6", 1, CourseMaterialRole.LECTURE_SLIDES, "Regional Trial Experiment\nFollow-up comparison across cohorts."),
+            ExamTeachingPage("slides-w8", 1, CourseMaterialRole.LECTURE_SLIDES, "Transition to outpatient care: 1980-2000\nHospital volume shifts over time."),
+        )
+
+        val identified = CourseExamPoints.identifyFromPages(
+            courseId = "r6-body-backed",
+            pages = textbookPages + slidePages,
+            chapterStartPagesByBook = mapOf("tb" to setOf(33, 50, 160, 194, 320)),
+            sectionSpansByBook = mapOf(
+                "tb" to listOf(
+                    ExamSectionSpan("Health is uncertain and contagious", "health is uncertain and contagious", 33..33),
+                    ExamSectionSpan("Outpatient demand elasticity", "outpatient demand elasticity", 50..50),
+                    ExamSectionSpan("Indifference curves in IH–IS space", "indifference curves in ih–is space", 194..194),
+                ),
+            ),
+            chapterRangesByBook = mapOf("tb" to listOf(33..37, 50..55, 160..170, 194..200, 320..325)),
+        )
+        val titles = identified.map { it.title }.toSet()
+
+        assertTrue("Outpatient demand elasticity" in titles, "Phrase in BOTH table row and textbook section MUST stay: $titles")
+        assertFalse("Fresh tomatoes" in titles, "Phrase ONLY in numeric table row MUST be filtered: $titles")
+        assertFalse("But this story relies on two critical assumptions" in titles)
+        assertFalse("A market equilibrium satisfies three conditions" in titles)
+
+        assertTrue("Regional Trial Experiment" in titles, "Cross-cutting topic across 3 slide decks + textbook prose MUST stay: $titles")
+        assertTrue("Expected value" in titles, "Slide title with 1-word subtitle + textbook prose MUST stay: $titles")
+        assertTrue("Risk-averse" in titles, "Math-formula slide definition + textbook prose MUST stay: $titles")
+        assertTrue("Transition to outpatient care" in titles, "Body-backed slide title with year subtitle MUST stay: $titles")
+        assertTrue("Visual analogue scale" in titles, "Textbook bulleted term definition MUST stay: $titles")
+        assertTrue("Time trade-off" in titles, "Textbook bulleted term definition MUST stay: $titles")
+        assertTrue("Indifference curves in IH–IS space" in titles, "TOC section with uppercase IS MUST stay: $titles")
+        assertTrue("Health is uncertain and contagious" in titles, "Official 5-word TOC section MUST stay: $titles")
+    }
 }

@@ -160,6 +160,37 @@ class R1941IncidentExitMarkerTest {
         }
     }
 
+    /**
+     * QA 第二次退回复现：A、B 同开，强杀 B，下次打开对 B 的提示点「不发」，再强杀 A。
+     * 原先 B 已处理的记录晚于 A 的启动时间，被当成 A 的记录，A 的异常退出不再新建记录，提示为空。
+     */
+    @Test fun aLaterKillStillOffersAfterAnEarlierCopysRecordWasDeclined() {
+        val dir = Files.createTempDirectory("coach-r1941-declined-")
+        try {
+            val running = mutableSetOf<Long>()
+            fun open(pid: Long): Pair<IncidentStore, PendingOffer?> {
+                val store = IncidentStore(dir, pid = { pid }, processStart = { pid * 10 }, alive = { p, s -> p in running && s == p * 10 })
+                val offer = store.beginSession()
+                running += pid
+                return store to offer
+            }
+
+            val (_, first) = open(1); assertNull(first)
+            val (_, second) = open(2); assertNull(second, "A is still running")
+            running -= 2
+            val (c, forB) = open(3); assertNotNull(forB, "B was killed")
+            c.decline(forB)
+            c.markClean(); running -= 3
+            running -= 1
+            val (_, forA) = open(4)
+            assertNotNull(forA, "A was killed after B's prompt was declined")
+            assertTrue(forA.files.none { it in forB.files }, "the declined record must not come back: ${forA.files}")
+            assertTrue(forA.text.contains("kind: unclean_exit"))
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun onlyTheAppsOwnCloseSkipsThePromptOnTheNextStart() {
         val root = Files.createTempDirectory("coach-r1941-exit-")
         try {

@@ -91,7 +91,10 @@ internal class IncidentStore(
             val running = others.filter { it.pid != null && it.processStart != null && alive(it.pid, it.processStart) }
             val ended = others - running.toSet()
             val offer = if (ended.isNotEmpty()) {
-                if (ended.any { marker -> incidentFiles().none { it.epoch >= marker.startedAt } }) {
+                // Only a record still waiting for an answer covers this exit; one already sent or declined
+                // belongs to an earlier exit, so this exit gets its own record and prompt (TON-1941).
+                val pending = unconsented()
+                if (ended.any { marker -> pending.none { it.epoch >= marker.startedAt } }) {
                     record("unclean_exit", "app_start", "上次进程没有正常退出。")
                 }
                 pack(unconsented())

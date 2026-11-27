@@ -1131,7 +1131,8 @@ internal class TextbookLibrary(
                         val totalPages = pdf.numberOfPages
                         require(totalPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
                         require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
-                        val bookTitle = pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: fallback
+                        val rawPdfTitle = pdf.documentInformation.title?.trim()
+                            ?.takeIf { it.isNotEmpty() && LiteratureMetadata.isUsefulTitle(it) }
                         val outline = extractBookPdfOutline(pdf)
                         val aspects = pdf.pages.withIndex().map { (index, sheet) ->
                             val crop = sheet.cropBox
@@ -1152,6 +1153,9 @@ internal class TextbookLibrary(
                         }
                         val tier0End = minOf(3, totalPages)
                         for (pageNum in 1..tier0End) extractPage(pageNum)
+                        val bookTitle = rawPdfTitle
+                            ?: LiteratureMetadata.extractFrontPageAcademicTitle(extractedMap[1]?.text.orEmpty())
+                            ?: fallback
                         val outlineStructure = BookTocWaterfall.buildTier0Structure(id, bookTitle, totalPages, outline)
                         val firstChapter = BookBoundaries.firstChapter(outlineStructure.tocNodes)
                         val probeStart = firstChapter?.startPage ?: 1
@@ -3887,7 +3891,12 @@ internal object TextbookExtraction {
             emptyList()
         }
         val outline = extractBookPdfOutline(pdf)
-        ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals, outline)
+        val rawPdfTitle = pdf.documentInformation.title?.trim()
+            ?.takeIf { it.isNotEmpty() && LiteratureMetadata.isUsefulTitle(it) }
+        val resolvedTitle = rawPdfTitle
+            ?: LiteratureMetadata.extractFrontPageAcademicTitle(recognized.firstOrNull()?.text.orEmpty())
+            ?: title
+        ExtractedBook(resolvedTitle, recognized, visuals, outline)
     }
 
     private fun extractContent(path: Path, format: String, title: String, ocr: BookOcr, control: BookImportControl, stageOcrOnly: Boolean): ExtractedBook = when (format) {

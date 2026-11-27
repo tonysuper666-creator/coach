@@ -620,7 +620,8 @@ internal fun RubricAnnotationSheet(
                             val usageTag = if (frameworkPoint) "essay-framework-usage-$idx" else "essay-point-used-$idx"
                             val rereadTag = if (frameworkPoint) "essay-framework-reread-$idx" else "essay-reread-$idx"
                             Text(
-                                text = item.slotLabel.ifBlank { "要点" },
+                                text = item.quoteAnchor.takeIf { it.endsWith('.') || it.endsWith('。') }
+                                    ?.replace(Regex("""\s+"""), " ") ?: item.slotLabel.ifBlank { "要点" },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colors.fgPrimary,
                                 fontWeight = FontWeight.SemiBold,

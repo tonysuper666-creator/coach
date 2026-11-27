@@ -83,7 +83,7 @@ internal object ExamCoverage {
             val name = point.name
             val taught = termIn(name, textbookNorm, textbookSpaced)
             val known = identified.any { samePoint(name, it) }
-            val item = bank.firstOrNull { samePoint(name, it.name) }
+            val item = bestBankPoint(name, bank)
             val hasTeaching = item != null && (item.choices > 0 || item.essay)
             if (taught && known && hasTeaching) {
                 coveredPoints += name
@@ -154,9 +154,26 @@ internal object ExamCoverage {
         return CourseExamPoints.termPattern(keySpaced).containsMatchIn(textbookSpaced)
     }
 
+    private fun bestBankPoint(name: String, bank: List<CoverageBankPoint>): CoverageBankPoint? {
+        val targetNorm = normalizedPointKey(name)
+        return bank.filter { samePoint(name, it.name) }
+            .maxWithOrNull(
+                compareBy<CoverageBankPoint>(
+                    { it.choices > 0 || it.essay },
+                    { normalizedPointKey(it.name) == targetNorm },
+                    { normalizedPointKey(it.name).length },
+                    { it.choices },
+                    { it.essay },
+                ),
+            )
+    }
+
+    private fun normalizedPointKey(name: String): String =
+        CourseExamPoints.normalize(name).replace('-', ' ')
+
     private fun samePoint(left: String, right: String): Boolean {
-        val a = CourseExamPoints.normalize(left).replace('-', ' ')
-        val b = CourseExamPoints.normalize(right).replace('-', ' ')
+        val a = normalizedPointKey(left)
+        val b = normalizedPointKey(right)
         if (a.isBlank() || b.isBlank()) return false
         if (a == b) return true
         val (short, long) = if (a.length <= b.length) a to b else b to a
@@ -189,13 +206,13 @@ internal object HeldOutDecomposer {
         """(?i)^\s*(?:(?:part|section)\s+(?:[ivxlcdm]+|[a-z]|\d+|one|two|three|four|five)(?:\s*[:：\-–—.]\s*.*|\s+\(.*\)|\s+(?:multiple\s+choice|short\s+answer|long\s+answer|essay|problem|questions?|true\s*(?:/|or)\s*false|definitions?|calculations?|analysis).*|$)|第\s*[一二三四五六七八九十百\d]+\s*[部分节篇](?:.*)|[一二三四五六七八九十]+[、.]\s*(?:单项选择|多项选择|选择|填空|判断|简答|论述|计算|分析|名词解释|综合)题.*)$""",
     )
     private val instructionsHeader = Regex(
-        """(?i)^\s*(?:(?:exam(?:ination)?|general|candidate)\s+)?(?:instructions|directions|rules|notes\s+to\s+candidates|read\s+(?:the\s+following\s+)?instructions)(?:\s+to\s+(?:candidates|students))?\s*[:：]?\s*$|^\s*(?:考场须知|考生须知|答题须知|注意事项)\s*[:：]?\s*$""",
+        """(?i)^\s*(?:(?:exam(?:ination)?|general|candidate|important|special|guidance)\s+)?(?:instructions|directions|rules|notes|regulations|information|notice)(?:\s+(?:to|for)\s+(?:candidates|students))?\s*[:：]?\s*$|^\s*(?:read\s+(?:the\s+following\s+)?instructions(?:\s+(?:to|for)\s+(?:candidates|students))?|before\s+you\s+leave|at\s+the\s+end\s+of\s+the\s+exam(?:ination)?)\s*[:：]?\s*$|^\s*(?:考场须知|考生须知|答题须知|注意事项|考试说明|考生守则)\s*[:：]?\s*$""",
     )
     private val coverStartLine = Regex(
-        """(?i)^\s*(?:(?:the\s+)?(?:university|college|school|faculty|department|institute)\s+of\s+[a-z][a-z\s&,'-]{1,60}|[a-z][a-z\s&,'-]{2,40}\s+university|[A-Z]{2,6}\s*\d{3,5}|[A-Z]{2,6}\s*\d{3,5}\b.*(?:exam(?:ination)?|midterm|final|practice|mock|sample|test|paper|quiz)[^?]{0,80}|(?:practice|sample|mock|past|resit|supplementary)\s+(?:midterm\s+|final\s+)?(?:exam(?:ination)?|paper|test)[^?]{0,80}|(?:[a-z]+\s+){0,3}(?:midterm|final)\s+examination[^?]{0,80}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+20\d{2}(?:\s+(?:exam(?:ination)?|diet|paper))?|(?:time\s+allowed|duration|total\s+marks|candidate\s+(?:number|id)|student\s+(?:id|number|name)|seat\s+number|examination\s+number|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|diet|course\s+code|module\s+code)\s*[:：].*|this\s+(?:exam(?:ination)?|question)\s+paper\s+consists\s+of\b.*|={3,}.*|-{3,}\s*(?:paper|exam|midterm|final).*|#\s+.*(?:exam(?:ination)?|midterm|final|paper|practice).*)\s*$""",
+        """(?i)^\s*(?:(?:the\s+)?(?:university|college|school|faculty|department|institute)\s+of\s+[^.!?。！？]{2,65}|(?-i:(?:The\s+)?(?:[A-Z][A-Za-z0-9&,'-]+\s+){1,4}(?:University|UNIVERSITY))|(?-i:[A-Z]{2,6}\s*\d{3,5})|(?-i:[A-Z]{2,6}\s*\d{3,5})\b.*(?:exam(?:ination)?|midterm|final|practice|mock|sample|test|paper|quiz)[^?]{0,80}|(?:practice|sample|mock|past|resit|supplementary)\s+(?:midterm\s+|final\s+)?(?:exam(?:ination)?|paper|test)[^?]{0,80}|(?:[a-z]+\s+){0,3}(?:midterm|final|degree|honours|ordinary)\s+examination[^?]{0,80}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+20\d{2}(?:\s+(?:exam(?:ination)?|diet|paper))?|(?:time\s+allowed|duration|total\s+marks|candidate\s+(?:number|id)|student\s+(?:id|number|name)|seat\s+number|examination\s+number|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|diet|course\s+code|module\s+code)\s*[:：].*|this\s+(?:exam(?:ination)?|question)\s+paper\s+consists\s+of\b.*|(?:the\s+)?examinations?\s+office\b[^?]{0,60}|academic\s+registry\b[^?]{0,60}|board\s+of\s+examiners\b[^?]{0,60}|={3,}.*|-{3,}\s*(?:paper|exam|midterm|final).*|#\s+.*(?:exam(?:ination)?|midterm|final|paper|practice).*)\s*$""",
     )
     private val instructionLine = Regex(
-        """(?i)\b(?:student\s+(?:id|number|name)|candidate\s+number|seat\s+number|examination\s+number|write\s+your\s+(?:name|id|answers?)|do\s+not\s+(?:open|turn|write|remove)|calculators?\s+(?:are|is)\s+(?:not\s+)?(?:permitted|allowed)|(?:is|are)\s+(?:not\s+)?permitted\s+in\s+this\s+exam|time\s+allowed|this\s+(?:exam(?:ination)?|paper)\s+consists\s+of|answer\s+(?:all|any\s+\d+)\s+questions?|attempt\s+(?:all|any\s+\d+)\s+questions?|marks?\s+will\s+be\s+awarded|credit\s+will\s+be\s+given|show\s+(?:all\s+)?(?:your\s+)?working|read\s+(?:all\s+)?instructions\s+carefully|use\s+(?:black|blue)\s+(?:pen|ink|ballpoint)|(?:closed|open)\s+book|no\s+books|legibly|invigilator)\b|考生须知|考场须知|答题须知|不得携带|禁止使用计算器|请勿翻开|考试时间|共\s*\d+\s*页|满分\s*\d+\s*分|填写姓名|填写学号""",
+        """(?i)\b(?:student\s+(?:id|number|name)|candidate\s+number|seat\s+number|examination\s+number|write\s+your\s+(?:name|id|candidate|answers?)|do\s+not\s+(?:open|turn|write|remove|leave)|calculators?\s+(?:are|is)\s+(?:not\s+)?(?:permitted|allowed)|(?:is|are)\s+(?:not\s+)?(?:permitted|allowed)\s+in\s+(?:this|the)\s+exam(?:ination)?|time\s+allowed|this\s+(?:exam(?:ination)?|paper)\s+consists\s+of|answer\s+(?:all|any\s+\d+)\s+questions?|attempt\s+(?:all|any\s+\d+)\s+questions?|marks?\s+will\s+be\s+awarded|credit\s+will\s+be\s+given|show\s+(?:all\s+)?(?:your\s+)?working|read\s+(?:all\s+)?instructions\s+carefully|use\s+(?:black|blue)\s+(?:pen|ink|ballpoint)|(?:closed|open)[\s-]+book|no\s+books|legibly|invigilator|remain\s+seated|examination\s+(?:room|hall)|(?:your|the|separate)\s+answer\s+(?:book|booklet|sheet)s?|(?:mobile\s+phones?|electronic\s+devices?|smartwatches?).*(?:prohibited|not\s+permitted|not\s+allowed|switched\s+off|turned\s+off)|(?:switched\s+off|turned\s+off|prohibited).*(?:mobile\s+phones?|electronic\s+devices?|smartwatches?)|dictionaries\s+(?:are|is)\s+(?:not\s+)?(?:permitted|allowed)|hand\s+in\s+your|when\s+told\s+to\s+stop|stop\s+writing|check\s+that\s+(?:this|the)\s+(?:paper|booklet)|unfair\s+means|academic\s+misconduct)\b|考生须知|考场须知|答题须知|不得携带|禁止使用计算器|请勿翻开|考试时间|共\s*\d+\s*页|满分\s*\d+\s*分|填写姓名|填写学号""",
     )
     private val draftOrBlankLine = Regex(
         """(?i)^\s*\[?\s*(?:this\s+page\s+(?:is\s+)?(?:intentionally\s+)?left\s+blank(?:\s+for\s+rough\s+work)?|intentionally\s+left\s+blank|blank\s+page|rough\s+work|draft\s+page|scrap\s+paper|space\s+for\s+rough\s+work|use\s+this\s+page\s+for\s+rough\s+work|additional\s+space(?:\s+for\s+answers?)?|草稿纸|草稿页|空白页|此页留白)\s*\]?\.?\s*$""",
@@ -243,6 +260,13 @@ internal object HeldOutDecomposer {
     private data class QuestionMarker(val style: QuestionStyle, val number: Int)
 
     private data class ExamPage(val lines: List<String>, val resetToFirstPage: Boolean = false)
+
+    private data class ExamLine(
+        val raw: String,
+        val trimmed: String,
+        val pageBoundary: Boolean,
+        val resetToFirstPage: Boolean,
+    )
 
     private data class TermMatcher(
         val title: String,
@@ -292,6 +316,22 @@ internal object HeldOutDecomposer {
         val pages = splitExamPages(text)
         val repeatedLines = findRepeatedPageLines(pages)
         val filteredPages = pages.filterNot { isBlankOrDraftPage(it.lines) }
+        val flatLines = buildList {
+            for (page in filteredPages) {
+                var firstOnPage = true
+                for (raw in page.lines) {
+                    add(
+                        ExamLine(
+                            raw = raw,
+                            trimmed = raw.trim(),
+                            pageBoundary = firstOnPage && pages.size >= 2,
+                            resetToFirstPage = firstOnPage && page.resetToFirstPage,
+                        ),
+                    )
+                    firstOnPage = false
+                }
+            }
+        }
 
         val questions = mutableListOf<StringBuilder>()
         var startedQuestions = false
@@ -304,9 +344,11 @@ internal object HeldOutDecomposer {
         var lastQuestionNum = 0
         var prevLineBlank = true
 
-        for (page in filteredPages) {
-            if (pages.size >= 2) inTrailingNoise = false
-            if (page.resetToFirstPage) {
+        for ((index, entry) in flatLines.withIndex()) {
+            val rawLine = entry.raw
+            val trimmed = entry.trimmed
+            if (entry.pageBoundary) inTrailingNoise = false
+            if (entry.resetToFirstPage) {
                 startedQuestions = false
                 inInstructions = false
                 inTrailingNoise = false
@@ -316,113 +358,112 @@ internal object HeldOutDecomposer {
                 lastQuestionNum = 0
                 prevLineBlank = true
             }
-            for (rawLine in page.lines) {
-                val trimmed = rawLine.trim()
-                if (trimmed.isEmpty()) {
-                    skipSubtitleLines = 0
-                    prevLineBlank = true
-                    continue
-                }
-                if (PRINTED_PAGE_MARK.matches(trimmed) || trimmed in repeatedLines || footerLine.matches(trimmed)) {
-                    sawStructuralMarker = true
-                    continue
-                }
-                if (draftOrBlankLine.matches(trimmed) || endOfExamLine.matches(trimmed)) {
-                    sawStructuralMarker = true
-                    inTrailingNoise = true
-                    continue
-                }
-                if (partHeader.matches(trimmed)) {
-                    sawStructuralMarker = true
-                    inInstructions = false
+            if (trimmed.isEmpty()) {
+                skipSubtitleLines = 0
+                prevLineBlank = true
+                continue
+            }
+            if (PRINTED_PAGE_MARK.matches(trimmed) || trimmed in repeatedLines || footerLine.matches(trimmed)) {
+                sawStructuralMarker = true
+                continue
+            }
+            if (draftOrBlankLine.matches(trimmed) || endOfExamLine.matches(trimmed)) {
+                sawStructuralMarker = true
+                inTrailingNoise = true
+                continue
+            }
+            if (partHeader.matches(trimmed)) {
+                sawStructuralMarker = true
+                inInstructions = false
+                inTrailingNoise = false
+                skipSubtitleLines = 2
+                currentSectionStyle = null
+                lastQuestionNum = 0
+                prevLineBlank = true
+                continue
+            }
+            if (instructionsHeader.matches(trimmed)) {
+                sawStructuralMarker = true
+                startedQuestions = false
+                inInstructions = true
+                inTrailingNoise = false
+                lastInstructionNum = 0
+                currentSectionStyle = null
+                lastQuestionNum = 0
+                prevLineBlank = true
+                continue
+            }
+            if (coverStartLine.matches(trimmed)) {
+                sawStructuralMarker = true
+                startedQuestions = false
+                inInstructions = false
+                inTrailingNoise = false
+                skipSubtitleLines = 0
+                lastInstructionNum = 0
+                currentSectionStyle = null
+                lastQuestionNum = 0
+                prevLineBlank = true
+                continue
+            }
+
+            val marker = parseQuestionMarker(trimmed)
+            if (inTrailingNoise) {
+                if (marker != null && marker.number == 1 && !looksLikeInstructionSequence(flatLines, index)) {
                     inTrailingNoise = false
-                    skipSubtitleLines = 2
                     currentSectionStyle = null
                     lastQuestionNum = 0
-                    prevLineBlank = true
+                } else {
                     continue
                 }
-                if (instructionsHeader.matches(trimmed)) {
-                    sawStructuralMarker = true
-                    startedQuestions = false
-                    inInstructions = true
-                    inTrailingNoise = false
-                    lastInstructionNum = 0
-                    currentSectionStyle = null
-                    lastQuestionNum = 0
-                    prevLineBlank = true
-                    continue
-                }
-                if (coverStartLine.matches(trimmed)) {
-                    sawStructuralMarker = true
-                    startedQuestions = false
-                    inInstructions = false
-                    inTrailingNoise = false
-                    skipSubtitleLines = 0
-                    lastInstructionNum = 0
-                    currentSectionStyle = null
-                    lastQuestionNum = 0
-                    prevLineBlank = true
-                    continue
-                }
+            }
 
-                val marker = parseQuestionMarker(trimmed)
-                if (inTrailingNoise) {
-                    if (marker != null && marker.number == 1 && !instructionLine.containsMatchIn(trimmed)) {
-                        inTrailingNoise = false
-                        currentSectionStyle = null
-                        lastQuestionNum = 0
-                    } else {
-                        continue
-                    }
-                }
-
-                if (inInstructions) {
-                    val exitToQuestion = marker != null && !instructionLine.containsMatchIn(trimmed) && (
-                        marker.style == QuestionStyle.EXPLICIT_Q ||
-                            lastInstructionNum == 0 ||
-                            marker.number <= lastInstructionNum
-                        )
-                    if (!exitToQuestion) {
-                        if (marker != null) lastInstructionNum = marker.number
-                        prevLineBlank = false
-                        continue
-                    }
-                    inInstructions = false
-                }
-
-                if (!startedQuestions && marker != null && instructionLine.containsMatchIn(trimmed)) {
-                    sawStructuralMarker = true
-                    inInstructions = true
-                    lastInstructionNum = marker.number
+            if (inInstructions) {
+                val exitToQuestion = marker != null && !instructionLine.containsMatchIn(trimmed) && (
+                    marker.style == QuestionStyle.EXPLICIT_Q ||
+                        (lastInstructionNum == 0 && !looksLikeInstructionSequence(flatLines, index)) ||
+                        (lastInstructionNum > 0 && marker.number <= lastInstructionNum && !looksLikeInstructionSequence(flatLines, index))
+                    )
+                if (!exitToQuestion) {
+                    if (marker != null) lastInstructionNum = marker.number
                     prevLineBlank = false
                     continue
                 }
-
-                if (skipSubtitleLines > 0) {
-                    if (marker == null && (sectionSubtitleLine.matches(trimmed) || ('?' !in trimmed && trimmed.length <= 70))) {
-                        skipSubtitleLines -= 1
-                        prevLineBlank = false
-                        continue
-                    }
-                    skipSubtitleLines = 0
-                }
-
-                if (marker != null && isNewQuestionStart(marker, currentSectionStyle, lastQuestionNum, prevLineBlank)) {
-                    startedQuestions = true
-                    sawStructuralMarker = true
-                    if (currentSectionStyle == null || marker.style == QuestionStyle.EXPLICIT_Q ||
-                        (marker.number == 1 && lastQuestionNum >= 2)
-                    ) {
-                        currentSectionStyle = marker.style
-                    }
-                    lastQuestionNum = marker.number
-                    questions += StringBuilder(trimmed)
-                } else if (startedQuestions && questions.isNotEmpty()) {
-                    questions.last().append('\n').append(rawLine.trimEnd())
-                }
-                prevLineBlank = false
+                inInstructions = false
             }
+
+            if (marker != null && (instructionLine.containsMatchIn(trimmed) ||
+                    (marker.number == 1 && (!startedQuestions || lastQuestionNum >= 2) && looksLikeInstructionSequence(flatLines, index)))
+            ) {
+                sawStructuralMarker = true
+                inInstructions = true
+                lastInstructionNum = marker.number
+                prevLineBlank = false
+                continue
+            }
+
+            if (skipSubtitleLines > 0) {
+                if (marker == null && (sectionSubtitleLine.matches(trimmed) || ('?' !in trimmed && trimmed.length <= 70))) {
+                    skipSubtitleLines -= 1
+                    prevLineBlank = false
+                    continue
+                }
+                skipSubtitleLines = 0
+            }
+
+            if (marker != null && isNewQuestionStart(marker, currentSectionStyle, lastQuestionNum, prevLineBlank)) {
+                startedQuestions = true
+                sawStructuralMarker = true
+                if (currentSectionStyle == null || marker.style == QuestionStyle.EXPLICIT_Q ||
+                    (marker.number == 1 && lastQuestionNum >= 2)
+                ) {
+                    currentSectionStyle = marker.style
+                }
+                lastQuestionNum = marker.number
+                questions += StringBuilder(trimmed)
+            } else if (startedQuestions && questions.isNotEmpty()) {
+                questions.last().append('\n').append(rawLine.trimEnd())
+            }
+            prevLineBlank = false
         }
 
         val parsed = questions.map { it.toString().trim() }.filter { it.length >= 12 }
@@ -433,6 +474,22 @@ internal object HeldOutDecomposer {
         } else {
             emptyList()
         }
+    }
+
+    private fun looksLikeInstructionSequence(lines: List<ExamLine>, startIndex: Int): Boolean {
+        var inspected = 0
+        for (i in startIndex until lines.size) {
+            if (i > startIndex && lines[i].pageBoundary) break
+            val t = lines[i].trimmed
+            if (t.isEmpty()) continue
+            if (partHeader.matches(t) || coverStartLine.matches(t)) break
+            val m = parseQuestionMarker(t)
+            if (m != null && m.number > 5 && i > startIndex) break
+            if (instructionLine.containsMatchIn(t)) return true
+            inspected += 1
+            if (inspected >= 15) break
+        }
+        return false
     }
 
     private fun splitExamPages(text: String): List<ExamPage> {

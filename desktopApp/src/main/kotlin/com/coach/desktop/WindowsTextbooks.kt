@@ -434,7 +434,12 @@ private suspend fun pickReviewedBlocks(owner: java.awt.Frame?): List<Path> = wit
 
 private fun windowsBookController(directory: Path): TextbookController {
     if (LearningJournal.enabled) LearningMigrationBackup.prepare(directory)
-    val library = TextbookLibrary(directory, streamPdfExtras = true, lazyPdfExtras = true)
+    val library = TextbookLibrary(
+        directory,
+        clock = isolatedTodayClock(System.getenv("COACH_URL"), System.getProperty(TODAY_OFFSET_PROPERTY)),
+        streamPdfExtras = true,
+        lazyPdfExtras = true,
+    )
     if (LearningJournal.enabled) LearningJournal.installProfile(library)
     return TextbookController(library)
 }

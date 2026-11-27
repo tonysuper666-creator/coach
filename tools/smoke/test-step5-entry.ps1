@@ -22,11 +22,13 @@
 #  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7；
 #  - 同一帧有两行出处时，要点解析出页码的那一行，不点更靠下的另一页；
 #  - 「讲解」页签认抽屉顶和「批注」同一行的那颗；选中的「提问」被漏识时仍算，正文里的「讲解」不算；
-#  - 跳页框的数字只认紧挨在「前往」左边的那一串，读到截断数字就不是目标页。
+#  - 跳页框的数字只认紧挨在「前往」左边的那一串，读到截断数字就不是目标页；
+#  - 跳页框没确认是目标页就不按回车：点回框里重敲，框收起来先重按 Ctrl+G，四遍都没确认就失败。
 # 函数体从 friend-path-worker.ps1 里按原文截取，屏幕与输入都换成本文件的假实现。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $repo 'tools/smoke/Win-Drive.ps1')
+. (Join-Path $repo 'tools/smoke/Page-Counter.ps1')
 
 $results = New-Object System.Collections.ArrayList
 function Check([string]$name, [bool]$ok, [string]$detail = '') {
@@ -785,6 +787,92 @@ $guessNoOption = @(
     (New-Line '提交' 2020 700 64 24)
 )
 Check 'step6-card-not-ready-without-option' ($null -eq (Find-Step6QuestionCard $guessNoOption 2160 1350 $null)) 'accepted with no option above submit'
+
+# 51. 跳页框放大重认：只要整行是数字的，取最右边那串，坐标按放大倍数换回整帧；光标竖线粘在后面时 Alt 去掉它。
+$cropLines = @(
+    (New-Line '8' 20 40 30 60),
+    (New-Line '154' 120 40 120 64),
+    (New-Line '前往' 300 40 80 60)
+)
+$pick = Select-JumpFieldDigits $cropLines 1900 1280 4
+Check 'jump-crop-picks-rightmost-digits' ([bool]$pick -and $pick.Text -eq '154' -and $pick.X -eq 1945 -and $pick.Y -eq 1298) "text=$($pick.Text) x=$($pick.X) y=$($pick.Y)"
+$caret = Select-JumpFieldDigits @((New-Line '154|' 120 40 140 60)) 1900 1280 4
+Check 'jump-crop-alt-drops-caret' ([bool]$caret -and $caret.Text -eq '1541' -and $caret.Alt -eq '154') "text=$($caret.Text) alt=$($caret.Alt)"
+Check 'jump-crop-null-without-digits' ($null -eq (Select-JumpFieldDigits @((New-Line '前往' 300 40 80 60)) 1900 1280 4)) 'non-digit line accepted'
+Check 'jump-crop-null-when-png-missing' ($null -eq (Read-JumpFieldCrop (Join-Path $PSScriptRoot 'no-such-frame.png') ([pscustomobject]@{ X1 = 2063; X2 = 2098; Y1 = 1300; Y2 = 1320; Y = 1310 }))) 'missing png read'
+
+# 52. 点回跳页框的落点：默认在「前往」左边 56dp；放大重认拿到的框内数字在同一行、左边百来 dp 内才用它。
+$goBox = [pscustomobject]@{ X1 = 2063; X2 = 2098; Y1 = 1300; Y2 = 1320; Y = 1310 }
+$ptDefault = Get-JumpFieldPoint $goBox $null 1.5
+Check 'jump-point-default-left-of-go' ($ptDefault.X -eq 1979 -and $ptDefault.Y -eq 1310) "x=$($ptDefault.X) y=$($ptDefault.Y)"
+$ptField = Get-JumpFieldPoint $goBox ([pscustomobject]@{ X = 1974; Y = 1312 }) 1.5
+Check 'jump-point-uses-field-on-row' ($ptField.X -eq 1974 -and $ptField.Y -eq 1310) "x=$($ptField.X)"
+$ptFar = Get-JumpFieldPoint $goBox ([pscustomobject]@{ X = 1500; Y = 1310 }) 1.5
+$ptOffRow = Get-JumpFieldPoint $goBox ([pscustomobject]@{ X = 1974; Y = 1200 }) 1.5
+$ptRight = Get-JumpFieldPoint $goBox ([pscustomobject]@{ X = 2120; Y = 1310 }) 1.5
+Check 'jump-point-ignores-far-offrow-or-right-field' ($ptFar.X -eq 1979 -and $ptOffRow.X -eq 1979 -and $ptRight.X -eq 1979) "far=$($ptFar.X) off=$($ptOffRow.X) right=$($ptRight.X)"
+
+# 53. 跳页整段（TON-1861 11-27 09:32 那轮）：框里数字一直认不出时绝不按回车，第 2–4 遍先点回框里；
+#     第一遍读到原页 33、点回框里后读到 154 才回车，回车后仍核对底栏页码；框收起来了先重按 Ctrl+G。
+function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
+    $l = Shot $n $tag
+    foreach ($nd in $needles) { if (Find-Text $l $nd) { return , $l } }
+    return $null
+}
+$script:cropQueue = @()
+function Read-JumpFieldCrop([string]$png, $go) {
+    if ($script:cropQueue.Count -eq 0) { return $null }
+    $hit = $script:cropQueue[0]
+    if ($script:cropQueue.Count -gt 1) { $script:cropQueue = @($script:cropQueue[1..($script:cropQueue.Count - 1)]) } else { $script:cropQueue = @() }
+    return $hit
+}
+$script:hud = $null
+function Get-HudCounter([string]$png) { return $script:hud }
+$jumpOpen = @((New-Line '前往' 2063 1300 35 20), (New-Line '第 33 页' 200 1300 80 20))
+$jumpGone = @((New-Line '第 33 页' 200 1300 80 20))
+function Invoke-JumpCase {
+    try { Jump-VerifiedReaderPage 4 154 1080 1200 'initial'; return 'ok' } catch { return "$_" }
+}
+
+$script:screen = $jumpOpen; $script:Last = $jumpOpen; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+$script:sentKeys.Clear(); $script:cropQueue = @(); $script:hud = [pscustomobject]@{ Cur = 33; Total = 620 }
+$unread = Invoke-JumpCase
+$enterCount = @($script:sentKeys | Where-Object { $_ -eq '{ENTER}' }).Count
+Check 'jump-unread-never-presses-enter' ($enterCount -eq 0 -and $unread -like 'STEP_FAILED:*没按回车*') "enter=$enterCount result=$unread"
+Check 'jump-unread-clicks-back-into-field' ($script:clicks.Count -eq 3 -and @($script:clicks | Where-Object { $_ -ne '2007,1310' }).Count -eq 0) "clicks=$($script:clicks -join '|')"
+$typedRounds = @($script:sentKeys | Where-Object { $_ -eq '^a' }).Count
+Check 'jump-unread-retypes-four-times' ($typedRounds -eq 4) "rounds=$typedRounds"
+
+$script:screen = $jumpOpen; $script:Last = $jumpOpen; $script:queue = $null; $script:clicks.Clear()
+$script:sentKeys.Clear(); $script:hud = [pscustomobject]@{ Cur = 154; Total = 620 }
+$script:cropQueue = @(
+    [pscustomobject]@{ Text = '33'; Alt = '33'; X = 1974; Y = 1310; Right = 1990 },
+    [pscustomobject]@{ Text = '154'; Alt = '154'; X = 1974; Y = 1310; Right = 1995 }
+)
+$retyped = Invoke-JumpCase
+$enterAt = [array]::IndexOf(@($script:sentKeys), '{ENTER}')
+$lastDigit = [array]::LastIndexOf(@($script:sentKeys), '4')
+Check 'jump-stale-page-reclicks-then-enters' ($retyped -eq 'ok' -and $script:clicks.Count -eq 1 -and $script:clicks[0] -eq '1974,1310' -and $enterAt -gt $lastDigit) "result=$retyped clicks=$($script:clicks -join '|') keys=$($script:sentKeys -join ',')"
+
+$script:screen = $jumpOpen; $script:Last = $jumpOpen; $script:queue = $null; $script:clicks.Clear()
+$script:sentKeys.Clear(); $script:hud = [pscustomobject]@{ Cur = 33; Total = 620 }
+$script:cropQueue = @([pscustomobject]@{ Text = '154'; Alt = '154'; X = 1974; Y = 1310; Right = 1995 })
+$noJump = Invoke-JumpCase
+Check 'jump-confirmed-still-checks-page-after-enter' ($noJump -like 'STEP_FAILED:*页码没跳到 154*') "result=$noJump"
+
+$script:screen = $jumpOpen; $script:Last = $jumpOpen; $script:clicks.Clear()
+$script:queue = @($jumpOpen, $jumpGone, $jumpOpen, $jumpOpen)
+$script:sentKeys.Clear(); $script:hud = [pscustomobject]@{ Cur = 154; Total = 620 }
+$script:cropQueue = @([pscustomobject]@{ Text = '154'; Alt = '154'; X = 1974; Y = 1310; Right = 1995 })
+$reopened = Invoke-JumpCase
+$ctrlG = @($script:sentKeys | Where-Object { $_ -eq '^g' }).Count
+Check 'jump-collapsed-box-reopens-with-ctrl-g' ($reopened -eq 'ok' -and $ctrlG -eq 2 -and $script:clicks.Count -eq 1 -and $script:clicks[0] -eq '2007,1310') "result=$reopened ctrlG=$ctrlG clicks=$($script:clicks -join '|')"
+
+$script:screen = $jumpOpen; $script:Last = $jumpOpen; $script:queue = $null; $script:clicks.Clear()
+$script:sentKeys.Clear(); $script:hud = [pscustomobject]@{ Cur = 154; Total = 620 }
+$script:cropQueue = @([pscustomobject]@{ Text = '1541'; Alt = '154'; X = 1974; Y = 1310; Right = 1999 })
+$caretOk = Invoke-JumpCase
+Check 'jump-caret-glued-digits-accepted-first-try' ($caretOk -eq 'ok' -and $script:clicks.Count -eq 0) "result=$caretOk clicks=$($script:clicks.Count)"
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

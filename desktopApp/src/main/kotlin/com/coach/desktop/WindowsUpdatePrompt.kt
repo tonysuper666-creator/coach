@@ -132,7 +132,18 @@ internal class UpdateSession(
         scope.launch {
             val status = try {
                 if (!save()) UPDATE_NOT_SAVED
-                else withContext(Dispatchers.IO) { WindowsRollback.rollback(libraryDir, updatesDir) }
+                else {
+                    if (!Files.isRegularFile(updatesDir.resolve("previous.msi"))) {
+                        rollbackStatus = "正在下载上一版…"
+                    }
+                    withContext(Dispatchers.IO) {
+                        WindowsRollback.rollback(libraryDir, updatesDir, acquirePrevious = { dir ->
+                            val update = WindowsUpdate.installed() ?: return@rollback null
+                            val release = update.previousRelease(update.readManifest()) ?: return@rollback null
+                            update.fetchVerified(release, dir) to release.version
+                        })
+                    }
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {

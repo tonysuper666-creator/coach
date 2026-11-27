@@ -72,6 +72,23 @@ class UpdateManifest(unittest.TestCase):
         self.assertNotEqual(0, refused.returncode)
         self.assertIn("older", refused.stderr)
 
+    def test_newest_older_installer_is_written_without_a_flag(self):
+        self.stage("LearningCoach-1.0.0-x64.msi", b"oldest")
+        self.stage("LearningCoach-1.1.0-x64.msi", b"previous-x64")
+        self.stage("LearningCoach-1.1.0-arm64.msi", b"previous-arm")
+        self.stage("LearningCoach-1.2.0-x64.msi", b"current")
+        done = run(self.root, "1.2.0")
+        self.assertEqual(0, done.returncode, done.stderr)
+        previous = self.manifest()["previous"]
+        by_arch = {entry["arch"]: entry for entry in previous}
+        self.assertEqual({"x64", "arm64"}, set(by_arch))
+        self.assertEqual("1.1.0", by_arch["x64"]["version"])
+        self.assertEqual("LearningCoach-1.1.0-x64.msi", by_arch["x64"]["file"])
+        self.assertEqual(len(b"previous-x64"), by_arch["x64"]["size"])
+        self.assertRegex(by_arch["x64"]["sha256"], r"^[a-f0-9]{64}$")
+        self.assertEqual("1.1.0", by_arch["arm64"]["version"])
+        self.assertNotIn("1.0.0", [entry["version"] for entry in previous])
+
     def test_rejects_a_version_that_cannot_be_published_on_both_platforms(self):
         self.stage("LearningCoach-256.0.0-android.apk", b"apk")
         done = run(self.root, "256.0.0", "--version-code", "3")

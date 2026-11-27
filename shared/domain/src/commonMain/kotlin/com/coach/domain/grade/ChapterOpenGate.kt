@@ -65,6 +65,7 @@ data class ChapterOpenHistory(
 object ChapterOpenGate {
     const val MIN_POINTS: Int = 3
     const val MAX_POINTS: Int = 6
+    const val MAX_CLAIM_CHARS: Int = 160
     const val NOT_READ: String = "NOT_READ"
     const val READ_NOT_UNDERSTOOD: String = "READ_NOT_UNDERSTOOD"
     const val CONCEPT_CONFUSION: String = "CONCEPT_CONFUSION"
@@ -123,16 +124,16 @@ object ChapterOpenGate {
 
     fun copiesSource(claim: String, source: String): Boolean {
         if (claim.isBlank() || source.isBlank()) return false
-        val compactClaim = claim.replace(Regex("\\s+"), "")
-        val compactSource = source.replace(Regex("\\s+"), "")
-        if (compactClaim.length >= 12 && compactSource.length >= 12) {
-            for (i in 0..compactSource.length - 12) {
-                if (compactSource.substring(i, i + 12) in compactClaim) return true
+        val claimHan = claim.filter { it.code in 0x4E00..0x9FFF }
+        val sourceHan = source.filter { it.code in 0x4E00..0x9FFF }
+        if (claimHan.length >= 12 && sourceHan.length >= 12) {
+            for (i in 0..sourceHan.length - 12) {
+                if (sourceHan.substring(i, i + 12) in claimHan) return true
             }
         }
         val words = source.split(Regex("[^A-Za-z0-9]+")).filter { it.length > 1 }
         if (words.size >= 8) {
-            val lower = compactClaim.lowercase()
+            val lower = claim.replace(Regex("\\s+"), "").lowercase()
             for (i in 0..words.size - 8) {
                 val phrase = words.subList(i, i + 8).joinToString("").lowercase()
                 if (phrase.isNotEmpty() && phrase in lower) return true
@@ -155,20 +156,18 @@ object ChapterOpenGate {
             val anchor = point.quoteAnchor.trim()
             val block = byId[point.blockId.trim()] ?: continue
             if (id.isBlank() || id in seen) continue
-            if (claim.length !in 4..80) continue
-            if (anchor.length !in 4..40) continue
+            if (claim.length !in 4..MAX_CLAIM_CHARS) continue
             if (copiesSource(claim, block.text)) continue
-            val start = block.text.indexOf(anchor)
-            if (start < 0) continue
+            val placed = placeAnchor(anchor, block.text) ?: continue
             seen += id
             accepted += ChapterOpenAcceptedPoint(
                 id = id,
                 claim = claim,
                 blockId = block.id,
                 page = block.page,
-                quoteAnchor = anchor,
-                startUtf16 = start,
-                endUtf16 = start + anchor.length,
+                quoteAnchor = placed.first,
+                startUtf16 = placed.second,
+                endUtf16 = placed.second + placed.first.length,
             )
         }
         return accepted
@@ -225,18 +224,52 @@ object ChapterOpenGate {
     /**
      * The sentence a scoring point hangs on. [anchor] must occur in [pageText].
      * Empty when the anchor is missing, so callers can leave the lexical gate in place.
+     * English periods end a sentence unless they sit between digits. A long sentence
+     * is trimmed to 180 characters without dropping [anchor].
      */
     fun sentenceAround(pageText: String, anchor: String): String {
         if (pageText.isBlank() || anchor.isBlank()) return ""
         val start = pageText.indexOf(anchor)
         if (start < 0) return ""
-        val breaks = setOf('。', '！', '？', '\n', '!', '?')
         var left = start
-        while (left > 0 && pageText[left - 1] !in breaks) left--
+        while (left > 0 && !isSentenceBreak(pageText, left - 1)) left--
         var right = start + anchor.length
-        while (right < pageText.length && pageText[right] !in breaks) right++
-        if (right < pageText.length && pageText[right] in breaks && pageText[right] != '\n') right++
-        return pageText.substring(left, right).trim().take(180)
+        while (right < pageText.length && !isSentenceBreak(pageText, right)) right++
+        if (right < pageText.length && isSentenceBreak(pageText, right) && pageText[right] != '\n') right++
+        val raw = pageText.substring(left, right).trim()
+        if (raw.length <= 180) return raw
+        val anchorAt = raw.indexOf(anchor)
+        if (anchorAt < 0) return raw.take(180)
+        val winStart = (anchorAt + anchor.length - 180).coerceAtLeast(0).coerceAtMost(anchorAt)
+        val winEnd = (winStart + 180).coerceAtMost(raw.length)
+        return raw.substring(winStart, winEnd).trim()
+    }
+
+    private fun isSentenceBreak(text: String, index: Int): Boolean {
+        if (index !in text.indices) return false
+        val ch = text[index]
+        if (ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '!' || ch == '?') return true
+        if (ch != '.') return false
+        val prev = text.getOrNull(index - 1)
+        val next = text.getOrNull(index + 1)
+        if (prev != null && prev.isDigit() && next != null && next.isDigit()) return false
+        return next == null || next.isWhitespace() || next in "\"'”’)]"
+    }
+
+    private fun placeAnchor(anchor: String, text: String): Pair<String, Int>? {
+        val raw = anchor.trim()
+        if (raw.length < 4 || text.isEmpty()) return null
+        if (raw.length <= 40) {
+            val at = text.indexOf(raw)
+            return if (at >= 0) raw to at else null
+        }
+        for (len in 40 downTo 4) {
+            val slice = raw.substring(0, len).trimEnd()
+            if (slice.length < 4) continue
+            val at = text.indexOf(slice)
+            if (at >= 0) return slice to at
+        }
+        return null
     }
 
     /**

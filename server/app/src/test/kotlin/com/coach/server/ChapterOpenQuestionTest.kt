@@ -28,14 +28,14 @@ class ChapterOpenQuestionTest {
     private val report = mutableListOf<String>()
 
     @Test
-    fun ownerChapterOpenUsesHaikuBatchAndPracticeGradeDoesNot() {
+    fun ownerChapterOpenUsesRealtimeHaikuAndPracticeGradeDoesNot() {
         val chapter = planPracticeCall(
             PracticeGradeLimits.TASK_CHAPTER_OPEN,
             friend = null,
             backgroundBatch = false,
             defaultModel = PracticeGradeLimits.PINNED_GRADE_MODEL,
         )
-        assertTrue(chapter.useBatch)
+        assertFalse(chapter.useBatch)
         assertEquals(BridgeClient.HAIKU, chapter.model)
         assertEquals(PracticeGradeLimits.TASK_CHAPTER_OPEN, chapter.task)
 
@@ -68,6 +68,21 @@ class ChapterOpenQuestionTest {
         val anchors = listOf("入夜后改道", "灯塔仍留", "供船识别")
         assertTrue(ChapterOpenGate.copiesSource(copied, source))
         fresh.forEach { assertFalse(ChapterOpenGate.copiesSource(it, source)) }
+        val englishSource = "Ships can see the channel after the lamp is lit on the old pier."
+        val englishClaim = "After dark a reader can still see the channel from the water."
+        assertFalse(ChapterOpenGate.copiesSource(englishClaim, englishSource))
+        assertTrue(englishClaim.length > 40)
+        val copiedWords = "Ships can see the channel after the lamp is lit"
+        assertTrue(ChapterOpenGate.copiesSource(copiedWords, englishSource))
+        val longClaim = "The lamp on the pier still lets a ship find the channel once the sky is dark and the water is calm enough to steer."
+        assertTrue(longClaim.length in 81..ChapterOpenGate.MAX_CLAIM_CHARS)
+        val longAnchor = "see the channel after the lamp is lit on the old pier tonight"
+        val kept = ChapterOpenGate.acceptPoints(
+            listOf(com.coach.domain.grade.ChapterOpenRawPoint("P9", longClaim, "b1", longAnchor)),
+            listOf(ChapterOpenSourceBlock("b1", 3, englishSource)),
+        )
+        assertEquals(listOf("see the channel after the lamp is lit on"), kept.map { it.quoteAnchor })
+        assertEquals(listOf(longClaim), kept.map { it.claim })
 
         var calls = 0
         val transport = object : BatchAiTransport {
@@ -281,6 +296,64 @@ class ChapterOpenQuestionTest {
         assertEquals(ChapterOpenGate.READ_NOT_UNDERSTOOD, touched.missCause)
     }
 
+    @Test
+    fun gradingUsesThePageSentenceWhenTheClientExcerptMissesTheAnchor() = runBlocking {
+        val page = "The fog bell stays on the old pier. A long blast marks the channel at night. Ships keep to the north side."
+        val anchor = "long blast"
+        val wrong = "The fog bell stays on the old pier."
+        assertFalse(anchor in wrong)
+        val prompts = mutableListOf<String>()
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String,
+                userPrompt: String,
+                task: String,
+                batchKey: String,
+                maxTokens: Int,
+            ): BatchTransportReply {
+                prompts += userPrompt
+                val body = buildJsonObject {
+                    put("items", buildJsonArray {
+                        add(buildJsonObject {
+                            put("cid", "P1")
+                            put("verdict", "FULL")
+                            put("awardedMarks", 1.0)
+                            put("studentQuote", "long blast")
+                            put("feedbackNoteZh", "这句的意思已经说全。")
+                            put("pdfPage", 2)
+                            put("quoteAnchor", anchor)
+                        })
+                    })
+                }
+                return reply(body.toString())
+            }
+        }
+        val response = PracticeGradeAndDiagnoseService(transport).process(
+            PracticeGradeAndDiagnoseRequest(
+                mode = "CHAPTER_OPEN",
+                bookId = "pier",
+                chapterId = "night",
+                questionId = "pier-night",
+                questionStem = "用自己的话讲清这一章。",
+                studentAnswer = "A long blast at night shows the channel.",
+                rubricCriteria = listOf(
+                    PracticeRubricCriterionInput(
+                        cid = "P1",
+                        slotLabel = "夜里用长声标出航道",
+                        maxMarks = 1.0,
+                        pdfPage = 2,
+                        quoteAnchor = anchor,
+                        sourceExcerpt = wrong,
+                    ),
+                ),
+                sourcePages = listOf(PracticeSourcePageInput(2, page)),
+            ),
+        )
+        val excerpt = Regex(""""courseDefinitionExcerpt":"([^"]+)"""").find(prompts.single())?.groupValues?.get(1)
+        assertEquals("A long blast marks the channel at night.", excerpt)
+        assertEquals(PracticeRubricVerdict.FULL, response.rubricItems.single().verdict)
+    }
+
     private fun causeOf(
         points: List<ChapterOpenPointRef>,
         answer: String,
@@ -310,7 +383,7 @@ class ChapterOpenQuestionTest {
         questionStem = "用自己的话讲清这一章。",
         studentAnswer = answer,
         rubricCriteria = claims.mapIndexed { index, claim ->
-            PracticeRubricCriterionInput("P${index + 1}", claim, 1.0, 2, "位置标记")
+            PracticeRubricCriterionInput("P${index + 1}", claim, 1.0, 2, "找不到锚")
         },
         sourcePages = listOf(PracticeSourcePageInput(2, sourcePage)),
         generateVariant = true,

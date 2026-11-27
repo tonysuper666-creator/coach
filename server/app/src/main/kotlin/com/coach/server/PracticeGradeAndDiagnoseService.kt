@@ -72,7 +72,11 @@ internal data class PracticeCallPlan(
     val task: String,
 )
 
-/** Owner chapter-open generation is Haiku 5.5 Batch. Other practice calls keep their existing model. */
+/**
+ * Chapter-open generation is synchronous Haiku 5.5. The reader waits at most 180 seconds,
+ * and the durable batch poll cannot return inside that window. Other practice calls keep
+ * their existing model, and friends never enter a batch.
+ */
 internal fun planPracticeCall(
     task: String,
     friend: String?,
@@ -80,7 +84,7 @@ internal fun planPracticeCall(
     defaultModel: String,
 ): PracticeCallPlan {
     val chapterOpen = task == PracticeGradeLimits.TASK_CHAPTER_OPEN
-    val useBatch = (backgroundBatch || chapterOpen) && friend == null
+    val useBatch = backgroundBatch && !chapterOpen && friend == null
     val model = when {
         chapterOpen -> BridgeClient.HAIKU
         friend != null -> BridgeClient.CLAUDE
@@ -1100,7 +1104,12 @@ class PracticeGradeAndDiagnoseService(
                     if (c.maxMarks > 0.0) put("maxMarks", c.maxMarks)
                     if (c.pdfPage > 0) put("pdfPage", c.pdfPage)
                     if (c.quoteAnchor.isNotBlank()) put("quoteAnchor", c.quoteAnchor)
-                    if (c.sourceExcerpt.isNotBlank()) put("courseDefinitionExcerpt", c.sourceExcerpt.take(800))
+                    val excerpt = if (request.mode.equals("CHAPTER_OPEN", ignoreCase = true)) {
+                        hangingSentence(c, request.sourcePages)
+                    } else {
+                        c.sourceExcerpt
+                    }
+                    if (excerpt.isNotBlank()) put("courseDefinitionExcerpt", excerpt.take(800))
                 })
             }
         }
@@ -1463,6 +1472,18 @@ class PracticeGradeAndDiagnoseService(
         )
     }
 
+    private fun hangingSentence(
+        criterion: PracticeRubricCriterionInput,
+        pages: List<PracticeSourcePageInput>,
+    ): String {
+        val page = pages.firstOrNull { it.pdfPage == criterion.pdfPage }?.text.orEmpty()
+        val cut = ChapterOpenGate.sentenceAround(page, criterion.quoteAnchor)
+        if (cut.isNotBlank() && (criterion.quoteAnchor.isBlank() || criterion.quoteAnchor in cut)) return cut
+        val given = criterion.sourceExcerpt.trim()
+        if (criterion.quoteAnchor.isNotBlank() && criterion.quoteAnchor in given) return given
+        return cut.ifBlank { given }
+    }
+
     private fun applyChapterOpenGate(
         request: PracticeGradeAndDiagnoseRequest,
         items: List<GradedRubricItemResult>,
@@ -1470,7 +1491,7 @@ class PracticeGradeAndDiagnoseService(
         val judgements = ChapterOpenGate.judge(
             answer = request.studentAnswer,
             points = request.rubricCriteria.map {
-                ChapterOpenPointRef(it.cid, it.slotLabel, it.sourceExcerpt.trim())
+                ChapterOpenPointRef(it.cid, it.slotLabel, hangingSentence(it, request.sourcePages))
             },
             drafts = items.map { ChapterOpenDraft(it.cid, it.verdict.name, it.feedbackNoteZh) },
         ).associateBy { it.id }
@@ -1533,7 +1554,8 @@ class PracticeGradeAndDiagnoseService(
         val user = buildString {
             if (repairNote.isNotBlank()) append(repairNote).append("\n\n")
             append("Chapter blocks. Cite a blockId and copy a short quoteAnchor from that block. ")
-            append("The claim must say what the student should explain, and must not contain 12 consecutive characters from the block.\n")
+            append("The claim must say what the student should explain. ")
+            append("Do not paste 12 consecutive Chinese characters or 8 consecutive English words from the block.\n")
             for (block in blocks) {
                 append("[${block.id} p.${block.page}]\n")
                 append(block.text)
@@ -1570,8 +1592,8 @@ private const val CHAPTER_OPEN_SYSTEM: String = """
 You write one open question for a chapter the student has just read.
 Rules:
 1. One question that asks the student to explain the chapter in their own words.
-2. Four to six scoring points. Each point's claim is what a good answer would say, written freshly. Do not paste 12 or more consecutive characters from any block into a claim.
-3. Each point cites one blockId and a quoteAnchor of 4 to 18 characters copied exactly from that block, used only as a location.
+2. Four to six scoring points. Each point's claim is what a good answer would say, written freshly, at most 160 characters. Do not paste 12 or more consecutive Chinese characters, or 8 or more consecutive English words, from any block into a claim.
+3. Each point cites one blockId and a quoteAnchor of 4 to 40 characters copied exactly from that block, used only as a location.
 4. Do not write a model answer, and do not include a rewrite field.
 Output one JSON object only.
 """

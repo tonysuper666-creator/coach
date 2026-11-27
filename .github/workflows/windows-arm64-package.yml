@@ -187,7 +187,7 @@ jobs:
           [[ -f "$MSI_NAME" ]] || { echo "missing $MSI_NAME" >&2; exit 1; }
           key="$RUNNER_TEMP/candidate.key"
           # 64 hex chars, no newline: -pass file: reads only the first line, and a newline inside random bytes would truncate the passphrase
-          openssl rand -hex 32 | tr -d '\n' > "$key"
+          openssl rand -hex 32 | tr -d '\r\n' > "$key"
           [[ $(wc -c < "$key") -eq 64 ]] || { echo "bad key length" >&2; exit 1; }
           openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$MSI_NAME" -out "$MSI_NAME.enc" -pass "file:$key"
           openssl pkeyutl -encrypt -pubin -inkey ../tools/release/arm64-candidate.pub.pem \

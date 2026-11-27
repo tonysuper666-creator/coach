@@ -26,6 +26,7 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint gaFlags);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
@@ -237,6 +238,18 @@ function Test-CheckoutCommandLine([string]$CommandLine, [string]$Repo) {
     return (Test-CommandLineUnder $CommandLine ($root + '/desktopApp/build'))
 }
 function Get-ClientPids([switch]$Mine) {
+    if ($Mine -and $script:InstalledClientPid) {
+        if ((Get-TrackedPidState $script:InstalledClientPid $script:InstalledClientStartTicks) -ne 'alive') { return }
+        # The installer launcher can delegate the window to a child with the same EXE.
+        $script:InstalledClientPid
+        Get-CimInstance Win32_Process -Filter "ParentProcessId=$($script:InstalledClientPid)" |
+            Where-Object { $_.ExecutablePath -eq $script:InstalledClientPath } |
+            ForEach-Object { [int]$_.ProcessId }
+        return
+    }
+    if (-not $Mine) {
+        Get-Process -Name LearningCoach -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }
+    }
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
         ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and
             (-not $Mine -or -not $script:RepoMarker -or
@@ -253,15 +266,21 @@ function Find-CoachWindow {
         $mine = @($mine | Where-Object { $_ -eq [int]$control.pid })
     }
     if (-not $mine) { return $false }
-    $script:AppPid = $mine[0]
-    $proc = Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue
-    $script:AppStartTicks = Get-TrackedProcessStartTicks $proc
     [WD]::EnumWindows({ param($x, $l)
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
-        if ($p -eq $script:AppPid -and [WD]::IsWindowVisible($x)) {
+        if ($p -in $mine -and [WD]::IsWindowVisible($x)) {
             $sb = New-Object Text.StringBuilder 256; [WD]::GetWindowText($x, $sb, 256) | Out-Null
-            if (@('Coach', 'LearningCoach') -contains $sb.ToString()) { $script:Win = $x } }   # 产品改名后窗口标题是 LearningCoach；仍只认本次启动的进程
+            if (@('Coach', 'LearningCoach') -contains $sb.ToString()) {
+                $script:Win = $x
+                $script:AppPid = $p
+                return $false
+            }
+        }
         return $true }, [IntPtr]::Zero) | Out-Null
+    if ($script:Win -ne [IntPtr]::Zero) {
+        $proc = Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue
+        $script:AppStartTicks = Get-TrackedProcessStartTicks $proc
+    }
     return ($script:Win -ne [IntPtr]::Zero)
 }
 function Get-TrackedProcessStartTicks($Process) {

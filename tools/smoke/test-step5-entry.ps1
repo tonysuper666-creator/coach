@@ -18,7 +18,7 @@
 #  - 服务端拒答「回答缺少可核对的页码依据，暂时无法确认」要认（含 OCR 错字「依框，暫时无氵去确认」），
 #    带「再试一次」就先重放一次，第二次还拒就带着原话失败，不干等满 150 秒；
 #  - 追问找标题时见过「思考」就不再往回滚（那会把刚追加的回答推出视野）；
-#  - 第 2 步要见到首页书卡才算过：阅读器底栏读出页号、退回首页却没读到「读到第 / 上次停在」就明确失败；
+#  - 第 2 步要在首页核对目标书名及同卡进度，另一本书的进度或阅读器底栏都不能替代；
 #  - 第 7 步出处那行解析不出页码时直接失败，不许跳过跳页断言后还 Pass 7；
 #  - 同一帧有两行出处时，要点解析出页码的那一行，不点更靠下的另一页；
 #  - 「讲解」页签认抽屉顶和「批注」同一行的那颗；选中的「提问」被漏识时仍算，正文里的「讲解」不算；
@@ -468,6 +468,38 @@ $v2none = Resolve-Step2HomeVerdict $null $null
 Check 'step2-passes-only-with-home-card' ((-not $v2card.Fail) -and $v2card.Pass -match '书在首页上') "fail=$($v2card.Fail)"
 Check 'step2-fails-when-home-card-missing' ([bool]$v2reader.Fail -and -not $v2reader.Pass) "fail=$($v2reader.Fail)"
 Check 'step2-fails-when-nothing-read' ([bool]$v2none.Fail) "fail=$($v2none.Fail)"
+
+$homeHeader = @((New-Line 'LearningCoach' 25 10 144 18), (New-Line 'LearningCoach' 80 68 144 22), (New-Line '设置' 920 68 55 22))
+$booklist = @($homeHeader + @(
+    (New-Line '继续' 820 235 50 22),
+    (New-Line '模拟书单' 180 228 90 24),
+    (New-Line '书单' 180 261 70 20),
+    (New-Line 'HeaIth Economics' 180 441 240 26),
+    (New-Line '620 页 · 读到第 154 页' 182 474 240 20)
+))
+$bookHit = Find-Step2HomeBook $booklist 'health-economics'
+Check 'step2-booklist-opens-target-card-not-collection-continue' ($bookHit -and $bookHit.Click.Y -gt 400)
+$focusBook = @($homeHeader + @(
+    (New-Line 'Health Economics' 180 226 240 26),
+    (New-Line 'Health Economics · 第 154 页' 180 261 280 20),
+    (New-Line '继续' 820 247 50 22)
+))
+$focusHit = Find-Step2HomeBook $focusBook 'health-economics'
+Check 'step2-focus-book-matches-its-own-continue' ($focusHit -and $focusHit.Click.X -gt 800)
+$combinedFocus = @($homeHeader + @(
+    (New-Line 'HeaIth Economics · 练习 · 第巧4页' 180 261 390 20),
+    (New-Line '继续' 820 256 50 22)
+))
+Check 'step2-focus-book-accepts-combined-title-and-progress' ([bool](Find-Step2HomeBook $combinedFocus 'health-economics'))
+Check 'step2-focus-without-continue-is-unverified' (-not (Find-Step2HomeBook $combinedFocus[0..3] 'health-economics'))
+$cloudBook = @($homeHeader + @(
+    (New-Line 'Health Economics' 180 226 240 24),
+    (New-Line 'PDF · 云端书架 · 点击下载阅读' 180 255 280 20),
+    (New-Line '其他书' 180 313 90 24),
+    (New-Line '20 页 · 读到第 7 页' 180 342 240 20)
+))
+Check 'step2-rejects-cloud-card-and-unrelated-progress' (-not (Find-Step2HomeBook $cloudBook 'health-economics'))
+Check 'step2-rejects-book-and-progress-outside-home' (-not (Find-Step2HomeBook $booklist[3..7] 'health-economics'))
 
 # 39. 第 7 步：出处那行没解析出页码时不能跳过跳页断言（旧逻辑会一路走到 Pass 7）。
 $citeOcr = New-Line '出 处 · 第 1 5 0 页' 480 600 300 30

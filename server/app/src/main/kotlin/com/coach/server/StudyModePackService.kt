@@ -269,6 +269,7 @@ class HaikuStudyModeStreamTransport(
         return when (result) {
             is BridgeResult.Failure -> {
                 result.rejectIfFreeGrantExhausted()
+                result.rejectIfBusy()
                 throw IllegalStateException("学法流式生成失败：${result.reason}")
             }
             is BridgeResult.Success -> {
@@ -324,6 +325,7 @@ class HaikuStudyModeBatchTransport(
                 return when (result) {
                     is BridgeResult.Failure -> {
                         result.rejectIfFreeGrantExhausted()
+                        result.rejectIfBusy()
                         throw IllegalStateException("全书地图批处理失败：${result.reason}")
                     }
                     is BridgeResult.Success -> StudyModeTransportReply(

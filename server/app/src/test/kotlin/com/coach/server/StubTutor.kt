@@ -60,7 +60,9 @@ class StubTutor : AutoCloseable {
     fun httpError(status: Int) { replies.addLast(Triple("{}",-1L,status)) }
 
     /** A non-stream reply whose terminal frame failed with [reason] (for example the exhausted free grant). */
-    fun failedCompletion(reason: String) { replies.addLast(Triple(terminal("failed", reason).removePrefix("data: ").trim(), -1L, 200)) }
+    fun failedCompletion(reason: String, retryAfterSec: Int? = null) {
+        replies.addLast(Triple(terminal("failed", reason, retryAfterSec).removePrefix("data: ").trim(), -1L, 200))
+    }
 
     fun rateLimit() { replies.addLast(Triple("""{"error":{"code":"rate_limit_error","message":"429 Too many requests"}}""", -1L, 429)) }
 

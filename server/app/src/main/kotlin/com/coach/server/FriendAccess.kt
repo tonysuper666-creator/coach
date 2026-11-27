@@ -35,6 +35,13 @@ internal fun BridgeResult.Failure.rejectIfFreeGrantExhausted() {
     if (freeGrantExhausted(terminal?.reason)) throw FriendServiceError(FREE_GRANT_EXHAUSTED)
 }
 
+/** A failed call the bridge marked "retry shortly" (Coach's share briefly held by other calls, or an upstream
+ * rate limit) becomes the same 503 with `retryAfterSec` that every entry point answers with, so clients wait and
+ * retry instead of showing a generic failure. */
+internal fun BridgeResult.Failure.rejectIfBusy() {
+    terminal?.retryAfterSec?.takeIf { it > 0 }?.let { throw FriendServiceError("unavailable", it) }
+}
+
 /** `runCatching` for optional model calls (repairs, extra batches): other failures still degrade quietly,
  * the exhausted free grant never does. */
 internal inline fun <T> modelCatching(block: () -> T): Result<T> = try {

@@ -50,6 +50,22 @@ class FreeGrantExhaustionTest {
         exhausted { runBlocking { HaikuPinnedBridgeTransport(bridge).generateSection("s", "u", "practice_grade", "k", 512) } }
     }
 
+    private fun busy(block: () -> Unit) {
+        val error = assertFailsWith<FriendServiceError> { block() }
+        assertEquals("unavailable", error.code)
+        assertEquals(503, error.status.value)
+        assertEquals(5, error.body["retryAfterSec"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test fun studyModeTransportsCarryTheBridgesRetryHintInsteadOfAGenericFailure() = StubTutor().use { stub ->
+        val bridge = BridgeClient(BridgeConfig(baseUrl = stub.baseUrl))
+        // 排队超时：桥回 unavailable + retry_after_sec 5（朋友），owner 是 reservations_busy + 5。
+        stub.stream(1, StubTutor.terminal("failed", "unavailable", retryAfterSec = 5), StubTutor.DONE)
+        busy { HaikuStudyModeStreamTransport(bridge).streamGenerate("s", "u", 512, null, null) { _, _ -> } }
+        stub.failedCompletion("reservations_busy", retryAfterSec = 5)
+        busy { HaikuStudyModeBatchTransport(bridge).complete("BOOK_MAP_BATCH_CHUNK", "k", "s", "u", 1024, false, null, null) }
+    }
+
     @Test fun fallbackWrappersAndOptionalCallsNeverSwallowTheExhaustedGrant() {
         val refusing = object : BatchAiTransport {
             override suspend fun generateSection(systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int): BatchTransportReply =
@@ -62,7 +78,38 @@ class FreeGrantExhaustionTest {
         assertTrue(modelCatching<Unit> { throw FriendServiceError("unavailable") }.isFailure)
     }
 
-    @Test fun studyModeAndBookMapRoutesAnswerWith429AndTheSentenceIncludingMidStream() = runBlocking(Dispatchers.IO) {
+    @Test fun studyModeAndBookMapRoutesAnswerWith429AndTheSentenceIncludingMidStream() =
+        withStudyModeRoutes(FriendServiceError(FREE_GRANT_EXHAUSTED)) { plain, stream, batch ->
+            assertEquals(429, plain.statusCode())
+            val plainBody = LedgerJson.parseToJsonElement(plain.body()).jsonObject
+            assertEquals(FREE_GRANT_EXHAUSTED, plainBody["code"]!!.jsonPrimitive.content)
+            assertEquals("这个月的免费额度用完了", plainBody["error"]!!.jsonPrimitive.content)
+            assertEquals(200, stream.statusCode())
+            assertTrue("event: error" in stream.body(), stream.body())
+            assertTrue("\"code\":\"free_grant_exhausted\"" in stream.body(), stream.body())
+            assertTrue("这个月的免费额度用完了" in stream.body(), stream.body())
+            assertEquals(429, batch.statusCode())
+            assertEquals(FREE_GRANT_EXHAUSTED, LedgerJson.parseToJsonElement(batch.body()).jsonObject["code"]!!.jsonPrimitive.content)
+        }
+
+    @Test fun studyModeAndBookMapRoutesAnswerBusyWith503AndRetryAfterIncludingMidStream() =
+        withStudyModeRoutes(FriendServiceError("unavailable", 5)) { plain, stream, batch ->
+            for (response in listOf(plain, batch)) {
+                assertEquals(503, response.statusCode())
+                val body = LedgerJson.parseToJsonElement(response.body()).jsonObject
+                assertEquals("unavailable", body["code"]!!.jsonPrimitive.content)
+                assertEquals(5, body["retryAfterSec"]!!.jsonPrimitive.content.toInt())
+            }
+            assertEquals(200, stream.statusCode())
+            assertTrue("event: error" in stream.body(), stream.body())
+            assertTrue("\"code\":\"unavailable\"" in stream.body(), stream.body())
+            assertTrue("\"retryAfterSec\":5" in stream.body(), stream.body())
+        }
+
+    private fun withStudyModeRoutes(
+        refusal: FriendServiceError,
+        check: (HttpResponse<String>, HttpResponse<String>, HttpResponse<String>) -> Unit,
+    ): Unit = runBlocking(Dispatchers.IO) {
         val dir = Files.createTempDirectory("free-grant-study-")
         try {
             val store = LedgerStore(dir)
@@ -71,11 +118,11 @@ class FreeGrantExhaustionTest {
             val actor = LedgerActor(this, store)
             val refusingStream = object : StudyModeStreamTransport {
                 override fun streamGenerate(systemPrompt: String, userPrompt: String, maxTokens: Int, friend: String?, device: String?,
-                    onDelta: (String, Long) -> Unit): StudyModeTransportReply = throw FriendServiceError(FREE_GRANT_EXHAUSTED)
+                    onDelta: (String, Long) -> Unit): StudyModeTransportReply = throw refusal
             }
             val refusingBatch = object : StudyModeBatchTransport {
                 override fun complete(task: String, jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int,
-                    useBatchApi: Boolean, friend: String?, device: String?): StudyModeTransportReply = throw FriendServiceError(FREE_GRANT_EXHAUSTED)
+                    useBatchApi: Boolean, friend: String?, device: String?): StudyModeTransportReply = throw refusal
             }
             val service = StudyModePackService(refusingStream, refusingBatch)
             val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
@@ -98,23 +145,12 @@ class FreeGrantExhaustionTest {
             }
             try {
                 val plain = post("/api/books/he-1/modes/BOOK_MAP", buildJsonObject { mode.forEach { (k, v) -> put(k, v) }; put("stream", false) }.toString())
-                assertEquals(429, plain.statusCode())
-                val plainBody = LedgerJson.parseToJsonElement(plain.body()).jsonObject
-                assertEquals(FREE_GRANT_EXHAUSTED, plainBody["code"]!!.jsonPrimitive.content)
-                assertEquals("这个月的免费额度用完了", plainBody["error"]!!.jsonPrimitive.content)
-
                 val stream = post("/api/books/he-1/modes/BOOK_MAP", buildJsonObject { mode.forEach { (k, v) -> put(k, v) }; put("stream", true) }.toString(), sse = true)
-                assertEquals(200, stream.statusCode())
-                assertTrue("event: error" in stream.body(), stream.body())
-                assertTrue("\"code\":\"free_grant_exhausted\"" in stream.body(), stream.body())
-                assertTrue("这个月的免费额度用完了" in stream.body(), stream.body())
-
                 val batch = post("/api/books/he-1/book-map/batch", buildJsonObject {
                     put("bookTitle", "Health Economics"); put("explainLang", "BILINGUAL"); put("useBatchApi", true)
                     put("chapters", buildJsonArray { add(buildJsonObject { put("chapterNum", 8); put("chapterTitle", "RAND"); put("pages", page) }) })
                 }.toString())
-                assertEquals(429, batch.statusCode())
-                assertEquals(FREE_GRANT_EXHAUSTED, LedgerJson.parseToJsonElement(batch.body()).jsonObject["code"]!!.jsonPrimitive.content)
+                check(plain, stream, batch)
             } finally {
                 server.stop(100, 500)
                 actor.close()

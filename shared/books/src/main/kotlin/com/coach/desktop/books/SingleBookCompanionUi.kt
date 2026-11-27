@@ -226,7 +226,7 @@ internal fun SingleBookCompanionPanel(
                 StudyModeWireBuilder.buildModeRequestJson(library, book, companionGroup, chapterNum, studyPreference)
             }
             modeSourcePages = wire.getValue("pages").jsonArray.map { it.jsonObject.getValue("pdfPage").jsonPrimitive.int }
-            val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire) { chars, _, delta ->
+            val res = explainer.fetchStudyModePack(book.id, studyPreference.mode.name, wire, onBusy = { modeError = it }) { chars, _, delta ->
                 modeStreamingChars = maxOf(modeStreamingChars, chars)
                 if (delta.isNotEmpty()) {
                     modeStreamingText = (modeStreamingText + delta).takeLast(4000)
@@ -272,7 +272,7 @@ internal fun SingleBookCompanionPanel(
                 val wire = withContext(Dispatchers.IO) {
                     StudyModeWireBuilder.buildBookMapBatchRequestJson(library, book, studyPreference)
                 }
-                val res = explainer.fetchBookMapBatch(book.id, wire)
+                val res = explainer.fetchBookMapBatch(book.id, wire, onBusy = { modeError = it })
                 val body = res.body
                 if (body != null) {
                     withContext(Dispatchers.IO) {

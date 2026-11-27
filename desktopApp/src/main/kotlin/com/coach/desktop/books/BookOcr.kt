@@ -58,6 +58,7 @@ internal object BundledBookOcr : BookOcr {
         fun TessBaseAPISetSourceResolution(api: Pointer, ppi: Int)
         fun TessBaseAPIRecognize(api: Pointer, monitor: Pointer): Int
         fun TessBaseAPIGetUTF8Text(api: Pointer): Pointer?
+        fun TessBaseAPIGetHOCRText(api: Pointer, page: Int): Pointer?
         fun TessDeleteText(text: Pointer)
         fun TessMonitorCreate(): Pointer
         fun TessMonitorDelete(monitor: Pointer)
@@ -151,8 +152,12 @@ internal object BundledBookOcr : BookOcr {
                     control.check()
                     require(result == 0) { "这页识别未能完成或识别超时（60 秒），请提高图片清晰度或拆分后重试。" }
                     val text = bridge.TessBaseAPIGetUTF8Text(handle) ?: throw IllegalArgumentException("这页文字识别失败，请重新保存图片后重试。")
-                    try { return TextbookExtraction.clean(text.getString(0, "UTF-8")) }
+                    val original = try { TextbookExtraction.clean(text.getString(0, "UTF-8")) }
                     finally { bridge.TessDeleteText(text) }
+                    if (singleBlock || original.isBlank()) return original
+                    val layout = bridge.TessBaseAPIGetHOCRText(handle, 0) ?: return original
+                    try { return OcrMarginalNotes.separate(original, layout.getString(0, "UTF-8"), gray.width) }
+                    finally { bridge.TessDeleteText(layout) }
                 } finally { bridge.TessMonitorDelete(monitor) }
             } finally { bridge.TessBaseAPIDelete(handle) }
         } finally { gray.flush() }

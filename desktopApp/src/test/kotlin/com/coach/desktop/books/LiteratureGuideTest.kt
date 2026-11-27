@@ -323,6 +323,11 @@ class LiteratureGuideTest {
         val sigQuotes = quotesOf(sig)
         assertEquals(1, sigQuotes.size, sigQuotes.joinToString("\n"))
         assertTrue("Sig. Paolo" in sigQuotes.single())
+
+        val phil = "The society published Phil. Collections, after the manner of the public transactions, remained on the open shelf."
+        val philQuotes = quotesOf(phil)
+        assertEquals(1, philQuotes.size, philQuotes.joinToString("\n"))
+        assertTrue("published Phil. Collections" in philQuotes.single())
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

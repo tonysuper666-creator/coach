@@ -55,7 +55,7 @@ internal object LiteraturePassages {
         "ph", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
         "no", "nos", "pp", "p", "cf", "ed", "eds", "fig", "figs", "al", "etc", "eg", "ie",
         "ibid", "op", "cit", "loc", "vs", "ca", "ch", "esp", "viz", "rev", "trans",
-        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig",
+        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig", "phil",
     )
     private val compactSpace = Regex("""\s+""")
 

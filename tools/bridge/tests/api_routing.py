@@ -180,12 +180,15 @@ class LedgerTests(unittest.TestCase):
 
     def test_calendar_rollover_preserves_cycle_reservations(self):
         self.now = 1796083140  # 2026-11-30 23:59 UTC
-        self.ledger.reserve("openai", KEY, micros(500))
+        old = self.ledger.reserve("openai", KEY, micros(500))
         self.now += 120
-        # The November hold survives the rollover and still blocks new calls (as a hold, not "used up").
-        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
-            self.ledger.reserve("openai", KEY, 1)
-        self.assertNotIn("2026-12", self.ledger.read()["months"])
+        # The November hold survives the rollover and settles into November; December has its own grant.
+        new = self.ledger.reserve("openai", KEY, micros(500))
+        self.ledger.settle("openai", old, micros(3))
+        data = self.ledger.read()
+        self.assertEqual((micros(3), {}), (data["cycles"]["openai:2026-11"]["spent"], data["cycles"]["openai:2026-11"]["reserved"]))
+        self.assertEqual({new[2]: micros(500)}, data["cycles"]["openai:2026-12"]["reserved"])
+        self.assertEqual(0, data["months"]["2026-12"]["openai"]["spent_microusd"])
 
     def test_settled_usage_resets_month_but_unknown_usage_carries_forward(self):
         self.now = 1796083140

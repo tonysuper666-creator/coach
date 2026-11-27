@@ -1,0 +1,12 @@
+[Unit]
+Description=Coach monthly allocation plan: Coach's share is the whole free grant (TON-740)
+# Runs the script shipped with the release coach.service is running, so plan and bridge code always match.
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'R=$$(systemctl --user show coach.service -p ExecStart | grep -o "%h/Coach/releases/[0-9a-f]*" | head -1); exec /usr/bin/python3 -I "$$R/tools/bridge/monthly_grant_plan.py" --state %h/Coach/state apply'
+UMask=0077
+NoNewPrivileges=yes
+MemoryMax=64M
+CPUQuota=20%
+Nice=10

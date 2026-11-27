@@ -158,8 +158,7 @@ def run(state: Path, apply: bool, now=None, out=print):
         if apply:
             data = ledger.read()
             for provider in ("anthropic", "openai"):
-                share, settled, _ = ledger.allocation(provider, now, data)
-                pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
+                share, settled, _, pending = ledger.allocation(provider, now, data)
                 allowance[provider] = share - settled - pending
                 out(f"{provider}：Coach 总额 ${share / M:.2f}，已结算 ${settled / M:.4f}，在途 ${pending / M:.4f}，"
                     f"还能放行 ${allowance[provider] / M:.4f}")

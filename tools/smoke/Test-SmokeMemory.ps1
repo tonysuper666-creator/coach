@@ -110,7 +110,7 @@ try {
         }
         $entryExists = Test-Path -LiteralPath $entryPath
         $ok = ($admitted -eq $ExpectAdmit) -and ($entryExists -eq $ExpectEntryKept) -and ($ExpectAdmit -or $deniedMsg -like 'SMOKE_MEMORY: insufficient RAM*')
-        Check $CaseName $ok "admitted=$admitted/$ExpectAdmit entryExists=$entryExists/$ExpectEntryKept err=$deniedMsg"
+        Check $ok "$CaseName (admitted=$admitted/$ExpectAdmit entryExists=$entryExists/$ExpectEntryKept err=$deniedMsg)"
     }
     $workerRec = @{ ownerPid = 42424; ownerStarted = $tRef.Ticks; budgetBytes = [long]8GB; clientPid = 0; clientStarted = 0 }
     Invoke-MockAdmissionCase 'worker start time null preserves reservation' { param($id, $s) if ($id -eq 42424) { New-SpySmokeProc 42424 $null } } $workerRec 1GB $false $true
@@ -141,7 +141,7 @@ try {
     $raceStale = Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue
     $raceGone = $raceChild.WaitForExit(20000)
     $raceChild.Dispose(); $raceChild = $null; [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-    Check 'exited process handle yields 0 ticks without throwing' ($raceTicks -gt 0L -and $raceGone -and $null -ne $raceStale -and (Get-SmokeProcessStartTicks $raceStale) -eq 0L) "ticks=$raceTicks gone=$raceGone"
+    Check ($raceTicks -gt 0L -and $raceGone -and $null -ne $raceStale -and (Get-SmokeProcessStartTicks $raceStale) -eq 0L) "exited process handle yields 0 ticks without throwing (ticks=$raceTicks gone=$raceGone)"
     Invoke-MockAdmissionCase 'worker exiting during sampling is pruned and admits' {
         param($id, $s)
         if ($id -eq 42424) {
@@ -180,7 +180,7 @@ Start-Sleep -Seconds 2
         if ($lease) { Exit-SmokeMemory $lease; $lease = $null }
     }
     if (-not $exitingProc.WaitForExit(20000)) { throw 'Exiting peer child did not finish in time' }
-    Check 'concurrent exiting worker unblocks queued admission cleanly' ($admittedAfterExit -and @(Get-ChildItem -LiteralPath $exitingState -Filter '*.json').Count -eq 0) "admitted=$admittedAfterExit"
+    Check ($admittedAfterExit -and @(Get-ChildItem -LiteralPath $exitingState -Filter '*.json').Count -eq 0) "concurrent exiting worker unblocks queued admission cleanly (admitted=$admittedAfterExit)"
     Write-Host "SMOKE_MEMORY $checks/17"
 } finally {
     Exit-SmokeMemory $lease

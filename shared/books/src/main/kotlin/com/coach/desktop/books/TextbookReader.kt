@@ -214,7 +214,8 @@ internal fun TextbookReader(
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val aiEnabled = LocalReadingAiExplain.current
-    val isOffline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
+    val connectivity = LocalCoachConnectivity.current
+    val isOffline = connectivity == CoachConnectivityStatus.OFFLINE
     var studyPreference by remember(book.id, courseContext?.courseId, courseContext?.examProfile?.isExam) {
         mutableStateOf(
             StudyModeStore.loadOrResolve(
@@ -436,6 +437,23 @@ internal fun TextbookReader(
                     askingOpen = true,
                     pendingLabel = null,
                 )
+            }
+        }
+    }
+    LaunchedEffect(connectivity) {
+        if (connectivity == CoachConnectivityStatus.ONLINE) {
+            if (autoExplain && autoGuide) {
+                guideController.retryUnreachable()
+            }
+            val thread = inlineThread
+            val last = lastInlineAction
+            if (thread != null &&
+                !thread.loading &&
+                thread.error?.second == ExplainTrouble.Unreachable &&
+                last != null &&
+                last.first != SelectionExplainAction.ASK
+            ) {
+                runInlineSelection(thread.selection, last.first, last.second, retry = thread.retryTurn)
             }
         }
     }

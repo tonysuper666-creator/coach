@@ -6,6 +6,7 @@ import com.coach.client.PairedCredentials
 import com.coach.client.PairingClient
 import com.coach.client.reachedCoachHttpStatus
 import com.coach.desktop.books.CoachConnectivityRegistry
+import com.coach.desktop.books.retryBeforeOffline
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
@@ -66,43 +67,76 @@ internal class DesktopPairing(
         } finally { client.close() }
     }
 
+    private sealed interface AuthReachOutcome {
+        data class Reached(val authorized: Boolean) : AuthReachOutcome
+        data object Unreachable : AuthReachOutcome
+    }
+
     /** Offline is not revocation. Only an authenticated endpoint's explicit 401 retires a pairing. */
     suspend fun stillAuthorized(identity: DesktopIdentity, startup: Boolean = false): Boolean {
         if (identity.credentials.role == "friend") {
-            val client = PairingClient(identity.serverUrl)
-            return try {
-                val ok = client.friendAuthorized(identity.credentials, startup)
-                CoachConnectivityRegistry.markOnline(identity.serverUrl)
-                if (!ok) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
-                ok
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) {
-                // A reached HTTP status is not an offline client. Only a failed connection is.
-                if (reachedCoachHttpStatus(error)) CoachConnectivityRegistry.markOnline(identity.serverUrl)
-                else CoachConnectivityRegistry.markOffline(identity.serverUrl)
-                true
+            val outcome = retryBeforeOffline(
+                serverUrl = identity.serverUrl,
+                isReachableResult = { it is AuthReachOutcome.Reached },
+            ) { timeoutMs ->
+                val client = PairingClient(
+                    baseUrl = identity.serverUrl,
+                    connectTimeoutMs = timeoutMs,
+                    requestTimeoutMs = maxOf(timeoutMs, 20_000L),
+                )
+                try {
+                    AuthReachOutcome.Reached(client.friendAuthorized(identity.credentials, startup))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    // A reached HTTP status is not an offline client. Only a failed connection is.
+                    if (reachedCoachHttpStatus(error)) AuthReachOutcome.Reached(true)
+                    else AuthReachOutcome.Unreachable
+                } finally {
+                    client.close()
+                }
             }
-            finally { client.close() }
+            return when (outcome) {
+                is AuthReachOutcome.Reached -> {
+                    if (!outcome.authorized) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+                    outcome.authorized
+                }
+                AuthReachOutcome.Unreachable -> true
+            }
         }
-        val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
-        return try {
-            transport.hello(null)
-            CoachConnectivityRegistry.markOnline(identity.serverUrl)
-            true
+        val outcome = retryBeforeOffline(
+            serverUrl = identity.serverUrl,
+            isReachableResult = { it is AuthReachOutcome.Reached },
+        ) { timeoutMs ->
+            val transport = HttpLedgerTransport(
+                baseUrl = identity.serverUrl,
+                deviceId = identity.credentials.deviceId,
+                token = identity.credentials.token,
+                connectTimeoutMs = timeoutMs,
+                requestTimeoutMs = maxOf(timeoutMs, 20_000L),
+            )
+            try {
+                transport.hello(null)
+                AuthReachOutcome.Reached(true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: DeviceAuthorizationException) {
+                AuthReachOutcome.Reached(false)
+            } catch (error: Exception) {
+                // hello() turns 401 into DeviceAuthorizationException. Any other HTTP status reached the server.
+                if (reachedCoachHttpStatus(error)) AuthReachOutcome.Reached(true)
+                else AuthReachOutcome.Unreachable
+            } finally {
+                transport.close()
+            }
         }
-        catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: DeviceAuthorizationException) {
-            CoachConnectivityRegistry.markOnline(identity.serverUrl)
-            store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
-            false
+        return when (outcome) {
+            is AuthReachOutcome.Reached -> {
+                if (!outcome.authorized) store.clear(identity.serverUrl, identity.credentials, markRevoked = true)
+                outcome.authorized
+            }
+            AuthReachOutcome.Unreachable -> true
         }
-        catch (error: Exception) {
-            // hello() turns 401 into DeviceAuthorizationException. Any other HTTP status reached the server.
-            if (reachedCoachHttpStatus(error)) CoachConnectivityRegistry.markOnline(identity.serverUrl)
-            else CoachConnectivityRegistry.markOffline(identity.serverUrl)
-            true
-        }
-        finally { transport.close() }
     }
 
     fun wasRevoked(): Boolean = store.wasRevoked()

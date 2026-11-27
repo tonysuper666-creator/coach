@@ -26,6 +26,7 @@ import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookFormats
 import com.coach.desktop.books.BookImportToast
 import com.coach.desktop.books.BookScreen
+import com.coach.desktop.books.CoachConnectivityRegistry
 import com.coach.desktop.books.CoachConnectivityStatus
 import com.coach.desktop.books.CollectionKind
 import com.coach.desktop.books.CollectionSummary
@@ -59,8 +60,10 @@ import com.coach.ui.v7.LocalDeskSelect
 import com.coach.ui.v7.LocalDeskTypeControl
 import com.coach.ui.v7.V7TextButton
 import coach.design.tokens.CoachV7
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.file.Path
 
 /**
@@ -104,7 +107,7 @@ internal fun WindowsTextbookHost(
     val book = ui.book
     val hostExplainer = remember(controller.library, bookExplainer) { bookExplainer ?: BookExplainer(library = controller.library) }
     val pollMs = LocalConnectivityPollMs.current
-    val connectivityClient = remember(controller, hostExplainer, hostExplainer.identity) {
+    val connectivityClient = remember(controller, hostExplainer, controller.unifiedUploadClient) {
         controller.unifiedUploadClient ?: hostExplainer.unifiedUploadClient()
     }
     val registryFlow = remember(connectivityClient, hostExplainer.identity) {
@@ -116,13 +119,16 @@ internal fun WindowsTextbookHost(
     LaunchedEffect(controller, connectivityClient, pollMs) {
         val activeClient = connectivityClient ?: return@LaunchedEffect
         while (true) {
-            val probed = runCatching { activeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.UNKNOWN)
-            val wasOffline = probedConnectivity == CoachConnectivityStatus.OFFLINE || registryStatus == CoachConnectivityStatus.OFFLINE
+            val wasOfflineBeforeProbe = probedConnectivity == CoachConnectivityStatus.OFFLINE ||
+                CoachConnectivityRegistry.statusFor(hostExplainer.identity?.serverUrl.orEmpty()) == CoachConnectivityStatus.OFFLINE
+            val probed = withContext(Dispatchers.IO) {
+                runCatching { activeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.UNKNOWN)
+            }
             probedConnectivity = probed
             if (probed == CoachConnectivityStatus.ONLINE &&
-                (wasOffline || controller.uploadCoordinator.hasPendingSyncWork())
+                (wasOfflineBeforeProbe || controller.uploadCoordinator.hasPendingSyncWork())
             ) {
-                runCatching { controller.syncBookUploads().join() }
+                launch { runCatching { controller.syncBookUploads().join() } }
             }
             delay(pollMs)
         }

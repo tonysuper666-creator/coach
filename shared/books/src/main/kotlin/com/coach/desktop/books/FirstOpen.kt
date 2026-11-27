@@ -31,6 +31,7 @@ import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
@@ -204,17 +205,72 @@ internal fun FirstTastePanel(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    var attempt by remember(book.id) { mutableIntStateOf(0) }
+    val pollMs = LocalConnectivityPollMs.current
+    var fetchTrigger by remember(book.id) { mutableIntStateOf(0) }
+    var manualClicks by remember(book.id) { mutableIntStateOf(0) }
+    var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
+    var recoveredOnline by remember(book.id) { mutableStateOf(false) }
     var step by remember(book.id) { mutableStateOf<TasteStep>(TasteStep.Loading) }
     var picked by remember(book.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(book.id, attempt, connectivity) {
-        if (connectivity == CoachConnectivityStatus.OFFLINE) {
+
+    // Automatic resume when host connectivity recovers from OFFLINE -> ONLINE.
+    // Never touches Ask or Told once the first question has already loaded.
+    LaunchedEffect(book.id, connectivity) {
+        if (connectivity == CoachConnectivityStatus.ONLINE &&
+            (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+        ) {
+            recoveredOnline = true
+            fetchTrigger += 1
+        }
+    }
+
+    // Background probe while held on a network failure so standalone panels or requests that failed
+    // before host connectivity flipped also recover without requiring a manual click.
+    val heldOffline = (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+    LaunchedEffect(book.id, heldOffline, connectivity, pollMs) {
+        if (!heldOffline) return@LaunchedEffect
+        val probeClient = explainer.unifiedUploadClient()
+        while (true) {
+            delay(pollMs)
+            if (connectivity == CoachConnectivityStatus.OFFLINE) {
+                if (!explainer.loaded && explainer.identity == null) continue
+                val live = if (probeClient != null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { probeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                    }
+                } else CoachConnectivityStatus.OFFLINE
+                if (live == CoachConnectivityStatus.ONLINE) {
+                    recoveredOnline = true
+                    fetchTrigger += 1
+                    break
+                }
+            } else {
+                val live = if (probeClient != null && (explainer.loaded || explainer.identity != null)) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { probeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.ONLINE)
+                    }
+                } else CoachConnectivityStatus.ONLINE
+                if (live == CoachConnectivityStatus.ONLINE) {
+                    recoveredOnline = true
+                    fetchTrigger += 1
+                    break
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(book.id, fetchTrigger) {
+        val isManual = manualClicks > handledManualClicks
+        handledManualClicks = manualClicks
+        if (step is TasteStep.Ask || step is TasteStep.Told) return@LaunchedEffect
+        if (connectivity == CoachConnectivityStatus.OFFLINE && !isManual && !recoveredOnline) {
             step = TasteStep.Hold(
                 FirstOpenBlock.OFFLINE,
                 FirstOpenPlanner.statusText(FirstOpenBlock.OFFLINE, null, bookInHand = true),
             )
             return@LaunchedEffect
         }
+        recoveredOnline = false
         step = TasteStep.Loading
         picked = null
         val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(book) }.getOrNull() }
@@ -231,7 +287,9 @@ internal fun FirstTastePanel(
                 else TasteStep.Ask(quiz)
             }
             is ChapterCompanionFetchResult.Failed -> {
-                val block = FirstOpenPlanner.blockFor(result.trouble, connectivity)
+                val latestConnectivity = CoachConnectivityRegistry.statusFor(explainer.identity?.serverUrl.orEmpty())
+                    .takeIf { it != CoachConnectivityStatus.UNKNOWN } ?: connectivity
+                val block = FirstOpenPlanner.blockFor(result.trouble, latestConnectivity)
                 step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
             }
         }
@@ -253,7 +311,13 @@ internal fun FirstTastePanel(
             }
             is TasteStep.Hold -> {
                 Text(current.message, color = v7Alert(), textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
-                PrimaryButton(onClick = { attempt += 1 }, modifier = Modifier.testTag("first-taste-primary")) {
+                PrimaryButton(
+                    onClick = {
+                        manualClicks += 1
+                        fetchTrigger += 1
+                    },
+                    modifier = Modifier.testTag("first-taste-primary"),
+                ) {
                     Text(FirstOpenCopy.RETRY)
                 }
                 V7TextButton(onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }

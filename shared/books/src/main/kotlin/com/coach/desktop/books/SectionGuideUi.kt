@@ -137,6 +137,14 @@ internal class SectionGuideController(
         ensureSection(index, prefetchNext = false)
     }
 
+    fun retryUnreachable() {
+        val failedIds = states.filterValues { (it as? SectionGuideState.Failed)?.trouble == ExplainTrouble.Unreachable }.keys.toList()
+        for (sectionId in failedIds) {
+            val idx = book.lessons.indexOfFirst { it.id == sectionId }
+            if (idx >= 0) ensureSection(idx, prefetchNext = false)
+        }
+    }
+
     internal fun ensureSection(index: Int, prefetchNext: Boolean = false) {
         val section = book.lessons.getOrNull(index) ?: return
         if (states[section.id] is SectionGuideState.Ready) {

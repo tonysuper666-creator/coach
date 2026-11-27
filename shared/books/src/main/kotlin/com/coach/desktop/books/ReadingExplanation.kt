@@ -145,6 +145,7 @@ internal fun PageExplanation(
     val blocks = remember(book, page, currentPageOffset, visibleRanges) {
         selectScreenExplainBlocks(book, page, currentPageOffset, visibleRanges)
     }
+    val connectivity = LocalCoachConnectivity.current
     val cacheKey = remember(page, blocks) { pageExplainCacheKey(page, blocks) }
     var attempt by remember(book.id, cacheKey) { mutableIntStateOf(0) }
     val reply by produceState<ExplainResult?>(null, blocks, cacheKey, explainer.loaded, explainer.identity, enabled, attempt) {
@@ -182,6 +183,12 @@ internal fun PageExplanation(
                 }
                 value = res
             }
+        }
+    }
+    LaunchedEffect(connectivity) {
+        val failed = reply as? ExplainResult.Refused
+        if (connectivity == CoachConnectivityStatus.ONLINE && failed?.trouble == ExplainTrouble.Unreachable) {
+            attempt++
         }
     }
     when {

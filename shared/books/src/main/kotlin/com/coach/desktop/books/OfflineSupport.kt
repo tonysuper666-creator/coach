@@ -36,6 +36,58 @@ internal enum class CoachConnectivityStatus {
     OFFLINE,
 }
 
+/**
+ * Separates slow/flaky links (e.g. a dead secondary NIC adding 12s to DNS, or 1–2 transient packet drops)
+ * from genuine offline state:
+ * - Each probe attempt allows [attemptTimeoutMs] (15s by default, covering a 12s DNS failover).
+ * - Before transitioning to [CoachConnectivityStatus.OFFLINE], retries up to [maxAttempts] times
+ *   with progressively longer delays ([retryDelaysMs]).
+ * - Once already [CoachConnectivityStatus.OFFLINE], each background poll runs a single attempt so
+ *   reconnection is detected immediately on the next tick.
+ */
+internal data class ConnectivityProbePolicy(
+    val maxAttempts: Int = 3,
+    val attemptTimeoutMs: Long = 15_000L,
+    val retryDelaysMs: List<Long> = listOf(1_000L, 2_500L),
+) {
+    init {
+        require(maxAttempts >= 1) { "maxAttempts must be >= 1" }
+        require(attemptTimeoutMs > 0L) { "attemptTimeoutMs must be > 0" }
+    }
+
+    fun delayAfterFailure(attemptZeroBased: Int): Long {
+        if (retryDelaysMs.isEmpty()) return 0L
+        return retryDelaysMs.getOrElse(attemptZeroBased) { retryDelaysMs.last() }.coerceAtLeast(0L)
+    }
+}
+
+internal suspend fun <T> retryBeforeOffline(
+    serverUrl: String,
+    policy: ConnectivityProbePolicy = CoachConnectivityRegistry.probePolicy,
+    stillCurrent: suspend () -> Boolean = { true },
+    isReachableResult: (T) -> Boolean,
+    attempt: suspend (timeoutMs: Long) -> T,
+): T {
+    val alreadyOffline = CoachConnectivityRegistry.isOffline(serverUrl)
+    val limit = if (alreadyOffline) 1 else policy.maxAttempts
+    var last: T? = null
+    for (index in 0 until limit) {
+        val result = attempt(policy.attemptTimeoutMs)
+        last = result
+        if (isReachableResult(result)) {
+            CoachConnectivityRegistry.markOnline(serverUrl)
+            return result
+        }
+        if (index + 1 < limit) {
+            val waitMs = policy.delayAfterFailure(index)
+            if (waitMs > 0L) kotlinx.coroutines.delay(waitMs)
+            if (!stillCurrent()) return result
+        }
+    }
+    CoachConnectivityRegistry.markOffline(serverUrl)
+    return checkNotNull(last)
+}
+
 internal object OfflineCopy {
     const val NEEDS_NETWORK = "需要联网"
     const val EXPLAIN_OFFLINE = "需要联网才能使用，读书和做题照常。"
@@ -67,6 +119,8 @@ internal object OfflineCopy {
  */
 internal object CoachConnectivityRegistry {
     private val flows = ConcurrentHashMap<String, MutableStateFlow<CoachConnectivityStatus>>()
+    @Volatile
+    var probePolicy: ConnectivityProbePolicy = ConnectivityProbePolicy()
 
     private fun key(serverUrl: String): String = serverUrl.trim().trimEnd('/')
 
@@ -96,6 +150,7 @@ internal object CoachConnectivityRegistry {
 
     fun resetForTests() {
         flows.clear()
+        probePolicy = ConnectivityProbePolicy()
     }
 }
 

@@ -19,6 +19,7 @@ internal object CollectionQaRetriever {
     const val MAX_BLOCK_CHARS = 4_200
     const val MAX_BLOCKS = 9
     private const val MAX_PAGES_PER_BOOK = 3
+    private const val MAX_PAGES_PER_FOCUSED_BOOK = 5
 
     private data class CollectionMaterialMeta(
         val bookId: String,
@@ -53,11 +54,26 @@ internal object CollectionQaRetriever {
         val unreadPagesFilteredOut: Int = 0,
     )
 
+    private data class ConceptTerm(
+        val text: String,
+        val weight: Double,
+        val isPhrase: Boolean = false,
+        val isChinese: Boolean = false,
+    )
+
+    private data class ConceptSlot(
+        val id: String,
+        val terms: List<ConceptTerm>,
+        val baseImportance: Double = 1.0,
+    )
+
     private data class QueryProfile(
         val rawQuestion: String,
         val englishTerms: List<String>,
         val phrases: List<String>,
         val chineseTerms: List<String>,
+        val conceptSlots: List<ConceptSlot>,
+        val titlePreferredBookIds: Set<String>,
         val requestedWeeks: Set<Int>,
         val roleBoosts: Set<CourseMaterialRole>,
         val allMatchTerms: Set<String>,
@@ -65,8 +81,17 @@ internal object CollectionQaRetriever {
 
     private val weekPattern = Regex("""第\s*(\d{1,2})\s*周|week\s*(\d{1,2})""", RegexOption.IGNORE_CASE)
     private val enTokenRegex = Regex("""[A-Za-z0-9][A-Za-z0-9.\-']*""")
+    private val enPageWordRegex = Regex("""[a-z0-9]+(?:'[a-z]+)?""")
     private val zhSequenceRegex = Regex("""[\u4e00-\u9fff]{2,}""")
+    private val zhSplitParticlesRegex = Regex("""[的与和或及在从对把被给让向里中上了着过呢吗啊吧之其]+""")
     private val weekFileRegex = Regex("""(?:week|wk|w)[\s_\-]*(\d{1,2})\b|第\s*(\d{1,2})\s*周""", RegexOption.IGNORE_CASE)
+    private val sentenceSplitRegex = Regex("""(?<=[.!?;。！？；])\s+|\n+""")
+    private val definitionCueRegex = Regex(
+        """(?i)\b(?:is\s+that\s+which|that\s+which\s+men\s+call|is\s+called|are\s+called|defined\s+as|definition\s+of|consists\s+in|is\s+this\s+principle|may\s+be\s+assumed\s+to\s+be|will\s+be\s+admitted\s+to\s+be|there\s+is\s+(?:a\s+)?difference|difference\s+between|distinction\s+between|form\s+an\s+opinion|first\s+opinion|one\s+test|refers\s+to|signifies|means\s+that|whereas|on\s+the\s+other\s+hand)\b|是指|指的是|定义为|所谓|区别在于|不同之处|判断.{0,6}标准""",
+    )
+    private val boilerplateRegex = Regex(
+        """(?i)(?:project\s+gutenberg|www\.gutenberg\.org|ebook\s+is\s+for\s+the\s+use\s+of|terms\s+of\s+the\s+project\s+gutenberg|end\s+of\s+(?:the\s+)?project\s+gutenberg|defect\s+in\s+this\s+electronic\s+work|full\s+project\s+gutenberg\s+license|limited\s+warranty\s+and\s+disclaimer\s+of\s+damages)""",
+    )
 
     // Neutral bilingual question-term lexicon (strictly ZERO answer numbers, ZERO pinned docs, ZERO banned words).
     private val zhToEnExpansions: List<Pair<String, List<String>>> = listOf(
@@ -141,6 +166,187 @@ internal object CollectionQaRetriever {
         "共保率" to listOf("coinsurance"),
         "无谓损失" to listOf("welfare loss", "deadweight"),
         "医疗保险" to listOf("health insurance", "insurance"),
+    )
+
+    // General academic / classical-reading bilingual lexicon used for cross-lingual page retrieval ONLY
+    // (kept separate from `zhToEnExpansions` so offline discrepancy matching stays unchanged).
+    private val generalZhToEnExpansions: List<Pair<String, List<String>>> = listOf(
+        "选任" to listOf("choice", "choose", "choosing", "select", "selection", "appoint", "discrimination"),
+        "选用" to listOf("choice", "choose", "choosing", "select", "appoint"),
+        "任用" to listOf("choice", "choose", "appoint", "employ"),
+        "大臣" to listOf("minister", "ministers", "servant", "servants", "secretary", "secretaries", "counselor", "adviser"),
+        "臣子" to listOf("minister", "ministers", "servant", "servants", "subject"),
+        "秘书" to listOf("secretary", "secretaries", "servant", "servants"),
+        "仆从" to listOf("servant", "servants"),
+        "判断" to listOf("judge", "judgment", "opinion", "discrimination", "discern", "understanding", "wise", "test"),
+        "识人" to listOf("discrimination", "opinion", "understanding", "wise", "choice"),
+        "君主" to listOf("prince", "princes", "king", "ruler", "sovereign", "monarch"),
+        "慷慨" to listOf("generous", "generosity", "liberal", "liberality"),
+        "节俭" to listOf("parsimony", "parsimonious", "frugal", "meanness", "miserly"),
+        "契约" to listOf("covenant", "covenants", "pact", "compact", "agreement"),
+        "盟约" to listOf("covenant", "pact", "compact"),
+        "合同" to listOf("contract", "contracts", "contractor", "bargain", "agreement"),
+        "城邦" to listOf("city", "state", "polis", "commonwealth", "republic"),
+        "正义" to listOf("justice", "just", "righteousness"),
+        "公正" to listOf("justice", "just", "fairness"),
+        "各司其职" to listOf("own business", "own work", "one thing", "function", "busybody", "adapted", "suited"),
+        "各尽其职" to listOf("own business", "own work", "one thing", "function"),
+        "本职" to listOf("own business", "own work", "function", "office"),
+        "舵手" to listOf("pilot", "helmsman", "steersman"),
+        "太阳" to listOf("sun"),
+        "至善" to listOf("good", "goodness", "highest good"),
+        "善与" to listOf("good", "goodness"),
+        "与善" to listOf("good", "goodness"),
+        "名称" to listOf("name", "names", "appellation"),
+        "推理" to listOf("reasoning", "reckoning", "reason", "inference"),
+        "自由" to listOf("liberty", "freedom", "free"),
+        "个性" to listOf("individuality", "individual", "character"),
+        "福祉" to listOf("well-being", "welfare", "happiness", "felicity"),
+        "幸福" to listOf("happiness", "felicity", "welfare", "well-being"),
+        "习俗" to listOf("custom", "customs", "habit", "opinion"),
+        "自然选择" to listOf("natural selection", "selection"),
+        "分工" to listOf("division of labour", "division of labor", "specialisation", "specialization"),
+        "美德" to listOf("virtue", "virtues"),
+        "节制" to listOf("temperance", "moderation"),
+        "勇气" to listOf("courage", "bravery", "fortitude"),
+        "智慧" to listOf("wisdom", "wise", "prudence"),
+        "灵魂" to listOf("soul", "mind", "spirit"),
+        "自然法" to listOf("law of nature", "laws of nature", "natural law"),
+        "法律" to listOf("law", "laws", "statute"),
+        "主权" to listOf("sovereign", "sovereignty"),
+        "自然状态" to listOf("state of nature", "condition of war"),
+        "和平" to listOf("peace"),
+        "权力" to listOf("power", "authority", "right"),
+        "权利" to listOf("right", "rights"),
+        "真理" to listOf("truth", "true", "reality"),
+        "知识" to listOf("knowledge"),
+        "意见" to listOf("opinion", "opinions", "belief"),
+        "洞穴" to listOf("cave", "den"),
+        "哲学王" to listOf("philosopher", "kings", "king"),
+        "民主" to listOf("democracy", "democratic"),
+        "僭主" to listOf("tyrant", "tyranny"),
+        "暴君" to listOf("tyrant", "tyranny"),
+        "寡头" to listOf("oligarchy", "oligarchical"),
+        "贵族" to listOf("aristocracy", "nobles", "barons", "lords"),
+        "财富" to listOf("wealth", "riches", "property"),
+        "贫穷" to listOf("poverty", "poor"),
+        "教育" to listOf("education", "educate", "training"),
+        "惩罚" to listOf("punishment", "penalty"),
+        "宗教" to listOf("religion", "church"),
+        "上帝" to listOf("god"),
+        "命运" to listOf("fortune", "fate"),
+        "雇佣军" to listOf("mercenaries", "mercenary", "auxiliaries"),
+        "军队" to listOf("army", "armies", "arms", "soldiers", "troops"),
+        "爱戴" to listOf("loved", "love", "affection"),
+        "畏惧" to listOf("feared", "fear"),
+        "狮子" to listOf("lion"),
+        "狐狸" to listOf("fox"),
+        "价值" to listOf("value", "price", "worth"),
+        "货币" to listOf("money", "coin", "currency"),
+        "地租" to listOf("rent"),
+        "工资" to listOf("wages", "labour", "labor"),
+        "利润" to listOf("profit", "profits"),
+        "资本" to listOf("capital", "stock"),
+        "人口" to listOf("population"),
+        "粮食" to listOf("subsistence", "food", "corn"),
+        "君主论" to listOf("prince", "machiavelli"),
+        "利维坦" to listOf("leviathan", "hobbes"),
+        "理想国" to listOf("republic", "plato", "socrates"),
+        "论自由" to listOf("liberty", "mill"),
+    )
+
+    private val irregularStems = mapOf(
+        "chosen" to "choose", "chose" to "choose", "choices" to "choice",
+        "men" to "man", "women" to "woman", "children" to "child",
+        "princes" to "prince", "cities" to "city", "countries" to "country",
+        "secretaries" to "secretary", "ministries" to "ministry", "duties" to "duty",
+        "liberties" to "liberty", "theories" to "theory", "studies" to "study",
+        "utilities" to "utility", "authorities" to "authority", "societies" to "society",
+        "properties" to "property", "judges" to "judge", "judging" to "judge", "judged" to "judge",
+    )
+
+    private fun stemEn(word: String): String {
+        val w = word.lowercase().trim('\'')
+        if (w.length < 4) return w
+        irregularStems[w]?.let { return it }
+        if (w.endsWith("ies") && w.length > 5) return w.dropLast(3) + "y"
+        if ((w.endsWith("sses") || w.endsWith("shes") || w.endsWith("ches") || w.endsWith("xes") || w.endsWith("zes")) && w.length > 5) {
+            return w.dropLast(2)
+        }
+        if (w.endsWith("ing") && w.length > 6) {
+            val base = w.dropLast(3)
+            return if (base.length >= 4 && base.last() == base[base.length - 2] && base.last() !in setOf('s', 'l', 'z')) {
+                base.dropLast(1)
+            } else base
+        }
+        if (w.endsWith("ed") && w.length > 5) {
+            val base = w.dropLast(2)
+            return if (base.length >= 4 && base.last() == base[base.length - 2] && base.last() !in setOf('s', 'l', 'z')) {
+                base.dropLast(1)
+            } else base
+        }
+        if (w.endsWith("ly") && w.length > 5) return w.dropLast(2)
+        if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && !w.endsWith("is") && !w.endsWith("as") && !w.endsWith("os")) {
+            return w.dropLast(1)
+        }
+        return w
+    }
+
+    private val enSynonymGroups: List<Set<String>> = listOf(
+        setOf("minister", "servant", "secretary", "counselor", "adviser"),
+        setOf("choice", "choose", "select", "selection", "appoint", "discrimination"),
+        setOf("judge", "judgment", "opinion", "discrimination", "discern", "understanding", "estimate", "test", "wise"),
+        setOf("prince", "sovereign", "monarch", "ruler", "king"),
+        setOf("covenant", "pact", "compact"),
+        setOf("contract", "agreement", "bargain"),
+        setOf("city", "state", "commonwealth", "polis", "republic"),
+        setOf("work", "business", "function", "calling", "craft"),
+        setOf("generous", "generosity", "liberal", "liberality"),
+        setOf("parsimony", "parsimonious", "frugal", "meanness", "miserly"),
+        setOf("liberty", "freedom"),
+        setOf("welfare", "well-being", "happiness", "felicity"),
+        setOf("reasoning", "reckoning", "inference", "reason"),
+        setOf("division", "specialisation", "specialization"),
+    )
+
+    private val enSynonymLookup: Map<String, Set<String>> = buildMap {
+        for (group in enSynonymGroups) {
+            val stems = group.map { stemEn(it) }.toSet()
+            val all = group + stems
+            for (term in all) {
+                put(term, (get(term).orEmpty() + group).toSet())
+            }
+        }
+    }
+
+    private val enRetrievalStopwords = setOf(
+        "a", "an", "the", "and", "or", "but", "if", "so", "no", "not", "nor", "yet",
+        "of", "to", "in", "on", "at", "by", "as", "is", "it", "be", "am", "are", "was", "were", "been", "being",
+        "for", "from", "with", "into", "about", "against", "between", "among", "through", "during", "before", "after",
+        "above", "below", "under", "over", "without", "within", "around", "upon", "off", "out", "up", "down",
+        "this", "that", "these", "those", "such", "same", "other", "another", "each", "every", "all", "any", "both",
+        "some", "more", "most", "much", "many", "few", "little", "only", "also", "very", "too", "just", "even", "still",
+        "who", "whom", "whose", "which", "what", "when", "where", "why", "how", "whether", "either", "neither",
+        "he", "she", "they", "them", "their", "his", "her", "its", "our", "your", "my", "we", "you", "me", "us", "one", "ones",
+        "do", "does", "did", "done", "have", "has", "had", "having", "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+        "make", "made", "makes", "say", "says", "said", "tell", "told", "ask", "asked", "show", "shows", "shown",
+        "give", "gives", "given", "take", "takes", "taken", "find", "found", "use", "used", "using", "way",
+        "explain", "describe", "discuss", "discussed", "mention", "mentioned", "according", "regarding", "concerning",
+        "book", "books", "chapter", "page", "pages", "part", "section", "question", "answer", "please", "vs", "versus",
+        "than", "then", "there", "here", "well", "like", "per", "via", "etc", "two", "new", "old", "now", "because", "since", "while", "although", "though",
+    )
+
+    private val enCueWords = setOf(
+        "difference", "different", "differ", "distinction", "distinguish", "define", "defined", "definition", "meaning", "mean", "means",
+        "compare", "contrast", "analogy", "metaphor", "example", "doing", "role",
+    )
+
+    private val zhRetrievalStopwords = setOf(
+        "什么", "怎么", "怎样", "如何", "为什么", "为何", "是否", "能否", "哪个", "哪些", "多少",
+        "可以", "就是", "还是", "以及", "请问", "一下", "这个", "那个", "这些", "那些",
+        "之间", "方面", "里面", "有关", "关于", "问题", "答案", "书里", "书中", "作者",
+        "解释", "说明", "介绍", "分别", "各自", "主要", "原因", "存在", "一个", "一样",
+        "没有", "有没", "有没有", "是否", "怎么说", "怎么讲", "是什么", "什么是", "区别", "不同",
     )
 
     private val genericEntityStopwords = setOf(
@@ -299,7 +505,7 @@ internal object CollectionQaRetriever {
             }
         }
 
-        val queryProfile = buildQueryProfile(db, collectionId, question)
+        val queryProfile = buildQueryProfile(db, collectionId, question, materials)
         val offlineCandidates = loadOfflineDiscrepancies(
             db = db,
             collectionId = collectionId,
@@ -357,7 +563,7 @@ internal object CollectionQaRetriever {
             }
         }
 
-        // 2. FTS5 + normalized full-page BM25-style ranking across all allowed materials
+        // 2. FTS5 + BM25 + concept coverage + heading/definitional reranking across allowed materials
         val candidates = scoreAllowedPages(
             db = db,
             materials = materials,
@@ -377,13 +583,32 @@ internal object CollectionQaRetriever {
             byBookQueue.getOrPut(cand.bookId) { ArrayDeque() }.addLast(cand)
         }
         val bookOrder = byBookQueue.entries
-            .sortedByDescending { it.value.first().score }
+            .sortedWith(
+                compareByDescending<Map.Entry<String, ArrayDeque<ScoredPageCandidate>>> {
+                    it.key in queryProfile.titlePreferredBookIds
+                }.thenByDescending { it.value.first().score },
+            )
             .map { it.key }
 
-        // Pass 1: Guarantee at least 1 block from each book that has relevant candidates
+        val isComparison = isMultiBookComparisonQuery(question)
+        val bestBookScore = bookOrder.firstOrNull()?.let { byBookQueue[it]?.firstOrNull()?.score } ?: 0.0
+        val secondBookScore = bookOrder.getOrNull(1)?.let { byBookQueue[it]?.firstOrNull()?.score } ?: 0.0
+        val focusedSingleBookMode = collectionRow.kind == CollectionKind.BOOKLIST &&
+            !isComparison &&
+            (queryProfile.titlePreferredBookIds.isNotEmpty() || secondBookScore < bestBookScore * 0.58)
+        val maxPerBook = if (focusedSingleBookMode) MAX_PAGES_PER_FOCUSED_BOOK else MAX_PAGES_PER_BOOK
+
+        // Pass 1: Guarantee at least 1 block from each qualifying book (every book for COURSE / comparison,
+        // or competitive/explicitly-named books for focused BOOKLIST queries).
         for (bookId in bookOrder) {
             if (chosenList.size >= MAX_BLOCKS) break
             if ((perBookCount[bookId] ?: 0) > 0) continue
+            val topScore = byBookQueue[bookId]?.firstOrNull()?.score ?: continue
+            val qualifies = collectionRow.kind == CollectionKind.COURSE ||
+                isComparison ||
+                bookId in queryProfile.titlePreferredBookIds ||
+                topScore >= bestBookScore * 0.58
+            if (!qualifies) continue
             val queue = byBookQueue[bookId] ?: continue
             while (queue.isNotEmpty()) {
                 val cand = queue.removeFirst()
@@ -394,13 +619,19 @@ internal object CollectionQaRetriever {
             }
         }
 
-        // Pass 2: Round-robin across books up to MAX_PAGES_PER_BOOK per book
+        // Pass 2: Round-robin across qualifying books up to maxPerBook per book
         var roundProgress = true
         while (chosenList.size < MAX_BLOCKS && roundProgress) {
             roundProgress = false
             for (bookId in bookOrder) {
                 if (chosenList.size >= MAX_BLOCKS) break
-                if ((perBookCount[bookId] ?: 0) >= MAX_PAGES_PER_BOOK) continue
+                if ((perBookCount[bookId] ?: 0) >= maxPerBook) continue
+                val topScore = byBookQueue[bookId]?.firstOrNull()?.score ?: continue
+                val qualifies = collectionRow.kind == CollectionKind.COURSE ||
+                    isComparison ||
+                    bookId in queryProfile.titlePreferredBookIds ||
+                    topScore >= bestBookScore * 0.58
+                if (!qualifies) continue
                 val queue = byBookQueue[bookId] ?: continue
                 while (queue.isNotEmpty()) {
                     val cand = queue.removeFirst()
@@ -418,7 +649,7 @@ internal object CollectionQaRetriever {
         if (collectionRow.kind == CollectionKind.BOOKLIST &&
             chosenList.size < MAX_BLOCKS &&
             allowedPagesByBook.count { it.value.isNotEmpty() } >= 2 &&
-            isMultiBookComparisonQuery(question)
+            isComparison
         ) {
             for (mat in materials) {
                 if (chosenList.size >= MAX_BLOCKS) break
@@ -435,10 +666,16 @@ internal object CollectionQaRetriever {
             }
         }
 
-        // Pass 3: Fill remaining slots if needed
+        // Pass 3: Fill remaining slots if needed (skip ultra-weak spillover books in focused single-book mode)
         for (cand in candidates) {
             if (chosenList.size >= MAX_BLOCKS) break
             if ((cand.bookId to cand.page) in chosenKeys) continue
+            if (focusedSingleBookMode &&
+                cand.bookId !in queryProfile.titlePreferredBookIds &&
+                cand.score < bestBookScore * 0.45
+            ) {
+                continue
+            }
             addBlock(cand.bookId, cand.page, cand.rawText)
         }
 
@@ -468,18 +705,75 @@ internal object CollectionQaRetriever {
         db: Connection,
         collectionId: String,
         question: String,
+        materials: List<CollectionMaterialMeta> = emptyList(),
     ): QueryProfile {
         val enTerms = LinkedHashSet<String>()
         val phrases = LinkedHashSet<String>()
         val zhTerms = LinkedHashSet<String>()
+        val slots = ArrayList<ConceptSlot>()
+        val coveredSlotKeys = HashSet<String>()
+        val qLower = question.lowercase()
 
-        // Direct English / numeric tokens from the user's question
-        for (m in enTokenRegex.findAll(question)) {
-            val tok = m.value.trim('.', ',', ';', ':', '?', '!')
-            if (tok.length >= 2) {
-                enTerms += tok.lowercase()
+        fun addSlot(id: String, terms: List<ConceptTerm>, importance: Double = 1.0) {
+            val clean = terms.distinctBy { it.text to it.isPhrase to it.isChinese }
+            if (clean.isEmpty()) return
+            slots += ConceptSlot(id = id, terms = clean, baseImportance = importance)
+        }
+
+        // Detect explicit book title mentions so focused single-book questions allocate blocks cleanly
+        val titlePreferredBookIds = LinkedHashSet<String>()
+        for (mat in materials) {
+            val titleLower = mat.title.lowercase()
+            val titleWords = enPageWordRegex.findAll(titleLower)
+                .map { it.value }
+                .filter { it.length >= 4 && it !in enRetrievalStopwords && it != "book" }
+                .toList()
+            val matchedByEn = titleLower.length >= 4 && titleLower in qLower ||
+                (titleWords.isNotEmpty() && titleWords.all { containsWholeWord(qLower, it) })
+            val matchedByZh = generalZhToEnExpansions.any { (zh, targets) ->
+                zh in qLower && targets.any { t -> t in titleWords }
+            }
+            if (matchedByEn || matchedByZh) {
+                titlePreferredBookIds += mat.bookId
             }
         }
+
+        // 1. Direct English / numeric tokens from the user's question
+        val rawEnTokens = enTokenRegex.findAll(question)
+            .map { it.value.trim('.', ',', ';', ':', '?', '!').lowercase() }
+            .filter { it.length >= 2 }
+            .toList()
+        for (tok in rawEnTokens) {
+            if (tok in enRetrievalStopwords) continue
+            enTerms += tok
+            val stem = stemEn(tok)
+            val isCue = tok in enCueWords || stem in enCueWords
+            val importance = if (isCue) 0.4 else 1.0
+            val slotTerms = ArrayList<ConceptTerm>()
+            slotTerms += ConceptTerm(tok, weight = 1.0)
+            if (stem != tok && stem.length >= 3) {
+                slotTerms += ConceptTerm(stem, weight = 0.88)
+            }
+            val synonyms = enSynonymLookup[tok].orEmpty() + enSynonymLookup[stem].orEmpty()
+            for (syn in synonyms) {
+                if (syn != tok && syn != stem) {
+                    if (' ' in syn || '-' in syn) {
+                        slotTerms += ConceptTerm(syn, weight = 0.72, isPhrase = true)
+                    } else {
+                        slotTerms += ConceptTerm(syn, weight = 0.72)
+                        val synStem = stemEn(syn)
+                        if (synStem != syn && synStem.length >= 3) {
+                            slotTerms += ConceptTerm(synStem, weight = 0.65)
+                        }
+                    }
+                }
+            }
+            val slotKey = "en:$stem"
+            if (coveredSlotKeys.add(slotKey)) {
+                addSlot(slotKey, slotTerms, importance)
+            }
+        }
+
         // Map Greek symbols like Ω2 / Ω3 to both symbol and Omega forms
         if ("Ω" in question) {
             enTerms += "omega"
@@ -488,33 +782,95 @@ internal object CollectionQaRetriever {
                     phrases += "omega_$d"
                     phrases += "omega $d"
                     enTerms += "omega_$d"
+                    addSlot(
+                        "omega_$d",
+                        listOf(
+                            ConceptTerm("omega_$d", 1.0, isPhrase = true),
+                            ConceptTerm("omega $d", 1.0, isPhrase = true),
+                        ),
+                    )
                 }
             }
         }
-        // Chinese sequences (whole + 2-char/3-char n-grams for flexible matching)
-        for (m in zhSequenceRegex.findAll(question)) {
-            val seq = m.value
-            zhTerms += seq
-            if (seq.length > 2) {
-                for (i in 0..(seq.length - 2)) zhTerms += seq.substring(i, i + 2)
+
+        // 2. Bilingual question-term expansions (ECNM10119 + general cross-lingual lexicon)
+        val matchedBilingualKeys = ArrayList<String>()
+        val combinedBilingual = (zhToEnExpansions + generalZhToEnExpansions)
+            .sortedByDescending { it.first.length }
+        for ((zh, targets) in combinedBilingual) {
+            if (zh !in qLower) continue
+            // Skip shorter key if an already-matched longer key covers it and has no extra meaning
+            if (matchedBilingualKeys.any { longer -> longer != zh && zh in longer }) continue
+            matchedBilingualKeys += zh
+            val slotTerms = ArrayList<ConceptTerm>()
+            if (zh !in zhRetrievalStopwords) {
+                slotTerms += ConceptTerm(zh, weight = 1.0, isChinese = true)
             }
-            if (seq.length > 3) {
-                for (i in 0..(seq.length - 3)) zhTerms += seq.substring(i, i + 3)
-            }
-        }
-        // Bilingual question-term expansions (NO answer keywords!)
-        val qLower = question.lowercase()
-        for ((zh, targets) in zhToEnExpansions) {
-            if (zh in qLower) {
-                for (target in targets) {
-                    if (' ' in target) phrases += target.lowercase()
-                    for (part in target.split(' ', '-')) {
-                        if (part.length >= 2) enTerms += part.lowercase()
+            for (target in targets) {
+                val tLow = target.lowercase()
+                if (' ' in tLow) {
+                    phrases += tLow
+                    slotTerms += ConceptTerm(tLow, weight = 0.95, isPhrase = true)
+                    for (part in tLow.split(' ', '-')) {
+                        if (part.length >= 3 && part !in enRetrievalStopwords) {
+                            enTerms += part
+                            slotTerms += ConceptTerm(part, weight = 0.65)
+                        }
+                    }
+                } else {
+                    for (part in tLow.split('-')) {
+                        if (part.length >= 2 && part !in enRetrievalStopwords) {
+                            enTerms += part
+                            slotTerms += ConceptTerm(part, weight = 0.90)
+                            val pStem = stemEn(part)
+                            if (pStem != part && pStem.length >= 3) {
+                                slotTerms += ConceptTerm(pStem, weight = 0.80)
+                            }
+                        }
                     }
                 }
             }
+            val isTitleOnly = zh in setOf("君主论", "利维坦", "理想国", "论自由")
+            if (!isTitleOnly && coveredSlotKeys.add("zh-bi:$zh")) {
+                addSlot("zh-bi:$zh", slotTerms, importance = 1.0)
+            }
         }
-        // Harvest topic titles & concept entity aliases dynamically from the local collection DB
+
+        // 3. Chinese sequences: split on particles/question words first, then keep meaningful whole + n-grams
+        for (rawRun in zhSequenceRegex.findAll(question)) {
+            val parts = zhSplitParticlesRegex.split(rawRun.value).filter { it.length >= 2 }
+            for (part in parts) {
+                if (part in zhRetrievalStopwords) continue
+                zhTerms += part
+                val subTerms = ArrayList<ConceptTerm>()
+                subTerms += ConceptTerm(part, weight = 1.0, isChinese = true)
+                if (part.length > 2) {
+                    for (i in 0..(part.length - 2)) {
+                        val gram2 = part.substring(i, i + 2)
+                        if (gram2 !in zhRetrievalStopwords) {
+                            zhTerms += gram2
+                            subTerms += ConceptTerm(gram2, weight = 0.65, isChinese = true)
+                        }
+                    }
+                }
+                if (part.length > 3) {
+                    for (i in 0..(part.length - 3)) {
+                        val gram3 = part.substring(i, i + 3)
+                        if (gram3 !in zhRetrievalStopwords) {
+                            zhTerms += gram3
+                            subTerms += ConceptTerm(gram3, weight = 0.82, isChinese = true)
+                        }
+                    }
+                }
+                // Only add a standalone Chinese slot if not already covered by a bilingual match on the same span
+                val alreadyBilingual = matchedBilingualKeys.any { bi -> bi in part || part in bi }
+                if (!alreadyBilingual && coveredSlotKeys.add("zh:$part")) {
+                    addSlot("zh:$part", subTerms, importance = 1.0)
+                }
+            }
+        }
+
+        // 4. Harvest topic titles & concept entity aliases dynamically from the local collection DB
         if (BookSchemaMigration.tableExists(db, "course_topics")) {
             db.prepareStatement("SELECT title FROM course_topics WHERE collection_id=?").use { sql ->
                 sql.setString(1, collectionId)
@@ -523,8 +879,16 @@ internal object CollectionQaRetriever {
                         val title = rows.getString(1).orEmpty()
                         val topicZh = zhSequenceRegex.findAll(title).map { it.value }.toList()
                         if (topicZh.any { it in question }) {
+                            val extraTerms = ArrayList<ConceptTerm>()
                             for (tok in enTokenRegex.findAll(title)) {
-                                if (tok.value.length >= 3) enTerms += tok.value.lowercase()
+                                val t = tok.value.lowercase()
+                                if (t.length >= 3 && t !in enRetrievalStopwords) {
+                                    enTerms += t
+                                    extraTerms += ConceptTerm(t, weight = 0.85)
+                                }
+                            }
+                            if (extraTerms.isNotEmpty() && coveredSlotKeys.add("topic:$title")) {
+                                addSlot("topic:$title", extraTerms, importance = 0.9)
                             }
                         }
                     }
@@ -541,8 +905,16 @@ internal object CollectionQaRetriever {
                         val name = rows.getString(1).orEmpty()
                         val aliasesRaw = rows.getString(2).orEmpty()
                         if (name.length >= 2 && (name.lowercase() in qLower || enTerms.any { it in name.lowercase() })) {
+                            val extraTerms = ArrayList<ConceptTerm>()
                             for (tok in enTokenRegex.findAll("$name $aliasesRaw")) {
-                                if (tok.value.length >= 3) enTerms += tok.value.lowercase()
+                                val t = tok.value.lowercase()
+                                if (t.length >= 3 && t !in enRetrievalStopwords) {
+                                    enTerms += t
+                                    extraTerms += ConceptTerm(t, weight = 0.85)
+                                }
+                            }
+                            if (extraTerms.isNotEmpty() && coveredSlotKeys.add("concept:$name")) {
+                                addSlot("concept:$name", extraTerms, importance = 0.9)
                             }
                         }
                     }
@@ -580,11 +952,27 @@ internal object CollectionQaRetriever {
             englishTerms = enTerms.toList(),
             phrases = phrases.toList(),
             chineseTerms = zhTerms.toList(),
+            conceptSlots = slots,
+            titlePreferredBookIds = titlePreferredBookIds,
             requestedWeeks = requestedWeeks,
             roleBoosts = roleBoosts,
             allMatchTerms = allMatch,
         )
     }
+
+    private data class RawScoredPage(
+        val mat: CollectionMaterialMeta,
+        val page: Int,
+        val rawText: String,
+        val normText: String,
+        val docLength: Int,
+        val slotTfs: DoubleArray,
+        val headingSlotsHit: Int,
+        val maxSentenceSlotsHit: Int,
+        val hasDefinitionInCoOccurringSentence: Boolean,
+        val hasBoilerplate: Boolean,
+        val ftsHit: Boolean,
+    )
 
     private fun scoreAllowedPages(
         db: Connection,
@@ -595,11 +983,13 @@ internal object CollectionQaRetriever {
         currentBookId: String?,
         pageTextCache: HashMap<Pair<String, Int>, String>,
     ): List<ScoredPageCandidate> {
-        val matByBook = materials.associateBy { it.bookId }
-        val ftsBoostPages = HashSet<Pair<String, Int>>()
+        val slots = queryProfile.conceptSlots
+        if (slots.isEmpty()) return emptyList()
 
-        // Use SQLite pages_fts index for >= 3-char anchor terms across the collection
-        val ftsTokens = queryProfile.englishTerms.filter { it.length >= 3 && it !in genericEntityStopwords }.take(8)
+        val ftsBoostPages = HashSet<Pair<String, Int>>()
+        val ftsTokens = queryProfile.englishTerms
+            .filter { it.length >= 3 && it !in enRetrievalStopwords && it !in enCueWords }
+            .take(8)
         for (mat in materials) {
             for (tok in ftsTokens) {
                 val hits = BookFtsStore.queryCandidatePages(db, mat.bookId, tok).orEmpty()
@@ -607,8 +997,11 @@ internal object CollectionQaRetriever {
             }
         }
 
-        // Load and score allowed pages of the collection's materials
-        val allCandidates = ArrayList<ScoredPageCandidate>()
+        val rawPages = ArrayList<RawScoredPage>()
+        val df = IntArray(slots.size)
+        var totalDocs = 0
+        var totalDocLength = 0L
+
         for (mat in materials) {
             val allowedSet = if (collectionKind == CollectionKind.BOOKLIST) allowedPagesByBook[mat.bookId].orEmpty() else null
             if (allowedSet != null && allowedSet.isEmpty()) continue
@@ -620,63 +1013,234 @@ internal object CollectionQaRetriever {
                         if (allowedSet != null && page !in allowedSet) continue
                         val rawText = rows.getString(2).orEmpty()
                         if (rawText.isBlank()) continue
+                        totalDocs++
                         pageTextCache[mat.bookId to page] = rawText
                         val normText = SentenceCitationGate.normalizeText(rawText)
                         val normLower = normText.lowercase()
 
-                        var termScore = 0.0
-                        var distinctHits = 0
-                        for (term in queryProfile.englishTerms) {
-                            if (containsWordOrToken(normLower, term)) {
-                                distinctHits++
-                                val weight = if (term in genericEntityStopwords) 0.5 else if (term.length >= 5) 3.0 else 2.2
-                                termScore += weight
-                            }
+                        // Tokenize English words & stems once per page
+                        val wordCounts = HashMap<String, Int>(64)
+                        val stemCounts = HashMap<String, Int>(64)
+                        var wordTotal = 0
+                        for (m in enPageWordRegex.findAll(normLower)) {
+                            val w = m.value
+                            wordTotal++
+                            wordCounts[w] = (wordCounts[w] ?: 0) + 1
+                            val st = stemEn(w)
+                            stemCounts[st] = (stemCounts[st] ?: 0) + 1
                         }
-                        for (phrase in queryProfile.phrases) {
-                            if (phrase in normLower) {
-                                distinctHits++
-                                termScore += 4.5
-                            }
-                        }
-                        for (zh in queryProfile.chineseTerms) {
-                            if (zh.length >= 2 && zh in normLower && zh !in genericEntityStopwords) {
-                                distinctHits++
-                                termScore += 1.6
-                            }
-                        }
-                        if (distinctHits == 0 && (mat.bookId to page) !in ftsBoostPages) continue
+                        val docLen = maxOf(wordTotal, normLower.length / 4).coerceAtLeast(1)
+                        totalDocLength += docLen
 
-                        if ((mat.bookId to page) in ftsBoostPages) termScore += 1.2
-                        val authorityBoost = when (mat.authorityRank) {
-                            1 -> 1.8
-                            2 -> 1.1
-                            3 -> 0.8
-                            else -> 0.3
+                        // Extract heading lines (# ... or short standalone title-like lines)
+                        val headingBuilder = StringBuilder()
+                        for (rawLine in rawText.lineSequence()) {
+                            val line = rawLine.trim()
+                            if (line.isEmpty()) continue
+                            val isMdHeading = line.startsWith("#")
+                            val isShortStandaloneTitle = line.length in 4..80 &&
+                                !line.endsWith('.') && !line.endsWith(',') && !line.endsWith(';') &&
+                                line.count { it == ' ' } in 0..10
+                            if (isMdHeading || isShortStandaloneTitle) {
+                                headingBuilder.append(line.lowercase()).append('\n')
+                            }
                         }
-                        val weekBoost = if (mat.weekNum != null && mat.weekNum in queryProfile.requestedWeeks) 3.5 else 0.0
-                        val roleBoost = if (mat.role in queryProfile.roleBoosts) 2.2 else 0.0
-                        val currentBookBoost = if (mat.bookId == currentBookId) 0.25 else 0.0
-                        val total = termScore + authorityBoost + weekBoost + roleBoost + currentBookBoost
+                        val headingText = SentenceCitationGate.normalizeText(headingBuilder.toString()).lowercase()
+                        val headingWords = enPageWordRegex.findAll(headingText).map { it.value }.toHashSet()
+                        val headingStems = headingWords.mapTo(HashSet()) { stemEn(it) }
 
-                        allCandidates += ScoredPageCandidate(
-                            bookId = mat.bookId,
+                        val slotTfs = DoubleArray(slots.size)
+                        var anyCoreSlotHit = false
+                        var headingHits = 0
+                        for (sIdx in slots.indices) {
+                            val slot = slots[sIdx]
+                            var bestWeightedTf = 0.0
+                            var hitInHeading = false
+                            for (term in slot.terms) {
+                                val count = when {
+                                    term.isChinese -> countSubstringOccurrences(normLower, term.text)
+                                    term.isPhrase -> countSubstringOccurrences(normLower, term.text)
+                                    term.text.length <= 3 -> wordCounts[term.text] ?: 0
+                                    else -> maxOf(wordCounts[term.text] ?: 0, stemCounts[term.text] ?: 0)
+                                }
+                                if (count > 0) {
+                                    val wTf = count.toDouble() * term.weight
+                                    if (wTf > bestWeightedTf) bestWeightedTf = wTf
+                                }
+                                if (!hitInHeading && headingText.isNotEmpty()) {
+                                    val inHead = when {
+                                        term.isChinese || term.isPhrase -> term.text in headingText
+                                        else -> term.text in headingWords || term.text in headingStems
+                                    }
+                                    if (inHead) hitInHeading = true
+                                }
+                            }
+                            slotTfs[sIdx] = bestWeightedTf
+                            if (bestWeightedTf > 0.0) {
+                                df[sIdx]++
+                                if (slot.baseImportance >= 0.8) anyCoreSlotHit = true
+                            }
+                            if (hitInHeading && slot.baseImportance >= 0.8) headingHits++
+                        }
+
+                        val ftsHit = (mat.bookId to page) in ftsBoostPages
+                        if (!anyCoreSlotHit && !ftsHit) continue
+
+                        // Sentence / adjacent-2-sentence window co-occurrence & definitional cue detection
+                        val sentences = sentenceSplitRegex.split(normLower).filter { it.length >= 12 }
+                        var maxWinSlots = 0
+                        var hasDefCue = false
+                        for (i in sentences.indices) {
+                            val window = if (i + 1 < sentences.size && sentences[i].length < 220) {
+                                sentences[i] + " " + sentences[i + 1]
+                            } else {
+                                sentences[i]
+                            }
+                            val winWords = enPageWordRegex.findAll(window).map { it.value }.toHashSet()
+                            val winStems = winWords.mapTo(HashSet()) { stemEn(it) }
+                            var coreInWin = 0
+                            for (slot in slots) {
+                                if (slot.baseImportance < 0.8) continue
+                                val matched = slot.terms.any { term ->
+                                    when {
+                                        term.isChinese || term.isPhrase -> term.text in window
+                                        else -> term.text in winWords || term.text in winStems
+                                    }
+                                }
+                                if (matched) coreInWin++
+                            }
+                            if (coreInWin > maxWinSlots) maxWinSlots = coreInWin
+                            if (coreInWin >= 2 && definitionCueRegex.containsMatchIn(window)) {
+                                hasDefCue = true
+                            }
+                        }
+
+                        rawPages += RawScoredPage(
+                            mat = mat,
                             page = page,
                             rawText = rawText,
                             normText = normText,
-                            score = total,
-                            role = mat.role,
-                            authorityRank = mat.authorityRank,
+                            docLength = docLen,
+                            slotTfs = slotTfs,
+                            headingSlotsHit = headingHits,
+                            maxSentenceSlotsHit = maxWinSlots,
+                            hasDefinitionInCoOccurringSentence = hasDefCue,
+                            hasBoilerplate = boilerplateRegex.containsMatchIn(normLower),
+                            ftsHit = ftsHit,
                         )
                     }
                 }
             }
+        }
+
+        if (rawPages.isEmpty()) return emptyList()
+        val avgDl = (totalDocLength.toDouble() / totalDocs.coerceAtLeast(1)).coerceAtLeast(50.0)
+        val coreSlotsTotal = slots.count { it.baseImportance >= 0.8 }
+        val k1 = 1.2
+        val b = 0.35
+
+        val allCandidates = ArrayList<ScoredPageCandidate>(rawPages.size)
+        for (rp in rawPages) {
+            var bm25Score = 0.0
+            var coreSlotsHit = 0
+            var maxTfOnHit = 0.0
+            var minDfOnHit = Int.MAX_VALUE
+
+            for (sIdx in slots.indices) {
+                val tf = rp.slotTfs[sIdx]
+                if (tf <= 0.0) continue
+                val slot = slots[sIdx]
+                val docFreq = df[sIdx].coerceAtLeast(1)
+                val idf = kotlin.math.ln(1.0 + (totalDocs - docFreq + 0.5) / (docFreq + 0.5)).coerceAtLeast(0.6)
+                val tfNorm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * rp.docLength / avgDl))
+                bm25Score += idf * slot.baseImportance * tfNorm
+                if (slot.baseImportance >= 0.8) {
+                    coreSlotsHit++
+                    if (tf > maxTfOnHit) maxTfOnHit = tf
+                    if (docFreq < minDfOnHit) minDfOnHit = docFreq
+                }
+            }
+
+            if (coreSlotsHit == 0 && !rp.ftsHit) continue
+            // Suppress single-hit high-frequency incidental noise on multi-concept queries over real-sized books
+            if (totalDocs >= 12 &&
+                coreSlotsTotal >= 3 &&
+                coreSlotsHit == 1 &&
+                maxTfOnHit <= 1.0 &&
+                rp.headingSlotsHit == 0 &&
+                minDfOnHit > totalDocs * 0.25
+            ) {
+                continue
+            }
+
+            val coverageBonus = if (coreSlotsTotal >= 2 && coreSlotsHit >= 2) {
+                val ratio = coreSlotsHit.toDouble() / coreSlotsTotal.toDouble()
+                3.5 * ratio * coreSlotsHit
+            } else 0.0
+            val headingBonus = rp.headingSlotsHit * 2.5
+            val coOccurBonus = when {
+                rp.maxSentenceSlotsHit >= 3 -> 4.0
+                rp.maxSentenceSlotsHit == 2 -> 2.4
+                else -> 0.0
+            }
+            val defBonus = if (rp.hasDefinitionInCoOccurringSentence) 3.0 else 0.0
+            val boilerplatePenalty = if (rp.hasBoilerplate) -18.0 else 0.0
+            val ftsBonus = if (rp.ftsHit) 1.0 else 0.0
+            val authorityBoost = when (rp.mat.authorityRank) {
+                1 -> 1.4
+                2 -> 0.9
+                3 -> 0.6
+                else -> 0.2
+            }
+            val weekBoost = if (rp.mat.weekNum != null && rp.mat.weekNum in queryProfile.requestedWeeks) 3.5 else 0.0
+            val roleBoost = if (rp.mat.role in queryProfile.roleBoosts) 2.2 else 0.0
+            val currentBookBoost = if (rp.mat.bookId == currentBookId) 0.25 else 0.0
+            val titlePreferredBoost = if (rp.mat.bookId in queryProfile.titlePreferredBookIds) 1.5 else 0.0
+
+            val total = bm25Score + coverageBonus + headingBonus + coOccurBonus + defBonus +
+                boilerplatePenalty + ftsBonus + authorityBoost + weekBoost + roleBoost +
+                currentBookBoost + titlePreferredBoost
+            if (rp.hasBoilerplate && total <= 0.0) continue
+
+            allCandidates += ScoredPageCandidate(
+                bookId = rp.mat.bookId,
+                page = rp.page,
+                rawText = rp.rawText,
+                normText = rp.normText,
+                score = total,
+                role = rp.mat.role,
+                authorityRank = rp.mat.authorityRank,
+            )
         }
         return allCandidates.sortedWith(
             compareByDescending<ScoredPageCandidate> { it.score }
                 .thenBy { it.authorityRank }
                 .thenBy { it.page },
         )
+    }
+
+    private fun countSubstringOccurrences(haystack: String, needle: String): Int {
+        if (needle.isEmpty()) return 0
+        var count = 0
+        var idx = haystack.indexOf(needle)
+        while (idx >= 0) {
+            count++
+            idx = haystack.indexOf(needle, startIndex = idx + needle.length)
+        }
+        return count
+    }
+
+    private fun containsWholeWord(normLower: String, term: String): Boolean {
+        if (term.isEmpty()) return false
+        var searchFrom = normLower.indexOf(term)
+        while (searchFrom >= 0) {
+            val end = searchFrom + term.length
+            val leftOk = searchFrom == 0 || !normLower[searchFrom - 1].isLetterOrDigit()
+            val rightOk = end == normLower.length || !normLower[end].isLetterOrDigit()
+            if (leftOk && rightOk) return true
+            searchFrom = normLower.indexOf(term, startIndex = searchFrom + 1)
+        }
+        return false
     }
 
     private fun containsWordOrToken(normLower: String, term: String): Boolean {

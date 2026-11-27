@@ -6,6 +6,7 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import api_budget as ab  # noqa: E402
@@ -80,6 +81,79 @@ class RaiseCoachShareTests(unittest.TestCase):
         self.ledger.save(data)
         raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
         self.assertEqual(66_666_667, self.ledger.read()["cycles"]["openai:2026-11"]["spent"])
+
+    def snapshot(self):
+        return {p.name: p.read_bytes() for p in sorted(self.state.iterdir())
+                if p.name != "api-spend.lock" and not p.name.endswith(".tmp")}
+
+    def copy_of_state(self):
+        import shutil
+        probe = Path(tempfile.mkdtemp(dir=self.state.parent))
+        for p in self.state.iterdir():
+            if p.is_file():
+                shutil.copy2(p, probe / p.name)
+        for provider in ("anthropic", "openai"):   # the copy's own identity in its plan, pin re-derived as on disk
+            plan_path, pin_path = probe / f"grant-allocation-{provider}.json", probe / f"grant-window-{provider}.json"
+            plan, pin = json.loads(plan_path.read_text()), json.loads(pin_path.read_text())
+            matched = pin["digest"] == hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+            plan["ledgers"][0]["state"] = str(probe.resolve())
+            plan_path.write_text(json.dumps(plan))
+            if matched:
+                pin["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+            pin_path.write_text(json.dumps(pin))
+        return probe.resolve()
+
+    def writes_of_a_clean_run(self):
+        names = []
+        real = ab.atomic_json
+        def record(path, value):
+            names.append(Path(path).name)
+            return real(path, value)
+        with patch.object(ab, "atomic_json", record):
+            raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
+        return names
+
+    def test_an_interrupted_run_rerun_ends_exactly_like_one_clean_run(self):
+        # TON-740 review: fail each write once, rerun `apply`, and the result must match a clean run.
+        pristine = self.snapshot()
+        writes = self.writes_of_a_clean_run()
+        reference = self.snapshot()
+        self.assertEqual(["api-credit-ledger.json", "api-spend-2026-11.json",
+                          "grant-window-anthropic.json", "grant-allocation-anthropic.json", "grant-window-anthropic.json",
+                          "grant-window-openai.json", "grant-allocation-openai.json", "grant-window-openai.json"], writes)
+        for failing, bridge_call_between in [(i, b) for i in range(len(writes)) for b in (False, True)]:
+            with self.subTest(write=f"{failing}:{writes[failing]}", bridge_call_between=bridge_call_between):
+                for name, content in pristine.items():
+                    (self.state / name).write_bytes(content)
+                for name in set(self.snapshot()) - set(pristine):
+                    (self.state / name).unlink()
+                real, calls = ab.atomic_json, []
+                def flaky(path, value):
+                    calls.append(path)
+                    if len(calls) == failing + 1:
+                        raise OSError("injected write failure")
+                    return real(path, value)
+                with patch.object(ab, "atomic_json", flaky), self.assertRaisesRegex(OSError, "injected"):
+                    raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
+                # Never a stall in between: both providers still admit calls on whatever plan is on disk
+                # (checked on a throwaway copy unless the bridge really calls in between and re-pins).
+                probe = self.state if bridge_call_between else self.copy_of_state()
+                ledger = CreditLedger(probe, lambda: NOW)
+                for provider in ("anthropic", "openai"):
+                    ledger.allocation(provider, NOW, ledger.read())
+                raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
+                self.assertEqual(reference, self.snapshot())
+
+    def test_a_lost_marker_cannot_double_the_back_charge(self):
+        # The marker travels inside the same ledger write as the back-charge: there is no state with one and not the other.
+        raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
+        once = self.ledger.read()
+        self.assertIn(raise_share.MARKER, once["migrations"])
+        raise_share.run(self.state, apply=True, now=NOW, out=lambda *_: None)
+        twice = self.ledger.read()
+        self.assertEqual(once, twice)
+        self.assertEqual(43_254_038, twice["cycles"]["openai:2026-11"]["spent"])
+        self.assertEqual(3_333_334, twice["cycles"]["openai:2026-11"]["reserved"]["oldhold"])
 
     def test_check_changes_nothing(self):
         files = lambda: {p.name: p.read_bytes() for p in self.state.iterdir() if p.name != "api-spend.lock"}

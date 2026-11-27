@@ -15,7 +15,13 @@ In order, under the ledger lock (backups first):
 3. Raise Coach's share in each allocation plan to the whole free grant minus other writers
    (80 / 100), and re-pin the plan digest so the bridge accepts it.
 
-Steps 1 and 2 happen once: a marker file in the state directory makes a rerun skip them.
+Interrupted runs are safe to rerun with `apply`:
+- Steps 1 and 2 and their one-time marker (`migrations` inside the ledger) are a single atomic
+  ledger write; a rerun that finds the marker skips them entirely and only rewrites the derived
+  monthly summaries.
+- Step 3 never leaves a plan the bridge refuses: the pin is first opened for the current window
+  (any plan of this window is accepted and pinned on first use), then the plan is replaced, then
+  the pin is set to the new digest. A rerun completes whichever of those writes is missing.
 """
 from __future__ import annotations
 
@@ -37,7 +43,7 @@ import api_budget as ab  # noqa: E402
 from api_route import CONFIG  # noqa: E402
 
 M = 1_000_000
-MARKER = "ton740-price-correction-2026-11.json"
+MARKER = "ton740-price-correction-2026-11"   # kept inside the ledger, written with the correction itself
 CORRECTION = {"provider": "openai", "month": "2026-11", "minimum_microusd": 30_280_000}
 # The price table before TON-740 (USD per million tokens); every open hold was reserved with it.
 OLD_PRICES = {
@@ -102,8 +108,10 @@ def run(state: Path, apply: bool, now=None, out=print):
         out(f"备份 {backup}")
     with ledger.locked():
         data = ledger.read()
-        if (state / MARKER).exists():
+        if MARKER in data.get("migrations", {}):
             out("补记与重估：已经做过，跳过")
+            if apply:
+                ledger.save(data)   # only the derived monthly summaries can lag behind the ledger
         else:
             p, month = CORRECTION["provider"], CORRECTION["month"]
             cycle = data["cycles"].setdefault(f"{p}:{month}", {"spent": 0, "reserved": {}, "limit": ab.grant_limit_micros(p)})
@@ -119,22 +127,33 @@ def run(state: Path, apply: bool, now=None, out=print):
                 ratio = worst_ratio(provider)
                 added = reprice_holds(data, provider, ratio)
                 out(f"在途预留重估：{provider} 按新费率最坏比 ×{ratio:.4f}，预留增加 ${added / M:.4f}")
+            # The back-charge, the re-priced holds and the marker land in one atomic ledger write.
+            data.setdefault("migrations", {})[MARKER] = {"correction_microusd": amount, "at_utc": int(now)}
             if apply:
                 ledger.save(data)
-                ab.atomic_json(state / MARKER, {"correction_microusd": amount, "at_utc": int(now)})
         for provider in ("anthropic", "openai"):
-            plan = json.loads((state / f"grant-allocation-{provider}.json").read_text())
-            pin = json.loads((state / f"grant-window-{provider}.json").read_text())
-            if pin["digest"] != digest(plan) or len(plan["ledgers"]) != 1 or plan["ledgers"][0]["state"] != str(state):
-                raise SystemExit(f"{provider}：计划和钉子对不上，或计划里不止一份 Coach，未改")
+            plan_path, pin_path = state / f"grant-allocation-{provider}.json", state / f"grant-window-{provider}.json"
+            plan = json.loads(plan_path.read_text())
+            pin = json.loads(pin_path.read_text())
+            if len(plan["ledgers"]) != 1 or plan["ledgers"][0]["state"] != str(state):
+                raise SystemExit(f"{provider}：计划里不止一份 Coach，未改")
+            # Accepted pins: this plan's digest, or one opened for this window (an interrupted earlier run).
+            if pin["digest"] != digest(plan) and pin["end_utc"] > plan["start_utc"]:
+                raise SystemExit(f"{provider}：计划和钉子对不上，未改")
             new = copy.deepcopy(plan)
             new["ledgers"][0]["limit_microusd"] = ab.micros(ab.MONTHLY_GRANTS[provider]) - plan["other_writers_microusd"]
             out(f"{provider}：Coach 总额 ${plan['ledgers'][0]['limit_microusd'] / M:.2f} → "
                 f"${new['ledgers'][0]['limit_microusd'] / M:.2f}（赠额 ${ab.MONTHLY_GRANTS[provider]} − other_writers "
                 f"${plan['other_writers_microusd'] / M:.2f}）")
-            if apply:
-                ab.atomic_json(state / f"grant-allocation-{provider}.json", new)
-                ab.atomic_json(state / f"grant-window-{provider}.json", {"digest": digest(new), "end_utc": new["end_utc"]})
+            if not apply:
+                continue
+            if new != plan:
+                # Open the pin for this window first: whichever plan is on disk after a crash is accepted
+                # (and pinned on first use), so the bridge never refuses calls between the two writes.
+                ab.atomic_json(pin_path, {"digest": "ton740-transition", "end_utc": plan["start_utc"]})
+                ab.atomic_json(plan_path, new)
+            if pin != {"digest": digest(new), "end_utc": new["end_utc"]}:
+                ab.atomic_json(pin_path, {"digest": digest(new), "end_utc": new["end_utc"]})
         allowance = {}
         if apply:
             data = ledger.read()

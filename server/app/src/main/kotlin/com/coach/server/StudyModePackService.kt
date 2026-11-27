@@ -145,6 +145,7 @@ data class BookMapBatchRequest(
     val requestId: String = "",
     val friend: String? = null,
     val device: String = "owner",
+    val asyncPending: Boolean = false,
 )
 
 data class StudyModeTransportReply(
@@ -213,6 +214,18 @@ interface StudyModeBatchTransport {
         friend: String?,
         device: String?,
     ): StudyModeTransportReply
+
+    /** Single-probe variant for `asyncPending` callers: propagates [BatchPending] instead of blocking the HTTP thread. */
+    fun completeOrPending(
+        task: String,
+        jobKey: String,
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        useBatchApi: Boolean,
+        friend: String?,
+        device: String?,
+    ): StudyModeTransportReply = complete(task, jobKey, systemPrompt, userPrompt, maxTokens, useBatchApi, friend, device)
 }
 
 class HaikuStudyModeStreamTransport(
@@ -291,7 +304,7 @@ class HaikuStudyModeStreamTransport(
 class HaikuStudyModeBatchTransport(
     private val bridge: BridgeClient,
 ) : StudyModeBatchTransport {
-    override fun complete(
+    private fun completeOnce(
         task: String,
         jobKey: String,
         systemPrompt: String,
@@ -300,8 +313,8 @@ class HaikuStudyModeBatchTransport(
         useBatchApi: Boolean,
         friend: String?,
         device: String?,
+        startedNs: Long,
     ): StudyModeTransportReply {
-        val startedNs = System.nanoTime()
         val batchEligible = useBatchApi && friend == null
         val targetModel = if (friend != null) BridgeClient.CLAUDE else BridgeClient.GPT_62_ASTRA
         val client = if (batchEligible) bridge.forBatchJob("studymode", jobKey) else bridge
@@ -317,27 +330,62 @@ class HaikuStudyModeBatchTransport(
             friendId = friend?.let(::friendId),
             friendDevice = if (friend != null) device else null,
         )
+        val result = client.chat(request)
+        val elapsedMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
+        return when (result) {
+            is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
+                result.rejectIfBusy()
+                throw IllegalStateException("全书地图批处理失败：${result.reason}")
+            }
+            is BridgeResult.Success -> StudyModeTransportReply(
+                text = result.text,
+                routeChannel = if (batchEligible) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
+                model = result.terminal.servedBy?.ifBlank { targetModel } ?: targetModel,
+                inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
+                outputTokens = TokenLedgerPricing.estimateTokens(result.text),
+                firstTokenMs = elapsedMs,
+                elapsedMs = elapsedMs,
+            )
+        }
+    }
+
+    override fun completeOrPending(
+        task: String,
+        jobKey: String,
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        useBatchApi: Boolean,
+        friend: String?,
+        device: String?,
+    ): StudyModeTransportReply = completeOnce(
+        task = task,
+        jobKey = jobKey,
+        systemPrompt = systemPrompt,
+        userPrompt = userPrompt,
+        maxTokens = maxTokens,
+        useBatchApi = useBatchApi,
+        friend = friend,
+        device = device,
+        startedNs = System.nanoTime(),
+    )
+
+    override fun complete(
+        task: String,
+        jobKey: String,
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        useBatchApi: Boolean,
+        friend: String?,
+        device: String?,
+    ): StudyModeTransportReply {
+        val startedNs = System.nanoTime()
         var attempts = 0
         while (true) {
             try {
-                val result = client.chat(request)
-                val elapsedMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
-                return when (result) {
-                    is BridgeResult.Failure -> {
-                        result.rejectIfFreeGrantExhausted()
-                        result.rejectIfBusy()
-                        throw IllegalStateException("全书地图批处理失败：${result.reason}")
-                    }
-                    is BridgeResult.Success -> StudyModeTransportReply(
-                        text = result.text,
-                        routeChannel = if (batchEligible) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
-                        model = result.terminal.servedBy?.ifBlank { targetModel } ?: targetModel,
-                        inputTokens = TokenLedgerPricing.estimateTokens(systemPrompt) + TokenLedgerPricing.estimateTokens(userPrompt),
-                        outputTokens = TokenLedgerPricing.estimateTokens(result.text),
-                        firstTokenMs = elapsedMs,
-                        elapsedMs = elapsedMs,
-                    )
-                }
+                return completeOnce(task, jobKey, systemPrompt, userPrompt, maxTokens, useBatchApi, friend, device, startedNs)
             } catch (pending: BatchPending) {
                 attempts += 1
                 if (attempts > 400) throw IllegalStateException("全书地图批处理等待超时，请重试。")
@@ -508,8 +556,10 @@ internal object StudyModeAnchorGate {
         "bodyJumpPage" to "quoteAnchor",
     )
     private val asciiTokenRegex = Regex("[A-Za-z0-9]+")
+    private val alignTokenRegex = Regex("""[A-Za-z0-9]+|[\u4e00-\u9fff]""")
     private val whitespaceRegex = Regex("\\s+")
     private val trailingPunctRegex = Regex("""^[\s“”"']+|[\s“”"']+$""")
+    private val blockBreakRegex = Regex("""\n\s*\n\s*\n""")
 
     private data class AnchorFailure(
         val id: String,
@@ -523,9 +573,88 @@ internal object StudyModeAnchorGate {
     private val cjkSpaceBetweenRegex = Regex("""(?<=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])""")
     private val cjkTokenRegex = Regex("""[\u4e00-\u9fff]|[a-z0-9]+""")
 
+    private data class NormalizedWithOffsets(
+        val text: String,
+        val rawStartOffsets: IntArray,
+        val rawEndOffsets: IntArray,
+    )
+
+    private fun expandCharPiece(piece: String): String {
+        val nfkc = Normalizer.normalize(piece, Normalizer.Form.NFKC)
+        val out = StringBuilder(nfkc.length)
+        for (ch in nfkc) {
+            when (ch) {
+                '\u00ad', '\u200b', '\ufeff' -> Unit
+                '\u2212', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015' -> out.append('-')
+                '\u2018', '\u2019', '\u2032', '\u02bc' -> out.append('\'')
+                '\u201c', '\u201d', '\u2033' -> out.append('"')
+                '\u00a0', '\u202f', '\u205f', '\u3000' -> out.append(' ')
+                in '\u2000'..'\u200a' -> out.append(' ')
+                '\ufb01' -> out.append("fi")
+                '\ufb02' -> out.append("fl")
+                '\ufb00' -> out.append("ff")
+                '\ufb03' -> out.append("ffi")
+                '\ufb04' -> out.append("ffl")
+                else -> out.append(ch)
+            }
+        }
+        return out.toString()
+    }
+
+    private fun normalizeWithRawOffsets(raw: String): NormalizedWithOffsets {
+        val normChars = StringBuilder(raw.length)
+        val rawStarts = ArrayList<Int>(raw.length)
+        val rawEnds = ArrayList<Int>(raw.length)
+        var pendingSpace = false
+        var spaceRawStart = 0
+        var spaceRawEnd = 0
+        var i = 0
+        while (i < raw.length) {
+            val cp = raw.codePointAt(i)
+            val charLen = Character.charCount(cp)
+            val pieceNorm = expandCharPiece(raw.substring(i, i + charLen))
+            if (pieceNorm.isEmpty() || pieceNorm.all { it.isWhitespace() }) {
+                if (normChars.isNotEmpty()) {
+                    if (!pendingSpace) {
+                        spaceRawStart = i
+                        pendingSpace = true
+                    }
+                    spaceRawEnd = i + charLen
+                }
+            } else {
+                for (ch in pieceNorm) {
+                    if (ch.isWhitespace()) {
+                        if (normChars.isNotEmpty()) {
+                            if (!pendingSpace) {
+                                spaceRawStart = i
+                                pendingSpace = true
+                            }
+                            spaceRawEnd = i + charLen
+                        }
+                    } else {
+                        if (pendingSpace) {
+                            normChars.append(' ')
+                            rawStarts += spaceRawStart
+                            rawEnds += spaceRawEnd
+                            pendingSpace = false
+                        }
+                        normChars.append(ch.lowercaseChar())
+                        rawStarts += i
+                        rawEnds += i + charLen
+                    }
+                }
+            }
+            i += charLen
+        }
+        return NormalizedWithOffsets(
+            text = normChars.toString(),
+            rawStartOffsets = rawStarts.toIntArray(),
+            rawEndOffsets = rawEnds.toIntArray(),
+        )
+    }
+
     fun normalize(raw: String): String =
-        Normalizer.normalize(raw, Normalizer.Form.NFKC)
-            .replace('\u00AD'.toString(), "")
+        expandCharPiece(raw)
             .replace(whitespaceRegex, " ")
             .trim()
             .lowercase(Locale.US)
@@ -540,23 +669,128 @@ internal object StudyModeAnchorGate {
         return cjkCount >= 6
     }
 
+    /** Formats raw PDF/EPUB page text for LLM prompts without collapsing heading/paragraph boundaries together. */
+    fun formatPageExcerptForPrompt(rawText: String, maxChars: Int): String {
+        val blocks = rawText
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .split(Regex("""\n\s*\n+"""))
+            .mapNotNull { block ->
+                val collapsed = Normalizer.normalize(block, Normalizer.Form.NFKC)
+                    .replace(cjkSpaceBetweenRegex, "")
+                    .replace(whitespaceRegex, " ")
+                    .trim()
+                collapsed.takeIf { it.isNotEmpty() }
+            }
+        if (blocks.isEmpty()) return ""
+        val joined = blocks.joinToString("\n")
+        if (joined.length <= maxChars) return joined
+        val cut = joined.take(maxChars)
+        val lastDot = maxOf(cut.lastIndexOf(". "), cut.lastIndexOf('。'), cut.lastIndexOf('\n'))
+        return if (lastDot >= maxChars / 2) cut.substring(0, lastDot + 1).trimEnd() else cut.trimEnd()
+    }
+
+    private fun locateRawSpanInPage(quote: String, rawPageText: String, mapped: NormalizedWithOffsets): Pair<Int, Int>? {
+        val trimmed = trailingPunctRegex.replace(quote.trim(), "")
+        if (trimmed.isBlank() || !hasMinimumLength(trimmed)) return null
+        val normQuote = normalize(trimmed)
+        val cjkCount = trimmed.count { it in '\u4e00'..'\u9fff' }
+        if (normQuote.length < 12 && cjkCount < 6) return null
+
+        fun toRawSpan(normStart: Int, normEnd: Int): Pair<Int, Int>? {
+            if (mapped.rawStartOffsets.isEmpty() || normStart < 0 || normEnd <= normStart || normEnd > mapped.rawEndOffsets.size) return null
+            val rawStart = mapped.rawStartOffsets[normStart].coerceIn(0, rawPageText.length)
+            val rawEnd = mapped.rawEndOffsets[normEnd - 1].coerceIn(rawStart, rawPageText.length)
+            if (rawStart !in 0 until rawEnd || rawEnd > rawPageText.length) return null
+            val slice = rawPageText.substring(rawStart, rawEnd)
+            // Reject accidental heading-to-body mashups across multi-blank-line EPUB boundaries.
+            if (blockBreakRegex.containsMatchIn(slice)) return null
+            return rawStart to rawEnd
+        }
+
+        var searchFrom = 0
+        while (searchFrom <= mapped.text.length - normQuote.length) {
+            val idx = mapped.text.indexOf(normQuote, searchFrom)
+            if (idx < 0) break
+            toRawSpan(idx, idx + normQuote.length)?.let { return it }
+            searchFrom = idx + 1
+        }
+
+        val qTokens = alignTokenRegex.findAll(normQuote).map { it.value }.toList()
+        if (qTokens.size < 4) return null
+        val pageTokens = alignTokenRegex.findAll(mapped.text).toList()
+        if (pageTokens.size < qTokens.size) return null
+        val limit = pageTokens.size - qTokens.size
+        outer@ for (i in 0..limit) {
+            if (pageTokens[i].value != qTokens[0]) continue
+            var prevEnd = pageTokens[i].range.last + 1
+            for (j in 1 until qTokens.size) {
+                val tok = pageTokens[i + j]
+                if (tok.value != qTokens[j]) continue@outer
+                if (tok.range.first - prevEnd > 48) continue@outer
+                prevEnd = tok.range.last + 1
+            }
+            val startNorm = pageTokens[i].range.first
+            val endNorm = pageTokens[i + qTokens.size - 1].range.last + 1
+            toRawSpan(startNorm, endNorm)?.let { return it }
+        }
+        return null
+    }
+
     /** Extract candidate whole sentences (>= 5 ASCII words or >= 8 CJK chars) from a chapter's pages to aid targeted repair. */
     fun extractCandidateSentences(pages: List<StudyPageInput>, centerPage: Int, radius: Int = 2): List<Pair<Int, String>> {
         val candidates = mutableListOf<Pair<Int, String>>()
         pages.filter { kotlin.math.abs(it.pdfPage - centerPage) <= radius }
             .sortedBy { kotlin.math.abs(it.pdfPage - centerPage) }
             .forEach { p ->
-                val collapsed = Normalizer.normalize(p.text, Normalizer.Form.NFKC).replace(whitespaceRegex, " ")
-                collapsed.split(Regex("""(?<=[.!?。！？；])\s*|\n+"""))
-                    .map { it.trim() }
-                    .filter { s ->
-                        (s.length in 28..240 && asciiTokenRegex.findAll(s).count() >= 4) ||
-                            (s.length in 8..160 && s.count { it in '\u4e00'..'\u9fff' } >= 8)
-                    }
-                    .take(10)
-                    .forEach { sent -> candidates.add(p.pdfPage to sent) }
+                val paragraphs = p.text.replace("\r\n", "\n").replace('\r', '\n').split(Regex("""\n\s*\n+"""))
+                for (para in paragraphs) {
+                    val trimmedPara = para.trim()
+                    if (trimmedPara.startsWith("#")) continue
+                    val collapsed = Normalizer.normalize(trimmedPara, Normalizer.Form.NFKC)
+                        .replace(cjkSpaceBetweenRegex, "")
+                        .replace(whitespaceRegex, " ")
+                        .trim()
+                    collapsed.split(Regex("""(?<=[.!?。！？；])\s*|\n+"""))
+                        .map { it.trim() }
+                        .filter { s ->
+                            (s.length in 24..240 && asciiTokenRegex.findAll(s).count() >= 4) ||
+                                (s.length in 8..160 && s.count { it in '\u4e00'..'\u9fff' } >= 8)
+                        }
+                        .take(10)
+                        .forEach { sent -> candidates.add(p.pdfPage to sent) }
+                }
             }
         return candidates
+    }
+
+    /** Deterministic verbatim prose fallback when a chapter ends up without any clickable coreClaim anchor. */
+    fun extractFallbackProseAnchor(pages: List<StudyPageInput>): Triple<Int, String, Pair<Int, Int>>? {
+        for (p in pages) {
+            val raw = p.text
+            if (raw.isBlank()) continue
+            val mapped = normalizeWithRawOffsets(raw)
+            val paragraphs = raw.replace("\r\n", "\n").replace('\r', '\n').split(Regex("""\n\s*\n+"""))
+            for (para in paragraphs) {
+                val trimmed = para.trim()
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
+                val collapsed = Normalizer.normalize(trimmed, Normalizer.Form.NFKC).replace(whitespaceRegex, " ").trim()
+                val sentences = collapsed.split(Regex("(?<=[.!?。；])\\s+"))
+                    .map { it.trim() }
+                    .filter { it.length >= 24 && hasMinimumLength(it) }
+                for (sent in sentences) {
+                    val words = sent.split(' ')
+                    val candidate = if (sent.length <= 160) sent
+                    else if (words.size >= 8) words.take(14).joinToString(" ").trimEnd(',', ';', ':')
+                    else sent.take(120)
+                    val span = locateRawSpanInPage(candidate, raw, mapped)
+                    if (span != null) {
+                        return Triple(p.pdfPage, raw.substring(span.first, span.second), span)
+                    }
+                }
+            }
+        }
+        return null
     }
 
     fun findExactPage(quote: String, claimedPage: Int, pageNormMap: Map<Int, String>): Int? {
@@ -615,7 +849,22 @@ internal object StudyModeAnchorGate {
         repairOnlyWhenZeroValid: Boolean = false,
     ): Triple<JsonObject, StudyModeAnchorStats, StudyModeTransportReply?> {
         if (pages.isEmpty()) return Triple(payload, StudyModeAnchorStats(), null)
-        val pageNormMap = pages.associate { it.pdfPage to normalize(it.text) }
+        val rawByPage = pages.associate { it.pdfPage to it.text }
+        val mappedByPage = pages.associate { it.pdfPage to normalizeWithRawOffsets(it.text) }
+
+        fun findRawMatch(quote: String, claimedPage: Int): Triple<Int, Int, Int>? {
+            val claimedRaw = rawByPage[claimedPage]
+            val claimedMapped = mappedByPage[claimedPage]
+            if (claimedRaw != null && claimedMapped != null) {
+                locateRawSpanInPage(quote, claimedRaw, claimedMapped)?.let { (s, e) -> return Triple(claimedPage, s, e) }
+            }
+            for ((pg, rawText) in rawByPage) {
+                if (pg == claimedPage) continue
+                val mapped = mappedByPage[pg] ?: continue
+                locateRawSpanInPage(quote, rawText, mapped)?.let { (s, e) -> return Triple(pg, s, e) }
+            }
+            return null
+        }
 
         fun activeAnchorPairs(obj: JsonObject): List<Pair<String, String>> {
             val matched = pairKeys.filter { (pk, qk) -> obj.containsKey(pk) || (obj.containsKey(qk) && pairKeys.none { (otherPk, otherQk) -> otherQk == qk && obj.containsKey(otherPk) }) }
@@ -638,17 +887,22 @@ internal object StudyModeAnchorGate {
 
         val firstPassFailures = mutableListOf<AnchorFailure>()
         var initialValidCount = 0
+        var initialValidCoreClaims = 0
+        var failedCoreClaims = 0
         fun collectFailures(el: JsonElement, prefix: String) {
             when (el) {
                 is JsonArray -> el.forEachIndexed { idx, child -> collectFailures(child, "$prefix[$idx]") }
                 is JsonObject -> {
+                    val isCoreClaim = prefix.startsWith("root.coreClaims[")
                     for ((pk, qk) in activeAnchorPairs(el)) {
                         val pageVal = el[pk]?.jsonPrimitive?.intOrNull
                         val quoteVal = el[qk]?.jsonPrimitive?.contentOrNull
-                        val matchedPage = if (pageVal != null && quoteVal != null) findExactPage(quoteVal, pageVal, pageNormMap) else null
-                        if (matchedPage != null) {
+                        val matched = if (pageVal != null && quoteVal != null) findRawMatch(quoteVal, pageVal) else null
+                        if (matched != null) {
                             initialValidCount += 1
+                            if (isCoreClaim) initialValidCoreClaims += 1
                         } else {
+                            if (isCoreClaim) failedCoreClaims += 1
                             val hint = el["title"]?.jsonPrimitive?.contentOrNull
                                 ?: el["topic"]?.jsonPrimitive?.contentOrNull
                                 ?: el["claim"]?.jsonPrimitive?.contentOrNull
@@ -677,7 +931,8 @@ internal object StudyModeAnchorGate {
 
         var repairReply: StudyModeTransportReply? = null
         val repairsById = mutableMapOf<String, Pair<Int, String>>()
-        if (firstPassFailures.isNotEmpty() && repairTransport != null && (!repairOnlyWhenZeroValid || initialValidCount == 0)) {
+        val needsCoreClaimRepair = failedCoreClaims > 0 && initialValidCoreClaims == 0
+        if (firstPassFailures.isNotEmpty() && repairTransport != null && (!repairOnlyWhenZeroValid || initialValidCount == 0 || needsCoreClaimRepair)) {
             repairReply = modelCatching {
                 runTargetedRepair(
                     failures = firstPassFailures.take(8),
@@ -691,7 +946,7 @@ internal object StudyModeAnchorGate {
             }.getOrNull()?.also { (reply, fixes) ->
                 repairReply = reply
                 fixes.forEach { (id, pg, quote) ->
-                    if (findExactPage(quote, pg, pageNormMap) != null) {
+                    if (findRawMatch(quote, pg) != null) {
                         repairsById[id] = pg to quote
                     }
                 }
@@ -724,22 +979,32 @@ internal object StudyModeAnchorGate {
                         val quoteVal = map[qk]?.jsonPrimitive?.contentOrNull
                         val curPage = pageVal ?: pages.first().pdfPage
                         val curQuote = quoteVal.orEmpty()
-                        val matched = if (pageVal != null && quoteVal != null) findExactPage(curQuote, curPage, pageNormMap) else null
+                        val matched = if (pageVal != null && quoteVal != null) findRawMatch(curQuote, curPage) else null
                         if (matched != null) {
-                            if (matched != pageVal) {
-                                map[pk] = JsonPrimitive(matched)
+                            val (matchedPage, rawStart, rawEnd) = matched
+                            if (matchedPage != pageVal) {
+                                map[pk] = JsonPrimitive(matchedPage)
                                 itemRelocated += 1
                             }
-                            map[qk] = JsonPrimitive(trailingPunctRegex.replace(curQuote.trim(), ""))
+                            map[qk] = JsonPrimitive(rawByPage.getValue(matchedPage).substring(rawStart, rawEnd))
+                            if (qk == "quoteAnchor") {
+                                map["startUtf16"] = JsonPrimitive(rawStart)
+                                map["endUtf16"] = JsonPrimitive(rawEnd)
+                            }
                             itemPairCount += 1
                         } else {
                             val fid = "$prefix#$pk"
                             val fix = repairsById[fid]
                             if (fix != null) {
-                                val fixedPage = findExactPage(fix.second, fix.first, pageNormMap)
-                                if (fixedPage != null) {
+                                val fixedMatch = findRawMatch(fix.second, fix.first)
+                                if (fixedMatch != null) {
+                                    val (fixedPage, rawStart, rawEnd) = fixedMatch
                                     map[pk] = JsonPrimitive(fixedPage)
-                                    map[qk] = JsonPrimitive(trailingPunctRegex.replace(fix.second.trim(), ""))
+                                    map[qk] = JsonPrimitive(rawByPage.getValue(fixedPage).substring(rawStart, rawEnd))
+                                    if (qk == "quoteAnchor") {
+                                        map["startUtf16"] = JsonPrimitive(rawStart)
+                                        map["endUtf16"] = JsonPrimitive(rawEnd)
+                                    }
                                     if (fixedPage != pageVal) itemRelocated += 1
                                     itemPairCount += 1
                                 } else {
@@ -1148,14 +1413,7 @@ internal object StudyModePromptBuilder {
         if (cues.isNotBlank()) sb.append(cues.take(cueLimit)).append('\n')
         val budgetPerPage = ((maxTotalChars - sb.length) / selected.size.coerceAtLeast(1)).coerceIn(450, 950)
         selected.forEach { p ->
-            val compact = Normalizer.normalize(p.text, Normalizer.Form.NFKC).replace(Regex("\\s+"), " ").trim()
-            val slice = if (compact.length <= budgetPerPage) {
-                compact
-            } else {
-                val cut = compact.take(budgetPerPage)
-                val lastDot = cut.lastIndexOf(". ")
-                if (lastDot >= budgetPerPage / 2) cut.substring(0, lastDot + 1) else cut
-            }
+            val slice = StudyModeAnchorGate.formatPageExcerptForPrompt(p.text, budgetPerPage)
             sb.append("[p.").append(p.pdfPage).append("] ").append(slice).append('\n')
         }
         return sb.toString()
@@ -1411,7 +1669,7 @@ class StudyModePackService(
             )
         }
 
-        val (anchorVerified, anchorStats, anchorRepairReply) = StudyModeAnchorGate.verifyAndRepair(
+        val (anchorVerifiedRaw, anchorStats, anchorRepairReply) = StudyModeAnchorGate.verifyAndRepair(
             payload = mathVerified,
             pages = req.pages,
             repairTransport = batchTransport,
@@ -1421,6 +1679,11 @@ class StudyModePackService(
             device = req.device,
             repairOnlyWhenZeroValid = true,
         )
+        val anchorVerified = if (req.mode == ServerStudyMode.BOOK_MAP) {
+            ensureChapterHasVerifiedClaim(anchorVerifiedRaw, req.chapterTitle, req.pages)
+        } else {
+            anchorVerifiedRaw
+        }
         anchorRepairReply?.let { r ->
             if (req.friend == null) ledger?.record(
                 TokenLedgerEntry(
@@ -1569,19 +1832,19 @@ class StudyModePackService(
             }
         }
 
-        // Chunk chapters into groups of 4 (or 8 for 61+ chapters) so Batch finishes well under maxTokens=8192.
-        val groupSize = if (req.chapters.size > 60) 8 else 4
+        // Chunk chapters into groups of 6 (or 8 for 61+ chapters) so Batch finishes cleanly under maxTokens=8192.
+        val groupSize = if (req.chapters.size > 60) 8 else 6
         val chunks = req.chapters.sortedBy { it.chapterNum }.chunked(groupSize)
         val totalIn = AtomicInteger(0)
         val totalOut = AtomicInteger(0)
 
-        val mapSys = """Build ultra-concise BOOK_MAP chapter one-pagers (up to $groupSize chapters per JSON response; total output <= 2500 tokens).
+        val mapSys = """Build ultra-concise BOOK_MAP chapter one-pagers (up to $groupSize chapters per JSON response; total output <= 3000 tokens).
 CRITICAL RULES:
-1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 English words OR 6-18 Chinese chars copied directly from [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false,"pdfPage":12}]}]}
-2. Emit MAX 1 coreClaim, 1 keyTerm, and 1-2 short sections per chapter; every section MUST include integer pdfPage copied from Sections (p.XXX) or [p.XXX]; coreClaims[*].quoteAnchor strictly verbatim from [p.XXX].
+1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 English words OR 6-18 Chinese chars copied from ONE prose sentence on [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false,"pdfPage":12}]}]}
+2. Emit 1 coreClaim, 1 keyTerm, and 1-2 short sections per chapter; every section MUST include integer pdfPage copied from Sections (p.XXX) or [p.XXX]; coreClaims[*].quoteAnchor strictly verbatim from ONE prose paragraph on [p.XXX] (never merge heading and body).
 3. ${StudyModePromptBuilder.langInstruction(req.explainLang)}"""
 
-        val chunkFutures = chunks.mapIndexed { chunkIdx, group ->
+        val chunkOutcomes = chunks.mapIndexed { chunkIdx, group ->
             async(Dispatchers.IO) {
                 val prompt = buildString {
                     append("Book: ").append(req.bookTitle).append('\n')
@@ -1592,27 +1855,39 @@ CRITICAL RULES:
                         }
                         val firstPage = ch.pages.firstOrNull()
                         if (firstPage != null) {
-                            val clean = Normalizer.normalize(firstPage.text, Normalizer.Form.NFKC)
-                                .replace(Regex("""(?<=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])"""), "")
-                                .replace(Regex("\\s+"), " ")
-                                .trim()
-                            val cut = clean.take(900)
-                            val lastDot = cut.lastIndexOf(". ")
-                            val trimmed = if (clean.length > 900 && lastDot >= 450) cut.substring(0, lastDot + 1) else cut
+                            val trimmed = StudyModeAnchorGate.formatPageExcerptForPrompt(firstPage.text, 1400)
                             append("[p.").append(firstPage.pdfPage).append("] ").append(trimmed).append('\n')
                         }
                     }
                 }
-                val reply = batchTransport.complete(
-                    task = "BOOK_SECTION_BATCH",
-                    jobKey = StudyModeJsonHelpers.sha256Hex("bm-v4-${req.bookId}-${chunkIdx}-${batchVariantSig}"),
-                    systemPrompt = mapSys,
-                    userPrompt = prompt,
-                    maxTokens = 8192,
-                    useBatchApi = req.useBatchApi,
-                    friend = req.friend,
-                    device = req.device,
-                )
+                val jobKey = StudyModeJsonHelpers.sha256Hex("bm-v5-${req.bookId}-${chunkIdx}-${batchVariantSig}")
+                val reply = try {
+                    if (req.asyncPending) {
+                        batchTransport.completeOrPending(
+                            task = "BOOK_SECTION_BATCH",
+                            jobKey = jobKey,
+                            systemPrompt = mapSys,
+                            userPrompt = prompt,
+                            maxTokens = 8192,
+                            useBatchApi = req.useBatchApi,
+                            friend = req.friend,
+                            device = req.device,
+                        )
+                    } else {
+                        batchTransport.complete(
+                            task = "BOOK_SECTION_BATCH",
+                            jobKey = jobKey,
+                            systemPrompt = mapSys,
+                            userPrompt = prompt,
+                            maxTokens = 8192,
+                            useBatchApi = req.useBatchApi,
+                            friend = req.friend,
+                            device = req.device,
+                        )
+                    }
+                } catch (pending: BatchPending) {
+                    return@async null to pending.retryAfterMillis
+                }
                 totalIn.addAndGet(reply.inputTokens)
                 totalOut.addAndGet(reply.outputTokens)
                 if (req.friend == null) ledger?.record(
@@ -1629,52 +1904,103 @@ CRITICAL RULES:
                         status = "ok",
                     ),
                 )
-                StudyModeJsonHelpers.extractJsonObject(reply.text)["chapters"]?.jsonArray.orEmpty()
+                val parsedChapters = StudyModeJsonHelpers.extractJsonObject(reply.text)["chapters"]?.jsonArray.orEmpty()
                     .mapNotNull { it as? JsonObject }
+                parsedChapters to null
+            }
+        }.awaitAll()
+
+        val pendingChunkWaits = chunkOutcomes.mapNotNull { it.second }
+        if (pendingChunkWaits.isNotEmpty()) {
+            val retryMs = pendingChunkWaits.min().coerceIn(5_000L, 60_000L)
+            return@coroutineScope buildJsonObject {
+                put("pending", true)
+                put("bookId", req.bookId)
+                put("stage", "chapters")
+                put("completedChunks", chunks.size - pendingChunkWaits.size)
+                put("totalChunks", chunks.size)
+                put("retryAfterMs", retryMs)
             }
         }
 
-        val rawChapters = chunkFutures.awaitAll().flatten()
+        val rawChapters = chunkOutcomes.flatMap { it.first.orEmpty() }
+        val rawByNum = rawChapters.associateBy { it["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0 }
         val chapterByNum = req.chapters.associateBy { it.chapterNum }
 
-        var totalAnchors = 0
-        var verifiedAnchors = 0
-        var relocatedAnchors = 0
-        val verifiedChapters = rawChapters.sortedBy { it["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0 }.map { chObj ->
-            val num = chObj["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0
-            val inputCh = chapterByNum[num]
-            val cleanPlaceholders = StudyModeMathGate.sanitizePlaceholders(chObj) as JsonObject
-            val rawSections = cleanPlaceholders["sections"] as? JsonArray
-            val sectionsLackQuotes = rawSections != null && rawSections.none { (it as? JsonObject)?.containsKey("quoteAnchor") == true }
-            val payloadForAnchorGate = if (sectionsLackQuotes) JsonObject(cleanPlaceholders - "sections") else cleanPlaceholders
-            val verifiedChapter = if (inputCh != null && inputCh.pages.isNotEmpty()) {
-                val (verifiedObj, st, repairReply) = StudyModeAnchorGate.verifyAndRepair(
-                    payload = payloadForAnchorGate,
-                    pages = inputCh.pages,
-                    repairTransport = batchTransport,
-                    bookId = req.bookId,
-                    chapterNum = num,
-                    friend = req.friend,
-                    device = req.device,
-                    repairOnlyWhenZeroValid = true,
+        // Ensure every requested chapter exists even if a chunk omitted one.
+        val allChaptersToVerify = req.chapters.sortedBy { it.chapterNum }.map { inputCh ->
+            rawByNum[inputCh.chapterNum] ?: buildJsonObject {
+                put("chapterNum", inputCh.chapterNum)
+                put("chapterTitle", inputCh.chapterTitle)
+                put("chapterRole", "CORE")
+                put("oneLiner", "${inputCh.chapterTitle}核心脉络")
+                put("estimatedMinutes", 15)
+                put("readingDepth", "CORE_SKIM")
+                put("coreClaims", buildJsonArray {})
+                put(
+                    "sections",
+                    buildJsonArray {
+                        inputCh.sections.take(4).forEach { sec ->
+                            add(
+                                buildJsonObject {
+                                    put("sectionTitle", sec.title)
+                                    put("summary", sec.title)
+                                    put("skipUnlessExam", false)
+                                    put("pdfPage", sec.startPdfPage)
+                                },
+                            )
+                        }
+                    },
                 )
-                repairReply?.let { r ->
-                    totalIn.addAndGet(r.inputTokens)
-                    totalOut.addAndGet(r.outputTokens)
-                }
-                totalAnchors += st.total
-                verifiedAnchors += st.verified
-                relocatedAnchors += st.relocated
-                if (sectionsLackQuotes) {
-                    JsonObject(verifiedObj.toMutableMap().apply { put("sections", rawSections) })
-                } else {
-                    verifiedObj
-                }
-            } else {
-                cleanPlaceholders
             }
-            if (inputCh != null) normalizeBatchChapterSectionPages(verifiedChapter, inputCh) else verifiedChapter
         }
+
+        val totalAnchors = AtomicInteger(0)
+        val verifiedAnchors = AtomicInteger(0)
+        val relocatedAnchors = AtomicInteger(0)
+        val verifiedChapters = allChaptersToVerify.map { chObj ->
+            async(Dispatchers.IO) {
+                val num = chObj["chapterNum"]?.jsonPrimitive?.intOrNull ?: 0
+                val inputCh = chapterByNum[num]
+                val cleanPlaceholders = StudyModeMathGate.sanitizePlaceholders(chObj) as JsonObject
+                val rawSections = cleanPlaceholders["sections"] as? JsonArray
+                val sectionsLackQuotes = rawSections != null && rawSections.none { (it as? JsonObject)?.containsKey("quoteAnchor") == true }
+                val payloadForAnchorGate = if (sectionsLackQuotes) JsonObject(cleanPlaceholders - "sections") else cleanPlaceholders
+                val verifiedChapter = if (inputCh != null && inputCh.pages.isNotEmpty()) {
+                    val (verifiedObj, st, repairReply) = StudyModeAnchorGate.verifyAndRepair(
+                        payload = payloadForAnchorGate,
+                        pages = inputCh.pages,
+                        repairTransport = batchTransport,
+                        bookId = req.bookId,
+                        chapterNum = num,
+                        friend = req.friend,
+                        device = req.device,
+                        repairOnlyWhenZeroValid = true,
+                    )
+                    repairReply?.let { r ->
+                        totalIn.addAndGet(r.inputTokens)
+                        totalOut.addAndGet(r.outputTokens)
+                    }
+                    totalAnchors.addAndGet(st.total)
+                    verifiedAnchors.addAndGet(st.verified)
+                    relocatedAnchors.addAndGet(st.relocated)
+                    val merged = if (sectionsLackQuotes) {
+                        JsonObject(verifiedObj.toMutableMap().apply { put("sections", rawSections) })
+                    } else {
+                        verifiedObj
+                    }
+                    val withClaim = ensureChapterHasVerifiedClaim(merged, inputCh.chapterTitle, inputCh.pages)
+                    if (withClaim !== merged) {
+                        totalAnchors.incrementAndGet()
+                        verifiedAnchors.incrementAndGet()
+                    }
+                    withClaim
+                } else {
+                    cleanPlaceholders
+                }
+                if (inputCh != null) normalizeBatchChapterSectionPages(verifiedChapter, inputCh) else verifiedChapter
+            }
+        }.awaitAll()
 
         // Cross-chapter synthesis call: clusters, dependency edges, 40-min fast skim route, bilingual master glossary
         val graphSys = """Synthesize a whole-book navigation map (concise, total output <= 1600 tokens) from chapter one-pagers.
@@ -1692,16 +2018,41 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
                     .append(": ").append(c["oneLiner"]?.jsonPrimitive?.contentOrNull.orEmpty()).append('\n')
             }
         }
-        val graphReply = batchTransport.complete(
-            task = "BOOK_SECTION_BATCH",
-            jobKey = StudyModeJsonHelpers.sha256Hex("bm-v4-graph-${req.bookId}-${batchVariantSig}"),
-            systemPrompt = graphSys,
-            userPrompt = graphUser,
-            maxTokens = 8192,
-            useBatchApi = req.useBatchApi,
-            friend = req.friend,
-            device = req.device,
-        )
+        val graphJobKey = StudyModeJsonHelpers.sha256Hex("bm-v5-graph-${req.bookId}-${batchVariantSig}")
+        val graphReply = try {
+            if (req.asyncPending) {
+                batchTransport.completeOrPending(
+                    task = "BOOK_SECTION_BATCH",
+                    jobKey = graphJobKey,
+                    systemPrompt = graphSys,
+                    userPrompt = graphUser,
+                    maxTokens = 8192,
+                    useBatchApi = req.useBatchApi,
+                    friend = req.friend,
+                    device = req.device,
+                )
+            } else {
+                batchTransport.complete(
+                    task = "BOOK_SECTION_BATCH",
+                    jobKey = graphJobKey,
+                    systemPrompt = graphSys,
+                    userPrompt = graphUser,
+                    maxTokens = 8192,
+                    useBatchApi = req.useBatchApi,
+                    friend = req.friend,
+                    device = req.device,
+                )
+            }
+        } catch (pending: BatchPending) {
+            return@coroutineScope buildJsonObject {
+                put("pending", true)
+                put("bookId", req.bookId)
+                put("stage", "graph")
+                put("completedChunks", chunks.size)
+                put("totalChunks", chunks.size)
+                put("retryAfterMs", pending.retryAfterMillis.coerceIn(5_000L, 60_000L))
+            }
+        }
         totalIn.addAndGet(graphReply.inputTokens)
         totalOut.addAndGet(graphReply.outputTokens)
         if (req.friend == null) ledger?.record(
@@ -1742,10 +2093,10 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
             put(
                 "anchorStats",
                 StudyModeAnchorStats(
-                    total = totalAnchors,
-                    verified = verifiedAnchors,
-                    unverified = (totalAnchors - verifiedAnchors).coerceAtLeast(0),
-                    relocated = relocatedAnchors,
+                    total = totalAnchors.get(),
+                    verified = verifiedAnchors.get(),
+                    unverified = (totalAnchors.get() - verifiedAnchors.get()).coerceAtLeast(0),
+                    relocated = relocatedAnchors.get(),
                 ).toJson(),
             )
             put(
@@ -1764,6 +2115,30 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
     }
 
     private val batchSecNumRegex = Regex("""\b(\d+\.\d+(?:\.\d+)?)\b""")
+
+    private fun ensureChapterHasVerifiedClaim(
+        chObj: JsonObject,
+        chapterTitle: String,
+        pages: List<StudyPageInput>,
+    ): JsonObject {
+        val existing = (chObj["coreClaims"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+            .filter { !it["quoteAnchor"]?.jsonPrimitive?.contentOrNull.isNullOrBlank() }
+        if (existing.isNotEmpty()) return chObj
+        val fallback = StudyModeAnchorGate.extractFallbackProseAnchor(pages) ?: return chObj
+        val (pg, rawQuote, span) = fallback
+        val claimLabel = chObj["oneLiner"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+            ?: chapterTitle.trim().takeIf { it.isNotBlank() }
+            ?: "本章开篇核心论述"
+        val fallbackClaim = buildJsonObject {
+            put("claim", claimLabel)
+            put("importance", "CORE")
+            put("pdfPage", pg)
+            put("quoteAnchor", rawQuote)
+            put("startUtf16", span.first)
+            put("endUtf16", span.second)
+        }
+        return JsonObject(chObj.toMutableMap().apply { put("coreClaims", buildJsonArray { add(fallbackClaim) }) })
+    }
 
     internal fun normalizeBatchChapterSectionPages(
         chObj: JsonObject,
@@ -1949,6 +2324,7 @@ internal object StudyModeRequestParser {
             requestId = input["requestId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             friend = friend,
             device = device,
+            asyncPending = input["asyncPending"]?.jsonPrimitive?.booleanOrNull == true,
         )
     }
 

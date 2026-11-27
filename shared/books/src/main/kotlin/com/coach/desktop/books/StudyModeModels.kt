@@ -335,6 +335,8 @@ internal data class BookMapSectionRole(
     val pdfPage: Int,
     val quoteAnchor: String = "",
     val skipUnlessExam: Boolean = false,
+    val startUtf16: Int = 0,
+    val endUtf16: Int = 0,
 )
 
 internal data class BookMapCoreClaim(
@@ -342,6 +344,8 @@ internal data class BookMapCoreClaim(
     val importance: String,
     val pdfPage: Int,
     val quoteAnchor: String,
+    val startUtf16: Int = 0,
+    val endUtf16: Int = 0,
 )
 
 internal data class BookMapOnePagerPack(
@@ -744,6 +748,8 @@ internal object StudyModeStore {
                 pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 0,
                 quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 skipUnlessExam = o["skipUnlessExam"]?.jsonPrimitive?.booleanOrNull == true,
+                startUtf16 = o["startUtf16"]?.jsonPrimitive?.intOrNull?.takeIf { it >= 0 } ?: 0,
+                endUtf16 = o["endUtf16"]?.jsonPrimitive?.intOrNull?.takeIf { it >= 0 } ?: 0,
             )
         }
         val claims = (fs["coreClaims"] as? JsonArray).orEmpty().mapNotNull { el ->
@@ -754,6 +760,8 @@ internal object StudyModeStore {
                 importance = o["importance"]?.jsonPrimitive?.contentOrNull ?: "CORE",
                 pdfPage = o["pdfPage"]?.jsonPrimitive?.intOrNull?.takeIf { it > 0 } ?: 0,
                 quoteAnchor = o["quoteAnchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                startUtf16 = o["startUtf16"]?.jsonPrimitive?.intOrNull?.takeIf { it >= 0 } ?: 0,
+                endUtf16 = o["endUtf16"]?.jsonPrimitive?.intOrNull?.takeIf { it >= 0 } ?: 0,
             )
         }
         val links = fs["chapterLinks"] as? JsonObject
@@ -1553,6 +1561,7 @@ internal object StudyModeWireBuilder {
             put("detailLevel", batchDetail.name)
             put("explainLang", preference.explainLang.name)
             put("useBatchApi", true)
+            put("asyncPending", true)
             if (topics.isNotEmpty()) {
                 put("courseTopics", buildJsonArray { topics.forEach { add(JsonPrimitive(it)) } })
             }
@@ -1601,4 +1610,132 @@ internal object StudyModeWireBuilder {
             )
         }
     }
+}
+
+/**
+ * Resolves a study-mode / book-map quote anchor into exact raw UTF-16 offsets `[startUtf16, endUtf16)`
+ * and exact page substring so the reader enters its highlight-jump branch instead of turn-page-only `0..0`.
+ * Handles EPUB hard-wrapped line breaks, typographic punctuation, nearby chapter pages, and cross-page splits.
+ */
+internal fun resolveStudyModeAnchor(
+    book: Textbook,
+    claimedPage: Int,
+    quoteAnchor: String,
+    chapterPageRange: IntRange? = null,
+    hintedStartUtf16: Int = 0,
+    hintedEndUtf16: Int = 0,
+): BookCompanionAnchor {
+    val fallbackPage = when {
+        book.page(claimedPage) != null -> claimedPage
+        chapterPageRange != null && book.page(chapterPageRange.first) != null -> chapterPageRange.first
+        else -> claimedPage.coerceAtLeast(1)
+    }
+    fun exactAnchor(pageNum: Int, rawText: String, start: Int, end: Int): BookCompanionAnchor? {
+        if (start !in 0 until end || end > rawText.length) return null
+        val slice = rawText.substring(start, end)
+        if (slice.isBlank()) return null
+        return BookCompanionAnchor(pageNum, "${book.id}:p$pageNum:$start", start, end, slice)
+    }
+
+    val claimedObj = book.page(fallbackPage)
+    if (claimedObj != null && hintedStartUtf16 in 0 until hintedEndUtf16 && hintedEndUtf16 <= claimedObj.text.length) {
+        val rawSlice = claimedObj.text.substring(hintedStartUtf16, hintedEndUtf16)
+        val matchesHint = quoteAnchor.isBlank() ||
+            rawSlice == quoteAnchor ||
+            SentenceCitationGate.normalizeText(rawSlice).equals(SentenceCitationGate.normalizeText(quoteAnchor), ignoreCase = true)
+        if (matchesHint) {
+            exactAnchor(fallbackPage, claimedObj.text, hintedStartUtf16, hintedEndUtf16)?.let { return it }
+        }
+    }
+
+    val cleanedQuote = quoteAnchor.trim()
+    if (cleanedQuote.isBlank()) {
+        return BookCompanionAnchor(fallbackPage, "", 0, 0, "")
+    }
+    val quoteCandidates = buildList {
+        add(cleanedQuote)
+        val unquoted = cleanedQuote.trim('"', '“', '”', '\'', '‘', '’', '「', '」', '『', '』').trim()
+        if (unquoted != cleanedQuote && unquoted.length >= 6) add(unquoted)
+        val noHeadingMark = unquoted.removePrefix("#").trim()
+        if (noHeadingMark != unquoted && noHeadingMark != cleanedQuote && noHeadingMark.length >= 6) add(noHeadingMark)
+        if ("..." in unquoted || "…" in unquoted) {
+            unquoted.split(Regex("""\.\.\.|…"""))
+                .map { it.trim().trim('"', '“', '”', '\'', '‘', '’', ',', ';', ':') }
+                .filter { it.length >= 12 }
+                .sortedByDescending { it.length }
+                .forEach { if (it !in this) add(it) }
+        }
+    }
+
+    val candidatePages = LinkedHashSet<Int>()
+    candidatePages += fallbackPage
+    if (book.page(fallbackPage + 1) != null) candidatePages += fallbackPage + 1
+    if (fallbackPage > 1 && book.page(fallbackPage - 1) != null) candidatePages += fallbackPage - 1
+    if (chapterPageRange != null) {
+        val sortedChapterPages = (chapterPageRange.first..chapterPageRange.last)
+            .filter { it !in candidatePages && book.page(it) != null }
+            .sortedBy { kotlin.math.abs(it - fallbackPage) }
+        candidatePages.addAll(sortedChapterPages)
+    }
+
+    for (qCand in quoteCandidates) {
+        for (pg in candidatePages) {
+            val pageObj = book.page(pg) ?: continue
+            val match = SentenceCitationGate.verifyOrSnapAnchor(qCand, pageObj.text)
+            if (match.verified && match.startUtf16 in 0 until match.endUtf16 && match.endUtf16 <= pageObj.text.length) {
+                exactAnchor(pg, pageObj.text, match.startUtf16, match.endUtf16)?.let { return it }
+            }
+        }
+    }
+
+    // Cross-page EPUB pagination boundary fallback: when a sentence is split across page P and P+1.
+    val boundaryPairs = buildList {
+        add(fallbackPage to (fallbackPage + 1))
+        if (fallbackPage > 1) add((fallbackPage - 1) to fallbackPage)
+        if (chapterPageRange != null) {
+            for (pg in chapterPageRange.first until chapterPageRange.last) {
+                val pair = pg to (pg + 1)
+                if (pair !in this) add(pair)
+            }
+        }
+    }
+    for ((leftPg, rightPg) in boundaryPairs) {
+        val leftObj = book.page(leftPg) ?: continue
+        val rightObj = book.page(rightPg) ?: continue
+        if (leftObj.text.isBlank() || rightObj.text.isBlank()) continue
+        val tailStart = (leftObj.text.length - 600).coerceAtLeast(0)
+        val leftTail = leftObj.text.substring(tailStart)
+        val rightHead = rightObj.text.take(600)
+        val combined = "$leftTail\n$rightHead"
+        val sepIdx = leftTail.length
+        val cross = SentenceCitationGate.verifyOrSnapAnchor(cleanedQuote, combined)
+        if (!cross.verified || cross.startUtf16 !in 0 until cross.endUtf16 || cross.endUtf16 > combined.length) continue
+
+        if (cross.endUtf16 <= sepIdx) {
+            exactAnchor(leftPg, leftObj.text, tailStart + cross.startUtf16, tailStart + cross.endUtf16)?.let { return it }
+        } else if (cross.startUtf16 >= sepIdx + 1) {
+            exactAnchor(rightPg, rightObj.text, cross.startUtf16 - sepIdx - 1, cross.endUtf16 - sepIdx - 1)?.let { return it }
+        } else {
+            // Spans the separator: pick whichever side holds the larger non-blank portion of the sentence.
+            var leftS = tailStart + cross.startUtf16
+            var leftE = leftObj.text.length
+            while (leftE > leftS && leftObj.text[leftE - 1].isWhitespace()) leftE--
+            while (leftS < leftE && leftObj.text[leftS].isWhitespace()) leftS++
+
+            var rightS = 0
+            var rightE = (cross.endUtf16 - sepIdx - 1).coerceAtMost(rightObj.text.length)
+            while (rightS < rightE && rightObj.text[rightS].isWhitespace()) rightS++
+            while (rightE > rightS && rightObj.text[rightE - 1].isWhitespace()) rightE--
+
+            val leftLen = (leftE - leftS).coerceAtLeast(0)
+            val rightLen = (rightE - rightS).coerceAtLeast(0)
+            if (leftLen >= rightLen && leftLen > 0) {
+                exactAnchor(leftPg, leftObj.text, leftS, leftE)?.let { return it }
+            } else if (rightLen > 0) {
+                exactAnchor(rightPg, rightObj.text, rightS, rightE)?.let { return it }
+            }
+        }
+    }
+
+    return BookCompanionAnchor(fallbackPage, cleanedQuote, 0, 0, cleanedQuote)
 }

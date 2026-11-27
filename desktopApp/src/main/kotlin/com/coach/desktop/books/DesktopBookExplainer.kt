@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.coach.client.withReaderRetry
+import com.coach.client.withBookMapBatchPoll
 import com.coach.client.withBusyRetry
 import com.coach.client.CourseHttp
 import com.coach.client.MockReply
@@ -294,7 +295,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     }
 
     open suspend fun fetchBookMapBatch(bookId: String, input: JsonObject, onBusy: (String) -> Unit = {}): CourseServerCallResult =
-        callCourseEndpoint { http -> withBusyRetry(onBusy = onBusy) { http.fetchBookMapBatch(bookId, input) } }
+        callCourseEndpoint { http -> withBookMapBatchPoll(onProgress = onBusy) { http.fetchBookMapBatch(bookId, input) } }
 
     private suspend fun callCourseEndpoint(
         canRetry: () -> Boolean = { true },

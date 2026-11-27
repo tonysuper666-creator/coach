@@ -40,10 +40,12 @@ internal object SentenceCitationGate {
         val sb = StringBuilder(nfkc.length)
         for (ch in nfkc) {
             when (ch) {
-                '\u2212', '\u2013', '\u2014' -> sb.append('-')
-                '\u2018', '\u2019' -> sb.append('\'')
-                '\u201c', '\u201d' -> sb.append('"')
-                '\u00a0' -> sb.append(' ')
+                '\u00ad', '\u200b', '\ufeff' -> Unit
+                '\u2212', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015' -> sb.append('-')
+                '\u2018', '\u2019', '\u2032', '\u02bc' -> sb.append('\'')
+                '\u201c', '\u201d', '\u2033' -> sb.append('"')
+                '\u00a0', '\u202f', '\u205f', '\u3000' -> sb.append(' ')
+                in '\u2000'..'\u200a' -> sb.append(' ')
                 '\ufb01' -> sb.append("fi")
                 '\ufb02' -> sb.append("fl")
                 '\ufb00' -> sb.append("ff")
@@ -113,10 +115,12 @@ internal object SentenceCitationGate {
         val out = StringBuilder(nfkc.length)
         for (ch in nfkc) {
             when (ch) {
-                '\u2212', '\u2013', '\u2014' -> out.append('-')
-                '\u2018', '\u2019' -> out.append('\'')
-                '\u201c', '\u201d' -> out.append('"')
-                '\u00a0' -> out.append(' ')
+                '\u00ad', '\u200b', '\ufeff' -> Unit
+                '\u2212', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015' -> out.append('-')
+                '\u2018', '\u2019', '\u2032', '\u02bc' -> out.append('\'')
+                '\u201c', '\u201d', '\u2033' -> out.append('"')
+                '\u00a0', '\u202f', '\u205f', '\u3000' -> out.append(' ')
+                in '\u2000'..'\u200a' -> out.append(' ')
                 '\ufb01' -> out.append("fi")
                 '\ufb02' -> out.append("fl")
                 '\ufb00' -> out.append("ff")
@@ -182,6 +186,10 @@ internal object SentenceCitationGate {
         return NormalizedWithOffsets(normChars.toString(), rawStarts.toIntArray(), rawEnds.toIntArray())
     }
 
+    /**
+     * Exact ordered token-sequence match over [normPage] that tolerates EPUB typographic punctuation,
+     * em-dash spacing (`species,—except` vs `species, - except`), inline brace notes (`{1}`), and CJK without spaces.
+     */
     private fun findOrderedTokenSpan(qTokens: List<String>, normPage: String): Pair<Int, Int>? {
         if (qTokens.size < 3) return null
         val pageTokens = tokenRegex.findAll(normPage.lowercase()).toList()
@@ -224,7 +232,6 @@ internal object SentenceCitationGate {
         }
         return out
     }
-
     fun verifyOrSnapAnchor(quote: String, rawPageText: String): AnchorResult {
         val mapped = normalizeWithRawOffsets(rawPageText)
         val normPage = mapped.text
@@ -282,14 +289,18 @@ internal object SentenceCitationGate {
             return AnchorResult(rawExactMatch = false, verified = false, canonicalAnchor = "")
         }
 
-        if (q.any(::isCjkChar)) {
-            findOrderedTokenSpan(qTokens, normPage)?.let { (sPos, ePos) ->
-                val rawSlice = normPage.substring(sPos, ePos)
-                val (rawStart, rawEnd) = mapNormSpanToRaw(mapped, rawPageText, sPos, ePos)
+        findOrderedTokenSpan(qTokens, normPage)?.let { (tokStart, tokEnd) ->
+            val rawSlice = normPage.substring(tokStart, tokEnd)
+            val trimmed = trimPureProseAnchor(rawSlice)
+            val relStart = rawSlice.indexOf(trimmed).coerceAtLeast(0)
+            val finalNormStart = tokStart + relStart
+            val finalNormEnd = (finalNormStart + trimmed.length).coerceAtMost(normPage.length)
+            val (rawStart, rawEnd) = mapNormSpanToRaw(mapped, rawPageText, finalNormStart, finalNormEnd)
+            if (rawStart in 0 until rawEnd && rawEnd <= rawPageText.length) {
                 return AnchorResult(
                     rawExactMatch = false,
                     verified = true,
-                    canonicalAnchor = trimPureProseAnchor(rawSlice),
+                    canonicalAnchor = trimmed,
                     startUtf16 = rawStart,
                     endUtf16 = rawEnd,
                 )

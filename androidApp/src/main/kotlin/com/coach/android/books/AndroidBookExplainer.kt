@@ -10,6 +10,7 @@ import com.coach.android.BuildConfig
 import com.coach.android.CoachCredentialStore
 import com.coach.android.KeystoreCredentials
 import com.coach.client.CourseHttp
+import com.coach.client.withBookMapBatchPoll
 import com.coach.client.withBusyRetry
 import com.coach.client.MockReply
 import com.coach.client.DeviceAuthorizationException
@@ -507,7 +508,7 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
     }
 
     suspend fun fetchBookMapBatch(bookId: String, input: JsonObject, onBusy: (String) -> Unit = {}): CourseServerCallResult =
-        callCourseEndpoint { http -> withBusyRetry(onBusy = onBusy) { http.fetchBookMapBatch(bookId, input) } }
+        callCourseEndpoint { http -> withBookMapBatchPoll(onProgress = onBusy) { http.fetchBookMapBatch(bookId, input) } }
 
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,

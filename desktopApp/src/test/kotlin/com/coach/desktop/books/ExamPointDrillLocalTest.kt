@@ -49,6 +49,16 @@ class ExamPointDrillLocalTest {
     }
 
     @Test
+    fun resumesOldEmptyBatchAndPreservesPreviouslyVerifiedQuestions() {
+        val empty = sample(0, 3).copy(essay = null, emptyReason = "模型没有写出可用的题")
+        val oldPayload = JsonObject(ExamPointDrillLocal.encode(empty) - "generationVersion")
+        assertFalse(ExamPointDrillLocal.isCompleted(point("old", ExamPointDrillLocal.decode(oldPayload)!!)))
+        assertTrue(ExamPointDrillLocal.isCompleted(point("good", sample(3, 0))))
+        val current = ExamPointDrillLocal.decode(ExamPointDrillLocal.encode(empty.copy(generationVersion = 2)))!!
+        assertTrue(ExamPointDrillLocal.isCompleted(point("current", current)))
+    }
+
+    @Test
     fun statusLineStatesTheGapOnlyWhenADrillExists() {
         assertNull(ExamPointDrillLocal.statusLine(null))
         val short = sample(choices = 2, missing = 1).copy(essay = null, essayMissing = true)

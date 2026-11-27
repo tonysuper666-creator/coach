@@ -659,6 +659,7 @@ class HaikuPinnedBridgeTransport(
             )
             is BridgeResult.Failure -> {
                 result.rejectIfFreeGrantExhausted()
+                if (task == "exam_point_drill" || task == "exam_point_check") result.rejectIfBusy()
                 if (friend != null) {
                     throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 }

@@ -49,6 +49,31 @@ class CourseExamPointsTest {
     }
 
     @Test
+    fun standaloneTextbookBuildsExamPointsWithCitablePages() {
+        val directory = Files.createTempDirectory("single-textbook")
+        try {
+            val library = TextbookLibrary(directory.resolve("library"), lazyPdfExtras = false)
+            val file = directory.resolve("Astronomy-Textbook.pdf")
+            writePdf(file, listOf(
+                "Tidal locking: An orbit and a spin take equal time.",
+                "Orbital resonance: Orbits repeat in a regular ratio.",
+            ))
+            val bookId = library.stageBookImport(file).book.id
+            library.withCourseDatabase { db ->
+                val (course, _) = CourseStore.createCourse(db, "Astronomy", CourseExamProfile(examEnabled = true), listOf(bookId))
+                val detail = CourseAutoAligner.alignLocally(db, course)
+                val points = detail.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL }
+                assertTrue(CourseStore.isChapterTopicLabel(detail.examinableTopics.first().weekLabel))
+                assertEquals(mapOf("Tidal locking" to 1, "Orbital resonance" to 2),
+                    points.associate { it.title to it.sources.single().startPage })
+                assertTrue(points.all { it.sources.single().bookId == bookId })
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun textbookDefinitionStaysWhenSlidesNeverNameIt() {
         val pages = listOf(
             ExamTeachingPage("tb", 1, CourseMaterialRole.CORE_TEXTBOOK, "Demand elasticity: Buyers respond to price."),

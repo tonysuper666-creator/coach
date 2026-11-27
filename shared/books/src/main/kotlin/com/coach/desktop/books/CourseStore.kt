@@ -578,7 +578,13 @@ internal object CourseStore {
                         val taught = taughtByBook[link.bookId].orEmpty()
                         taught.none { link.startPage in it && link.endPage in it }
                     }
-                CourseExamPoints.build(db, courseId, loadMaterials(db, courseId), untaughtOrExcluded)
+                val materials = loadMaterials(db, courseId)
+                val identified = CourseExamPoints.build(db, courseId, materials, untaughtOrExcluded)
+                // A standalone book still starts at chapter one when the student has no practice history.
+                if (materials.size == 1) {
+                    val lastChapter = plan.topics.maxOfOrNull { it.ord } ?: 0
+                    identified.map { it.copy(ord = lastChapter + it.ord) }
+                } else identified
             } else emptyList()
             for (incoming in plan.topics + points) {
                 val matched = incoming.topicId?.let(existingById::get) ?: existingTopics.firstOrNull { ex ->

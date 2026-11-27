@@ -251,8 +251,10 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     open suspend fun courseTopicPack(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseTopicPack(input) }
 
-    open suspend fun examPointDrill(input: JsonObject): CourseServerCallResult =
-        callCourseEndpoint { http -> http.examPointDrill(input) }
+    open suspend fun examPointDrill(input: JsonObject): CourseServerCallResult {
+        val paired = identity
+        return callCourseEndpoint { http -> withBusyRetry(stillCurrent = { identity == paired }) { http.examPointDrill(input) } }
+    }
 
     open suspend fun courseVision(input: JsonObject): CourseServerCallResult =
         callCourseEndpoint { http -> http.courseVision(input) }

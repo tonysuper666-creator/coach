@@ -51,7 +51,7 @@ internal fun CourseExamPointMap(
     Column(Modifier.fillMaxWidth().testTag("course-exam-point-map"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("考点地图", style = MaterialTheme.typography.titleMedium)
         if (points.isEmpty()) {
-            Text("教材、课件和讲义中的共同考点会显示在这里。", style = MaterialTheme.typography.bodySmall)
+            Text("导入教材后可以整理考点，也可以加入课件和讲义。", style = MaterialTheme.typography.bodySmall)
             if (detail.materials.isNotEmpty()) V7TextButton(onClick = onRealign) { Text("重新整理考点") }
             return@Column
         }

@@ -31,3 +31,21 @@ class LiteratureEpubTextTest {
         assertEquals(1, LiteratureEpubText.clean(p).size)
     }
 }
+
+class LiteratureEpubNoteTextTest {
+    @Test fun dropsParagraphsMatchingEpubTypedEndnotes() {
+        val dir = java.nio.file.Files.createTempDirectory("epub-notes")
+        val file = dir.resolve("t.epub")
+        val note = "Annius Verius was his grandfather's name, and there is no verb in this section connected with the word from."
+        val xhtml = """<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+            <section epub:type="endnotes" role="doc-endnotes"><h2>Endnotes</h2><ol><li id="note-1" epub:type="endnote"><p>$note <a href="b.xhtml#r1">↩︎</a></p></li></ol></section></body></html>"""
+        java.util.zip.ZipOutputStream(java.nio.file.Files.newOutputStream(file)).use { z ->
+            z.putNextEntry(java.util.zip.ZipEntry("text/endnotes.xhtml")); z.write(xhtml.toByteArray()); z.closeEntry()
+        }
+        val notes = LiteratureEpubText.noteTexts(file)
+        assertEquals(1, notes.size)
+        val page = "The body sentence stays in the guide.\n\n$note ↩︎\n\n${note.take(60)}"
+        val text = LiteratureEpubText.clean(page, notes).joinToString("\n\n") { it.text }
+        assertEquals("The body sentence stays in the guide.", text)
+    }
+}

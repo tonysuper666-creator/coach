@@ -2091,8 +2091,9 @@ internal class TextbookLibrary(
         val source = book(bookId)
         if (source.format == "epub") {
             require(source.indexState == "READY") { "请等待 EPUB 导入完成。" }
+            val notes = LiteratureEpubText.noteTexts(original(bookId, "epub"))
             val epubPages = source.pages.map { page ->
-                val regions = LiteratureEpubText.clean(page.text)
+                val regions = LiteratureEpubText.clean(page.text, notes)
                 page.copy(text = regions.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = regions)
             }
             val epubMeta = LiteratureMetadata.extract(

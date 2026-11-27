@@ -100,8 +100,8 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
-class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine, connectTimeoutMs: Long = 3_000L) {
-    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, 3_000L)
+class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine, connectTimeoutMs: Long = 15_000L) {
+    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, 15_000L)
     constructor(baseUrl: String, deviceId: String, token: String, course: String, connectTimeoutMs: Long) : this(baseUrl, deviceId, token, course, { createCoachHttpEngine() }, connectTimeoutMs)
     private val base = baseUrl.trimEnd('/')
     // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
@@ -113,7 +113,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         override fun create(block: HttpClientEngineConfig.() -> Unit) = createEngine()
     }) {
         followRedirects = false
-        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = connectTimeoutMs }
+        install(HttpTimeout) { requestTimeoutMillis = 20_000; connectTimeoutMillis = connectTimeoutMs; socketTimeoutMillis = 20_000 }
         defaultRequest {
             header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId)
             coachVersionOrNull()?.let { header("X-Coach-Version", it) }
@@ -216,7 +216,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
       catch (_: Exception) { MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline") }
 
     /** Lightweight reachability probe; distinguishes unreachable/gateway errors from live 401/2xx-4xx responses. */
-    suspend fun probeReachability(role: String, timeoutMs: Long = 1_500L): ServerReachability = try {
+    suspend fun probeReachability(role: String, timeoutMs: Long = 15_000L): ServerReachability = try {
         val path = if (role == "friend") "$base/v1/public/status" else "$base/v1/hello"
         val response = http.get(path) {
             timeout {
@@ -302,9 +302,15 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     }
 
     /** Probe server capability for unified book upload (TON-1823). Never falls back to legacy fragments. */
-    suspend fun unifiedBooksCapability(role: String): UnifiedServerCapability = try {
+    suspend fun unifiedBooksCapability(role: String, timeoutMs: Long = 15_000L): UnifiedServerCapability = try {
         val path = if (role == "friend") "$base/v1/public/status" else "$base/v1/hello"
-        val response = http.get(path)
+        val response = http.get(path) {
+            timeout {
+                connectTimeoutMillis = timeoutMs
+                requestTimeoutMillis = timeoutMs
+                socketTimeoutMillis = timeoutMs
+            }
+        }
         when (response.status.value) {
             401 -> UnifiedServerCapability.Unauthorized
             in 200..299 -> {

@@ -32,13 +32,13 @@ class CommandRefused(val status: Int) : IllegalStateException("Command refused: 
 class CommandUploadDeferred(val status: Int) : IllegalStateException("Command upload deferred: HTTP $status")
 
 class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
-    private val token: String) : LedgerTransport {
+    private val token: String, connectTimeoutMs: Long = 15_000L, requestTimeoutMs: Long = 20_000L) : LedgerTransport {
     private val baseUrl = baseUrl.trimEnd('/')
     init { validateCoachBaseUrl(baseUrl) }
     private val client = HttpClient(CIO) {
         followRedirects = false
         install(WebSockets) { pingIntervalMillis=5000 }
-        install(HttpTimeout) { requestTimeoutMillis=10000;connectTimeoutMillis=3000;socketTimeoutMillis=10000 }
+        install(HttpTimeout) { requestTimeoutMillis=requestTimeoutMs;connectTimeoutMillis=connectTimeoutMs;socketTimeoutMillis=requestTimeoutMs }
         expectSuccess=true
         defaultRequest {
             header("Authorization","Bearer $token"); header("X-Coach-Device",deviceId)

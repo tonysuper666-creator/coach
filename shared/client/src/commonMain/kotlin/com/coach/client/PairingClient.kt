@@ -24,11 +24,19 @@ fun validateCoachBaseUrl(baseUrl: String) {
     checkCoachNetworkPolicy(url)
 }
 
-class PairingClient(private val baseUrl: String) {
+class PairingClient(
+    private val baseUrl: String,
+    connectTimeoutMs: Long = 15_000L,
+    requestTimeoutMs: Long = 20_000L,
+) {
     init { validateCoachBaseUrl(baseUrl) }
     private val client = HttpClient(CoachHttpEngineFactory) {
         followRedirects = false
-        install(HttpTimeout) { requestTimeoutMillis=10000; connectTimeoutMillis=3000; socketTimeoutMillis=10000 }
+        install(HttpTimeout) {
+            requestTimeoutMillis = requestTimeoutMs
+            connectTimeoutMillis = connectTimeoutMs
+            socketTimeoutMillis = requestTimeoutMs
+        }
     }
     suspend fun sable(open: suspend (String, String) -> Unit, issuer: String = SABLE_ORIGIN): PairedCredentials =
         sableLogin(client, baseUrl, open, issuer)

@@ -310,7 +310,20 @@ internal fun SingleBookCompanionPanel(
         }
     }
 
+    val connectivity = LocalCoachConnectivity.current
     LaunchedEffect(explainer, aiEnabled) { if (aiEnabled && !explainer.loaded) explainer.load() }
+
+    LaunchedEffect(connectivity) {
+        if (connectivity == CoachConnectivityStatus.ONLINE) {
+            val failedPack = packState as? CompanionPackState.Failed
+            if (failedPack != null && failedPack.trouble == ExplainTrouble.Unreachable) {
+                fetchNonce += 1
+            }
+            if (modeError != null && modePackJson == null && !modeLoading) {
+                modeFetchNonce += 1
+            }
+        }
+    }
 
     LaunchedEffect(edition, chapterGroup?.chapterId, explainer.loaded, explainer.identity, aiEnabled, fetchNonce, pageOnly) {
         val group = chapterGroup ?: return@LaunchedEffect

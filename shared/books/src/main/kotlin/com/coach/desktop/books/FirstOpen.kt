@@ -19,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +32,7 @@ import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
@@ -89,8 +91,25 @@ internal object FirstOpenPlanner {
             else book.lessons.indexOfFirst { it.blocks.any { block -> !block.heading && block.text.isNotBlank() } }
         }
         if (index < 0) return null
-        val group = ChapterCompanionGrouping.groupForSection(book, index) ?: return null
-        val first = ChapterCompanionProgressive.firstSectionGroup(group, null) ?: group
+        val chosenLesson = book.lessons[index]
+        val group = ChapterCompanionGrouping.groupForSection(book, index)
+        val first = if (group != null) {
+            ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
+                ?.takeIf { g -> g.sections.any { sec -> sec.blocks.any { !it.heading && it.text.isNotBlank() } } }
+                ?: group.copy(
+                    firstPage = chosenLesson.firstPage,
+                    lastPage = chosenLesson.lastPage,
+                    sections = listOf(chosenLesson),
+                )
+        } else {
+            ChapterSectionGroup(
+                chapterId = chosenLesson.id,
+                chapterTitle = chosenLesson.title,
+                sections = listOf(chosenLesson),
+                firstPage = chosenLesson.firstPage,
+                lastPage = chosenLesson.lastPage,
+            )
+        }
         return trim(first, OPENING_CHARS)
     }
 
@@ -204,25 +223,100 @@ internal fun FirstTastePanel(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    var attempt by remember(book.id) { mutableIntStateOf(0) }
+    val pollMs = LocalConnectivityPollMs.current
+    val currentBook by rememberUpdatedState(book)
+    var fetchTrigger by remember(book.id) { mutableIntStateOf(0) }
+    var manualClicks by remember(book.id) { mutableIntStateOf(0) }
+    var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
+    var recoveredOnline by remember(book.id) { mutableStateOf(false) }
+    var waitingBookReady by remember(book.id) { mutableStateOf(false) }
     var step by remember(book.id) { mutableStateOf<TasteStep>(TasteStep.Loading) }
     var picked by remember(book.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(book.id, attempt, connectivity) {
-        if (connectivity == CoachConnectivityStatus.OFFLINE) {
+
+    // If Tier 0 PDF import had not yet extracted body paragraphs when FirstTastePanel mounted,
+    // automatically proceed as soon as Tier 1 / OCR updates the book in memory.
+    LaunchedEffect(book.id, book.indexState, book.hasPendingOcr, book.lessons.size) {
+        if (waitingBookReady) {
+            waitingBookReady = false
+            fetchTrigger += 1
+        }
+    }
+
+    // Automatic resume when host connectivity recovers from OFFLINE -> ONLINE.
+    // Never touches Ask or Told once the first question has already loaded.
+    LaunchedEffect(book.id, connectivity) {
+        if (connectivity == CoachConnectivityStatus.ONLINE &&
+            (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+        ) {
+            recoveredOnline = true
+            fetchTrigger += 1
+        }
+    }
+
+    // Background probe while held on a network failure so standalone panels or requests that failed
+    // before host connectivity flipped also recover without requiring a manual click.
+    val heldOffline = (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+    LaunchedEffect(book.id, heldOffline, connectivity, pollMs) {
+        if (!heldOffline) return@LaunchedEffect
+        val probeClient = explainer.unifiedUploadClient()
+        while (true) {
+            delay(pollMs)
+            if (connectivity == CoachConnectivityStatus.OFFLINE) {
+                if (!explainer.loaded && explainer.identity == null) continue
+                val live = if (probeClient != null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { probeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.OFFLINE)
+                    }
+                } else CoachConnectivityStatus.OFFLINE
+                if (live == CoachConnectivityStatus.ONLINE) {
+                    recoveredOnline = true
+                    fetchTrigger += 1
+                    break
+                }
+            } else {
+                val live = if (probeClient != null && (explainer.loaded || explainer.identity != null)) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { probeClient.probeReachability() }.getOrDefault(CoachConnectivityStatus.ONLINE)
+                    }
+                } else CoachConnectivityStatus.ONLINE
+                if (live == CoachConnectivityStatus.ONLINE) {
+                    recoveredOnline = true
+                    fetchTrigger += 1
+                    break
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(book.id, fetchTrigger) {
+        val isManual = manualClicks > handledManualClicks
+        handledManualClicks = manualClicks
+        if (step is TasteStep.Ask || step is TasteStep.Told) return@LaunchedEffect
+        if (connectivity == CoachConnectivityStatus.OFFLINE && !isManual && !recoveredOnline) {
             step = TasteStep.Hold(
                 FirstOpenBlock.OFFLINE,
                 FirstOpenPlanner.statusText(FirstOpenBlock.OFFLINE, null, bookInHand = true),
             )
             return@LaunchedEffect
         }
+        recoveredOnline = false
         step = TasteStep.Loading
         picked = null
-        val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(book) }.getOrNull() }
+        val snapshotBook = currentBook
+        val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(snapshotBook) }.getOrNull() }
         if (group == null) {
+            if (snapshotBook.indexState != "READY" || snapshotBook.hasPendingOcr) {
+                waitingBookReady = true
+                return@LaunchedEffect
+            }
             step = TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
             return@LaunchedEffect
         }
-        val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
+        waitingBookReady = false
+        if (!explainer.loaded) {
+            explainer.load()
+        }
+        val wire = ChapterCompanionGrouping.buildWireRequest(snapshotBook, group)
         val blocks = ChapterCompanionGrouping.wireBlocks(group)
         when (val result = explainer.fetchChapterCompanion(wire, blocks)) {
             is ChapterCompanionFetchResult.Ready -> {
@@ -231,7 +325,9 @@ internal fun FirstTastePanel(
                 else TasteStep.Ask(quiz)
             }
             is ChapterCompanionFetchResult.Failed -> {
-                val block = FirstOpenPlanner.blockFor(result.trouble, connectivity)
+                val latestConnectivity = CoachConnectivityRegistry.statusFor(explainer.identity?.serverUrl.orEmpty())
+                    .takeIf { it != CoachConnectivityStatus.UNKNOWN } ?: connectivity
+                val block = FirstOpenPlanner.blockFor(result.trouble, latestConnectivity)
                 step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
             }
         }
@@ -253,7 +349,13 @@ internal fun FirstTastePanel(
             }
             is TasteStep.Hold -> {
                 Text(current.message, color = v7Alert(), textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
-                PrimaryButton(onClick = { attempt += 1 }, modifier = Modifier.testTag("first-taste-primary")) {
+                PrimaryButton(
+                    onClick = {
+                        manualClicks += 1
+                        fetchTrigger += 1
+                    },
+                    modifier = Modifier.testTag("first-taste-primary"),
+                ) {
                     Text(FirstOpenCopy.RETRY)
                 }
                 V7TextButton(onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }

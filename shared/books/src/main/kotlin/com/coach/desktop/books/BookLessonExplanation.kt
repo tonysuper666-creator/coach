@@ -34,9 +34,17 @@ internal fun BookLessonExplanation(
     // A caller may hold this across a screen switch so returning does not re-ask the provider.
     var attempt by remember(book.id, lesson.id, support) { mutableIntStateOf(0) }
     var allowed by remember(book.id, support) { mutableStateOf(!support.consentRequired(book.id)) }
+    val connectivity = LocalCoachConnectivity.current
     // 外面清掉旧结果（比如重新配对之后）也会重新取一次。只认这一帧看到的「空」：外面刚清掉、key 还没跟上时
     // 先不发，等 key 变过来再发，避免同一次重新配对重复请求。
     val waiting = reply.value == null
+    LaunchedEffect(connectivity) {
+        val failed = reply.value as? BookLearningReply.Unavailable
+        if (connectivity == CoachConnectivityStatus.ONLINE && failed?.trouble == ExplainTrouble.Unreachable) {
+            reply.value = null
+            attempt++
+        }
+    }
     LaunchedEffect(book.id, lesson.id, support, attempt, waiting, allowed) {
         if (!allowed || !waiting || reply.value != null) return@LaunchedEffect
         reply.value = try {

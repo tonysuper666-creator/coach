@@ -54,6 +54,10 @@ internal data class StartupLoadSnapshot(
     val lastBookQuestion: BookLastQuestion? = null,
 )
 
+internal const val MAX_BOOK_IMPORT_MB = 512
+internal const val MAX_BOOK_IMPORT_BYTES = MAX_BOOK_IMPORT_MB.toLong() * 1024L * 1024L
+internal const val MAX_KINDLE_IMPORT_BYTES = 256L * 1024L * 1024L
+
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(
     val directory: Path, internal val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
@@ -61,6 +65,7 @@ internal class TextbookLibrary(
     internal val lazyPdfExtras: Boolean = false,
     internal val todayCardEnabled: Boolean = windowsToday,
     private val extractBook: ((Path, String, String, BookOcr, BookImportControl) -> ExtractedBook)? = null,
+    internal val maxImportBytes: Long = MAX_BOOK_IMPORT_BYTES,
 ) {
     private val reviewStore = TextbookReviewStore(
         today = { LocalDate.now(clock).toEpochDay() },
@@ -1012,6 +1017,11 @@ internal class TextbookLibrary(
         }
     }
 
+    private fun importTooLargeMessage(): String {
+        val limitMb = (maxImportBytes / (1024L * 1024L)).takeIf { it > 0L } ?: MAX_BOOK_IMPORT_MB.toLong()
+        return "请选择不超过 $limitMb MB 的教材。"
+    }
+
     private fun stageCopyAndHash(source: Path, control: BookImportControl, stage: Path): Pair<String, Long> {
         val digest = MessageDigest.getInstance("SHA-256")
         var bytesCopied = 0L
@@ -1022,9 +1032,10 @@ internal class TextbookLibrary(
                     control.check()
                     val size = input.read(buffer)
                     if (size < 0) break
+                    bytesCopied += size
+                    require(bytesCopied <= maxImportBytes) { importTooLargeMessage() }
                     digest.update(buffer, 0, size)
                     output.write(buffer, 0, size)
-                    bytesCopied += size
                 }
             }
         }
@@ -1070,7 +1081,7 @@ internal class TextbookLibrary(
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
         require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
-        require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
+        require(Files.size(source) <= maxImportBytes) { importTooLargeMessage() }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
             val (id, fileBytes) = stageCopyAndHash(source, control, stage)
@@ -1101,7 +1112,7 @@ internal class TextbookLibrary(
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
         require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
-        require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
+        require(Files.size(source) <= maxImportBytes) { importTooLargeMessage() }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
             val (id, fileBytes) = stageCopyAndHash(source, control, stage)
@@ -3877,9 +3888,12 @@ internal object TextbookExtraction {
             }
         }
         "epub" -> epub(path, title, control = control, withNavigation = true)
-        "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
-            val name = book.title().ifBlank { title }
-            StructuredBookExtraction.kindle(book, name)
+        "mobi", "azw3" -> {
+            require(Files.size(path) <= MAX_KINDLE_IMPORT_BYTES) { "Kindle 电子书请控制在 256 MB 以内。" }
+            com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
+                val name = book.title().ifBlank { title }
+                StructuredBookExtraction.kindle(book, name)
+            }
         }
         "docx" -> StructuredBookExtraction.extract(path, format, title, control).let { extracted ->
             extracted.copy(outline = BookStructurePlanner.extractWordOutline(path, extracted.pages))

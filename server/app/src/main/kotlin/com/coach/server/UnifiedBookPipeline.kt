@@ -83,7 +83,7 @@ internal data class UnifiedBookConfig(
 
     companion object {
         const val DEFAULT_PARSER_VERSION = "v2-skeleton"
-        const val DEFAULT_MAX_FILE_BYTES = 256L * 1024L * 1024L
+        const val DEFAULT_MAX_FILE_BYTES = 512L * 1024L * 1024L
         const val DEFAULT_ACCOUNT_QUOTA_BYTES = 2L * 1024L * 1024L * 1024L
         const val DEFAULT_MIN_FREE_DISK_BYTES = 512L * 1024L * 1024L
         const val DEFAULT_LEASE_DURATION_MS = 10L * 60L * 1000L

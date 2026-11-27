@@ -134,8 +134,8 @@ class MultiformatBookTest {
             }
             assertContains(assertFailsWith<IllegalArgumentException> { library.importBook(encrypted) }.message.orEmpty(), "密码保护")
             val huge = root.resolve("oversized.txt")
-            RandomAccessFile(huge.toFile(), "rw").use { it.setLength(257L * 1024 * 1024) }
-            assertContains(assertFailsWith<IllegalArgumentException> { library.importBook(huge) }.message.orEmpty(), "256")
+            RandomAccessFile(huge.toFile(), "rw").use { it.setLength(513L * 1024 * 1024) }
+            assertContains(assertFailsWith<IllegalArgumentException> { library.importBook(huge) }.message.orEmpty(), "512")
             assertTrue(library.catalog().isEmpty())
             assertTrue(Files.list(library.directory).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".import-") } })
         } finally { root.toFile().deleteRecursively() }

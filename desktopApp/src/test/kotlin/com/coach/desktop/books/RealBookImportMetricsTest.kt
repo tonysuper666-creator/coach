@@ -35,6 +35,7 @@ class RealBookImportMetricsTest {
             "kill" -> killAfterCheckpoint(lib, Path.of(System.getenv("COACH_BOOK_LARGE")!!))
             "resume" -> resume(lib)
             "full" -> measure(lib, Path.of(System.getenv("COACH_BOOK_LARGE")!!), "large-full", recognize = true)
+            "cold" -> measure(lib, Path.of(System.getenv("COACH_BOOK_LARGE")!!), "large-cold", recognize = false)
             "rest" -> rest(lib)
             else -> error("unknown phase $phase")
         }
@@ -109,16 +110,23 @@ class RealBookImportMetricsTest {
         val sampler = sampler(lib)
         sampler.start()
         val staged = library.stageBookImportTier0(pdf)
+        val tier0Ms = millis(started)
         val indexed = library.indexBookTier1(staged.book.id)
+        val tier1Ms = millis(started) - tier0Ms
         val ready = if (recognize) library.resumeBookOcr(indexed.id) else indexed
+        val rendered = library.renderPdf(ready, ready.readingPage)
+        assertTrue(rendered.width > 0 && rendered.height > 0, "failed to render initial reading page ${ready.readingPage}")
         val peak = sampler.stop()
         val checkpoint = ready.pages.size >= 200 || Files.size(pdf) > 32L * 1024 * 1024
         if (ready.pages.size >= 1000) assertTrue(peak in 1..TWO_GB, "large-book working set $peak")
+        val chapters = ready.tocNodes.count { it.kind == TocNodeKind.CHAPTER }
         report(
             lib,
-            "METRIC kind=$kind pages=${ready.pages.size} ms=${millis(started)} wsPeak=$peak " +
-                "ocrPages=${ready.pages.count { it.ocr }} badPages=${ready.damagedPages.size} " +
-                "checkpoint=${if (checkpoint) "applies" else "below-threshold"}",
+            "METRIC kind=$kind bookId=${ready.id} bytes=${Files.size(pdf)} pages=${ready.pages.size} " +
+                "chapters=$chapters tocNodes=${ready.tocNodes.size} tocSource=${ready.structure?.source.orEmpty()} " +
+                "readingPage=${ready.readingPage} tier0Ms=$tier0Ms tier1Ms=$tier1Ms ms=${millis(started)} " +
+                "wsPeak=$peak ocrPages=${ready.pages.count { it.ocr }} ocrPending=${ready.pages.count { it.ocrPending }} " +
+                "badPages=${ready.damagedPages.size} checkpoint=${if (checkpoint) "applies" else "below-threshold"}",
         )
     }
 

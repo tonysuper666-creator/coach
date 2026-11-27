@@ -257,6 +257,46 @@ class LargeAndBadPdfImportTest {
         }
     }
 
+    @Test fun importSizeLimitIs512MbAndRejectsOversizeWithClearMessage() {
+        val root = Files.createTempDirectory("coach-size-limit-")
+        try {
+            assertEquals(512L * 1024 * 1024, MAX_BOOK_IMPORT_BYTES)
+            val libDir = root.resolve("library")
+            val library = TextbookLibrary(libDir, streamPdfExtras = true, lazyPdfExtras = true)
+
+            // A sparse file 1 byte past the 512 MB limit must fail fast in both import paths without leaving temp files.
+            val oversize = root.resolve("oversize.pdf")
+            java.io.RandomAccessFile(oversize.toFile(), "rw").use { it.setLength(MAX_BOOK_IMPORT_BYTES + 1L) }
+
+            val errTier0 = assertFailsWith<IllegalArgumentException> {
+                library.stageBookImportTier0(oversize)
+            }
+            assertEquals("请选择不超过 512 MB 的教材。", errTier0.message)
+
+            val errStage = assertFailsWith<IllegalArgumentException> {
+                library.stageBookImport(oversize)
+            }
+            assertEquals("请选择不超过 512 MB 的教材。", errStage.message)
+            assertTrue(library.catalog().isEmpty())
+            assertTrue(Files.list(libDir).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".import-") } })
+
+            // Verify boundary enforcement at exact limit vs limit + 1 byte.
+            val sample = onePagePdf(root.resolve("sample.pdf"), "SIZE-BOUNDARY-OK")
+            val sampleSize = Files.size(sample)
+            val tightLibrary = TextbookLibrary(root.resolve("tight"), streamPdfExtras = true, lazyPdfExtras = true, maxImportBytes = sampleSize - 1L)
+            val tightErr = assertFailsWith<IllegalArgumentException> { tightLibrary.stageBookImportTier0(sample) }
+            assertTrue(tightErr.message.orEmpty().contains("请选择不超过"))
+            assertTrue(tightLibrary.catalog().isEmpty())
+
+            val exactLibrary = TextbookLibrary(root.resolve("exact"), streamPdfExtras = true, lazyPdfExtras = true, maxImportBytes = sampleSize)
+            val imported = exactLibrary.stageBookImportTier0(sample).book
+            assertEquals(1, imported.pages.size)
+            assertTrue(imported.page(1)!!.text.contains("SIZE-BOUNDARY-OK"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun settledPages(libDir: Path, bookId: String): Int =
         DriverManager.getConnection("jdbc:sqlite:${libDir.resolve("library.sqlite")}").use { db ->
             db.prepareStatement("SELECT COUNT(*) FROM pages WHERE book=? AND text_pending=0").use { sql ->

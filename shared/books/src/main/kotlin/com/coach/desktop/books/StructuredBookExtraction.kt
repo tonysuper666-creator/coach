@@ -12,7 +12,10 @@ import java.util.Locale
 
 internal object StructuredBookExtraction {
     fun extract(path: Path, format: String, title: String, control: BookImportControl = BookImportControl()): ExtractedBook = when (format) {
-        "html" -> html(BookText.decode(Files.readAllBytes(path)), title)
+        "html" -> {
+            require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
+            html(BookText.decode(Files.readAllBytes(path)), title)
+        }
         "rtf" -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             ExtractedBook(title, BookText.chapters(readBookRtf(path)))

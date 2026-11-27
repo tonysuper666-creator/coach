@@ -19,6 +19,112 @@ import kotlin.test.assertTrue
 class CollectionQaRetrievalRankingTest {
 
     @Test
+    fun namedPapersOverrideCurrentBookAndComparisonsKeepBoth() {
+        val root = Files.createTempDirectory("coach-qa-paper-scope-")
+        try {
+            val lib = TextbookLibrary(root.resolve("lib"))
+            fun importMaterial(name: String, heading: String): Textbook {
+                val file = root.resolve("$name.md")
+                Files.writeString(file, "# $name\n$heading\nThe teachers compared hand-written quizzes with generated quizzes.")
+                return lib.importBook(file).also { lib.saveReadSpot(it.id, 1, 0) }
+            }
+            val older = importMaterial("Rivers2023-classroom", "Abstract")
+            val newer = importMaterial("Rivers2024-teachers", "Author: Anne Rivers\nYear: 2024\nAbstract")
+            val survey = importMaterial("Survey-of-quizzes", "Abstract")
+            val novel = importMaterial("The Quiz Master", "Chapter One")
+            lib.withCourseDatabase { db ->
+                db.prepareStatement("UPDATE books SET title=? WHERE id=?").use {
+                    it.setString(1, "Classroom Assessment Strategies")
+                    it.setString(2, newer.id)
+                    it.executeUpdate()
+                }
+            }
+            fun books(q: String) = CollectionQaRetriever.retrieve(
+                lib, CollectionQaVirtualCollections.READ_LIBRARY_ID, q, newer.id,
+            ).blocks.map { it.bookId }.toSet()
+            assertEquals(setOf(older.id), books("What did Rivers (2023) say about quizzes?"))
+            assertEquals(setOf(newer.id), books("How did teachers compare generated and hand-written quizzes?"))
+            assertEquals(setOf(older.id, newer.id), books("Compare quizzes in Rivers 2023 and Rivers 2024."))
+            assertEquals(setOf(older.id, newer.id), books("Compare this paper with Rivers et al. (2023) on quizzes."))
+            assertEquals(setOf(older.id, newer.id, survey.id), books("Compare quizzes across the papers."))
+            assertEquals(setOf(older.id, newer.id, survey.id, novel.id), books("Compare quizzes across the books."))
+            lib.withCourseDatabase { db ->
+                db.prepareStatement("UPDATE books SET source_filename=NULL WHERE id=?").use {
+                    it.setString(1, newer.id)
+                    it.executeUpdate()
+                }
+            }
+            assertEquals(setOf(older.id, newer.id), books("Compare quizzes in Rivers 2023 and Rivers 2024."))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun mixedPublicCorpusRetrievesNamedPaperAndOpeningScenesWithoutRefusalLinks() = runBlocking {
+        val nonfiction = System.getenv("COACH_CORPUS_DIR") ?: return@runBlocking assumeTrue("Requires public corpus", false)
+        val corpus = Path.of(nonfiction).parent
+        val questions = mapOf(
+            "qg-elkins2023-useful-questions" to listOf("Which two taxonomies did teachers evaluate in the useful questions study?", "What did teachers say about classroom usefulness?"),
+            "qg-elkins2024-teachers-bloom" to listOf("Which automatically generated quizzes did teachers prefer to write?", "How did quiz quality compare with handwritten quizzes?"),
+            "qg-scaria2024-bloom-levels" to listOf("Which cognitive levels did Scaria target using Bloom taxonomy?", "Who evaluated the linguistic and pedagogical quality of the questions?"),
+            "qg-nguyen2025-qg-sms" to listOf("What dimensions of test item quality does QG-SMS compare?", "Why does QG-SMS simulate student profiles?"),
+            "qg-isley2025-ai-exams-field-study" to listOf("How does the field study compare AI-generated and human-written exam items?", "What does item discrimination measure in the field study?"),
+            "qg-tomikawa2025-difficulty-mcq" to listOf("Why use direct preference optimization for difficulty control?", "How does item response theory represent item difficulty?"),
+            "pride-and-prejudice" to listOf("Why does Mrs. Bennet want her husband to visit Mr. Bingley?", "What impression does Darcy make on Elizabeth at the assembly?"),
+            "moby-dick" to listOf("Why does Ishmael choose to go to sea as a sailor?", "What sort of place does Ishmael find at the Spouter-Inn?"),
+            "sherlock-holmes-adventures" to listOf("How does Watson describe Holmes’s regard for Irene Adler?", "What does Holmes ask to keep as a reward from the King of Bohemia?"),
+        )
+        val scenePages = mapOf(
+            "pride-and-prejudice" to listOf(10..11, 12..13),
+            "moby-dick" to listOf(11..13, 15..17),
+            "sherlock-holmes-adventures" to listOf(3..3, 14..15),
+        )
+        val root = Files.createTempDirectory("coach-qa-mixed-shelf-")
+        try {
+            val lib = TextbookLibrary(root.resolve("lib"), lazyPdfExtras = true)
+            val books = questions.keys.associateWith { name ->
+                val file = if (name in scenePages) "fiction/$name/$name.epub" else "papers/$name/$name.pdf"
+                lib.importBook(corpus.resolve(file))
+            }
+            val distractor = lib.importBook(corpus.resolve("chinese/tianyanlun/tianyanlun.txt"))
+            for (book in books.values + distractor) {
+                lib.save(book.copy(readingPage = book.pages.size))
+                lib.saveReadSpot(book.id, book.pages.size, 0)
+            }
+            val collection = CollectionQaVirtualCollections.READ_LIBRARY_ID
+            val current = books.getValue("qg-elkins2024-teachers-bloom").id
+            fun comparisonSources(question: String) =
+                CollectionQaRetriever.retrieve(lib, collection, question, current).blocks.map { it.bookId }.toSet()
+            assertEquals(setOf(books.getValue("qg-elkins2023-useful-questions").id, current),
+                comparisonSources("Compare Elkins 2023 and Elkins 2024 on Bloom quizzes"))
+            assertEquals(books.filterKeys { it !in scenePages }.values.map { it.id }.toSet(),
+                comparisonSources("Compare quizzes across the papers"))
+            val missedScenes = mutableListOf<String>()
+            for ((name, book) in books) {
+                questions.getValue(name).forEachIndexed { index, question ->
+                    val blocks = CollectionQaRetriever.retrieve(lib, collection, question, book.id).blocks
+                    assertEquals(setOf(book.id), blocks.map { it.bookId }.toSet(), "$name question $index")
+                    scenePages[name]?.get(index)?.let { expected ->
+                        if (blocks.none { it.page in expected }) missedScenes += "$name question $index retrieved ${blocks.map { it.page }}"
+                    }
+                }
+                val result = CollectionQaEngine.ask(
+                    lib, collection, "這本書記載 2043 年虛構的 ZYXQ-7741 電池實測容量是多少毫安時？", book.id,
+                    remoteAsk = { CourseServerCallResult(buildJsonObject { put("insufficientEvidence", true) }, null) },
+                )
+                result.fold(
+                    onSuccess = { assertTrue(it.sentences.isEmpty() && it.conflictCards.isEmpty() && it.fallbackMessage != null) },
+                    onFailure = { assertTrue(it is CollectionQaException && it.fallbackPages.isEmpty()) },
+                )
+            }
+            assertTrue(missedScenes.isEmpty(), missedScenes.joinToString("\n"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun syntheticClassicsDirectEvidenceBeatsTangentialMentionsAndOutOfBookRefuses() = runBlocking {
         val root = Files.createTempDirectory("coach-ton1966-synth-")
         try {

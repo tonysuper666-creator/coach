@@ -465,13 +465,15 @@ class CollectionQaService(
             Answer the student's question completely and accurately in plain Simplified Chinese using ONLY the provided evidence blocks [B1]..[Bk].
             Strict Rules:
             1. Read EVERY line of ALL provided blocks [B1]..[Bk] carefully (including page bottoms, footnotes, figure notes, and timestamped transcript lines). Answer ALL sub-questions explicitly. When comparing books in a booklist, cite a relevant block from each book being compared when the supplied evidence supports it.
-            2. Break your answer into 2 to 4 factual sentences (`sentences` array). EVERY sentence MUST cite one `blockId` (e.g. "B1") and copy an EXACT character-for-character contiguous ASCII/Chinese substring `quoteAnchor` (4 to 7 consecutive words copied verbatim from that block without ellipses `...`, without brackets, without ligature edits, and preferring clean prose without subscript spacing noise).
+               For a question about one paper, use that paper's own account of its methods and results. For a question about a scene, cite the page where the event takes place. For a first encounter, use the earliest supplied passage that directly depicts it.
+            2. If no supplied passage supports an answer to the question about the requested source, set `insufficientEvidence` to true and return empty sentences, discrepancies and conflicts. A shared keyword or an unrelated source is insufficient. Never cite a passage to explain that evidence is missing.
+               Otherwise, give the supported facts in 1 to 4 factual sentences (`sentences` array). EVERY sentence MUST cite one `blockId` (e.g. "B1") and copy an EXACT character-for-character contiguous ASCII/Chinese substring `quoteAnchor` (4 to 7 consecutive words copied verbatim from that block without ellipses `...`, without brackets, without ligature edits, and preferring clean prose without subscript spacing noise).
             3. Cross-Material / Lecture Discrepancy Rule: Compare ALL blocks [B1]..[Bk] on the exact concept, formula, sign/direction, upper-bound applicability, empirical cause, authorship citation, or lecturer transcript self-correction that the student's question asks about.
                - If `Pre-indexed Discrepancy Candidates` are supplied below, verify whether any candidate directly applies to the asked question. Return matching ids in `matchedDiscrepancyIds`.
                - Set `hasMaterialConflict = true` ONLY when two teaching sources (or two timestamps in a lecturer transcript, or a lecture formula vs a tutorial key hitting a boundary cap, or a slide hypothesis vs a required paper's empirical refutation, or conflicting author names/notation across slides and textbook, or a directly matched candidate discrepancy) genuinely diverge or self-correct ON THE ASKED QUESTION (NEVER flag end-of-chapter True/False quiz statements, and NEVER flag unasked background notation when sources agree on the asked question!).
                - When `hasMaterialConflict = true`, summarize both sides and their citations in `conflictSummaryZh`; otherwise set `hasMaterialConflict = false`, `conflictSummaryZh = ""`, and `matchedDiscrepancyIds = []`.
             Output ONE JSON object only:
-            {"sentences": [{"claim": "...。", "blockId": "B1", "quoteAnchor": "exact words from B1"}], "hasMaterialConflict": false, "conflictSummaryZh": "", "matchedDiscrepancyIds": []}
+            {"insufficientEvidence": false, "sentences": [{"claim": "...。", "blockId": "B1", "quoteAnchor": "exact words from B1"}], "hasMaterialConflict": false, "conflictSummaryZh": "", "matchedDiscrepancyIds": []}
         """.trimIndent()
     }
 
@@ -559,7 +561,9 @@ class CollectionQaService(
             runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull()
         }
 
-        val rawSentences = (parsed?.get("sentences") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        val insufficientEvidence = (parsed?.get("insufficientEvidence") as? JsonPrimitive)?.booleanOrNull == true
+        val answer = parsed.takeUnless { insufficientEvidence }
+        val rawSentences = (answer?.get("sentences") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         val verifiedSentences = mutableListOf<JsonObject>()
         var droppedUnverified = 0
 
@@ -592,15 +596,15 @@ class CollectionQaService(
             }
         }
 
-        val modelHasConflict = (parsed?.get("hasMaterialConflict") as? JsonPrimitive)?.booleanOrNull ?: false
-        val conflictSummary = parsed?.str("conflictSummaryZh")?.trim().orEmpty()
-        val modelMatchedIds = (parsed?.get("matchedDiscrepancyIds") as? JsonArray).orEmpty()
+        val modelHasConflict = (answer?.get("hasMaterialConflict") as? JsonPrimitive)?.booleanOrNull ?: false
+        val conflictSummary = answer?.str("conflictSummaryZh")?.trim().orEmpty()
+        val modelMatchedIds = (answer?.get("matchedDiscrepancyIds") as? JsonArray).orEmpty()
             .mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }
             .toSet()
 
         val mergedConflicts = mutableListOf<JsonObject>()
         val selectedDiscrepancies = discrepancies.filter { d ->
-            d.directAspectMatch || d.id in modelMatchedIds
+            !insufficientEvidence && (d.directAspectMatch || d.id in modelMatchedIds)
         }
         for (d in selectedDiscrepancies) {
             val verifiedCites = buildJsonArray {
@@ -662,6 +666,7 @@ class CollectionQaService(
         }
 
         return buildJsonObject {
+            put("insufficientEvidence", insufficientEvidence)
             put("sentences", JsonArray(verifiedSentences))
             put("hasMaterialConflict", finalHasConflict)
             put("conflictSummaryZh", if (finalHasConflict) effectiveConflictSummary else "")

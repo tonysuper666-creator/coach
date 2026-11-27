@@ -874,6 +874,43 @@ $script:cropQueue = @([pscustomobject]@{ Text = '1541'; Alt = '154'; X = 1974; Y
 $caretOk = Invoke-JumpCase
 Check 'jump-caret-glued-digits-accepted-first-try' ($caretOk -eq 'ok' -and $script:clicks.Count -eq 0) "result=$caretOk clicks=$($script:clicks.Count)"
 
+# 第 5 步：先从自测切回要点，不能把阅读器标题里的章节编号认成要点。
+$step5SelfTest = @(
+    (New-Line '6．7 Example' 700 70 160 22),
+    (New-Line '要点' 1600 550 48 22),
+    (New-Line '自测' 1660 550 48 22),
+    (New-Line '读前自测' 1600 610 120 22)
+)
+$step5Page = @(
+    (New-Line '要点' 1600 550 48 22),
+    (New-Line '自测' 1660 550 48 22),
+    (New-Line '讲的是：第 150 页' 1600 610 200 22)
+)
+$step5Chapter = @(
+    (New-Line '6．7 Example' 700 70 160 22),
+    (New-Line '本章要点·示例' 1600 610 200 22),
+    (New-Line '1．合成要点' 1600 660 200 22)
+)
+Check 'step5-title-number-is-not-a-chapter-point' ($null -eq (Find-Step5ChapterPoint $step5SelfTest 2160 1350)) 'reader title accepted'
+Check 'step5-pretest-is-not-keypoint-view' (-not (Test-Step5KeyPointView $step5SelfTest 2160 1350)) 'pretest accepted'
+Check 'step5-page-view-recognized' (Test-Step5KeyPointView $step5Page 2160 1350) 'page heading missed'
+Check 'step5-chapter-point-requires-drawer-heading' ((Find-Step5ChapterPoint $step5Chapter 2160 1350).Text -eq '1．合成要点') 'chapter point missed'
+$outsideKey = @((New-Line '要点' 200 550 48 22), (New-Line '自测' 260 550 48 22))
+Check 'step5-keypoint-tab-requires-drawer' ($null -eq (Find-Step5KeyPointTab $outsideKey 2160 1350)) 'outside tab accepted'
+$loopStart = $src.IndexOf('        $keyView = $false')
+$loopEnd = $src.IndexOf('        # 讲解页的内容', $loopStart)
+if ($loopStart -lt 0 -or $loopEnd -lt 0) { throw 'step 5 key point switch not found' }
+$switchKeyPoints = [scriptblock]::Create($src.Substring($loopStart, $loopEnd - $loopStart))
+$winW = 2160; $winH = 1350; $midX = 1080
+$script:screen = $step5SelfTest; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $step5Page }
+& $switchKeyPoints
+Check 'step5-clicks-keypoint-before-recognizing-page' ($script:clicks.Count -eq 1 -and $script:clicks[0] -eq '1624,561') "clicks=$($script:clicks -join '|')"
+$script:screen = $step5SelfTest; $script:clicks.Clear(); $script:onClick = $null
+$switchError = ''
+try { & $switchKeyPoints } catch { $switchError = $_.Exception.Message }
+Check 'step5-stops-if-keypoint-never-opens' ($script:clicks.Count -eq 3 -and $switchError -like '*未能从抽屉模块条切到*') "clicks=$($script:clicks.Count)"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

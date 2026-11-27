@@ -133,7 +133,7 @@ function Find-Exact($lines, [string]$needle) {
 }
 function Get-HomeImportLabel($lines) {
     if (Find-Exact $lines '放进一本书') { return '放进一本书' }
-    if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库')) { return '导入文件' }
+    if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库', '云端书架')) { return '导入文件' }
 }
 
 function Find-TasteOption($lines, $submit) {
@@ -1061,6 +1061,50 @@ function Ensure-CompanionDrawerOpen(
     }
     [pscustomobject]@{ Tab = $tab; Lines = $lines }
 }
+# 只认抽屉模块条上与「自测」同排的独立「要点」，不能点击正文或顶栏中的同名文字。
+function Find-Step5KeyPointTab($lines, [int]$winW, [int]$winH) {
+    $keys = @(); $tests = @()
+    foreach ($line in @($lines)) {
+        $t = ([string]$line.Text -replace '\s', '')
+        if ($t -notmatch '^(?:要点|自测|推导|练习|习题)$') { continue }
+        $p = Get-LineClick $line
+        if (-not $p) { continue }
+        if ($winW -ge 1000 -and $p.X -lt ($winW * 0.5)) { continue }
+        if ($p.Y -lt ($winH * 0.20) -or $p.Y -gt ($winH * 0.90)) { continue }
+        if ($t -eq '要点') { $keys += $p } elseif ($t -eq '自测') { $tests += $p }
+    }
+    foreach ($key in $keys) {
+        foreach ($test in $tests) {
+            if ([Math]::Abs($key.Y - $test.Y) -le 20 -and $test.X -gt $key.X -and
+                ($test.X - $key.X) -le 180) { return $key }
+        }
+    }
+    return $null
+}
+function Test-Step5KeyPointView($lines, [int]$winW, [int]$winH) {
+    foreach ($line in @($lines)) {
+        $b = Get-LineBox $line
+        if ($winW -ge 1000 -and $b.X1 -lt ($winW * 0.5)) { continue }
+        if ($b.Y -lt ($winH * 0.20)) { continue }
+        $t = ([string]$line.Text -replace '\s', '')
+        if ($t -match '^讲的是[:：]?第\d+[页頁贞貞虫]|^本章要点[·:：．]|^正在讲解这一页|^正在按节整理|^本章暂无提取要点|^当前页暂未归入正文小节|^登录后可使用本章伴读|^伴读整理已在设置中关闭|^讲解服务.*连不上|^本章伴读.*连不上') { return $true }
+    }
+    return $false
+}
+function Find-Step5ChapterPoint($lines, [int]$winW, [int]$winH) {
+    $head = @($lines | Where-Object {
+        $b = Get-LineBox $_
+        ($winW -lt 1000 -or $b.X1 -ge ($winW * 0.5)) -and $b.Y -ge ($winH * 0.20) -and
+            (($_.Text -replace '\s', '') -match '^本章要点[·:：．]')
+    } | Select-Object -First 1)
+    if (-not $head.Count) { return $null }
+    $headY = (Get-LineBox $head[0]).Y
+    return ($lines | Where-Object {
+        $b = Get-LineBox $_
+        ($winW -lt 1000 -or $b.X1 -ge ($winW * 0.5)) -and $b.Y -gt $headY -and
+            (($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．]\S+)')
+    } | Select-Object -First 1)
+}
 # 步骤6「读前自测」从当前帧实时定位模块条、提交按钮与上方最后一个选项，避免滚动/抽屉高度变化后沿用旧帧坐标漏选。
 function Find-Step6ModuleStrip($lines, [int]$winW = 0, [int]$maxY = [int]::MaxValue) {
     $stripNames = @('自测', '要点', '推导', '练习', '习题')
@@ -1533,18 +1577,36 @@ try {
     Pass 1 '客户端窗口出现，2.0 首页可见'
 
     # ② 导入一本书
-    $firstOpen = $homeEntry -eq '放进一本书'
-    if ($InstalledExe -and -not $firstOpen) {
-        foreach ($attempt in 1..4) {
-            $homeFrame = Shot 2 "import-home$attempt"
+    # 云端同步可以在步骤 1 之后替换整个首页。每次尝试都按当前帧选入口；
+    # 首题标记以真正打开选书框的入口为准，不沿用步骤 1 的快照。
+    $firstOpen = $false; $opened = $false
+    foreach ($attempt in 1..4) {
+        $homeFrame = Shot 2 "import-home$attempt"
+        $entry = Get-HomeImportLabel $homeFrame
+        if (-not $entry) { Start-Sleep -Seconds 2; continue }
+        $isFirst = $entry -eq '放进一本书'
+        if ($InstalledExe -and -not $isFirst) {
             Open-Step2ImportMenu $homeFrame $attempt
-            Start-Sleep -Milliseconds 850
-            if ((Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero) { break }
+        } else {
+            $target = if ($isFirst) { Find-Exact $homeFrame $entry } else { Find-Text $homeFrame $entry }
+            if (-not $target) { Start-Sleep -Seconds 2; continue }
+            $pressed = Click-At $target.X $target.Y -BeforePress {
+                $current = Shot 2 "import-confirm$attempt"
+                $same = if ($isFirst) { Find-Exact $current $entry } else { Find-Text $current $entry }
+                return [bool]($same -and (Get-HomeImportLabel $current) -eq $entry -and
+                    $target.X -ge $same.X1 -and $target.X -le $same.X2 -and
+                    $target.Y -ge $same.Y1 -and $target.Y -le $same.Y2)
+            }
+            if (-not $pressed) { continue }
         }
-        if ((Find-AppWindowByTitle '导入文件') -eq [IntPtr]::Zero) { Fail 2 '顶栏导入菜单未打开原生选书对话框（见 2-import-home*.png / 2-import-menu*.png）' }
-    } else {
-        Click-Until-Dialog 2 $homeEntry { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } -exact $firstOpen
+        $until = (Get-Date).AddSeconds(6)
+        do {
+            if ((Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero) { $opened = $true; $firstOpen = $isFirst; break }
+            Start-Sleep -Milliseconds 400
+        } while ((Get-Date) -lt $until)
+        if ($opened) { break }
     }
+    if (-not $opened) { Fail 2 '当前首页入口未打开原生选书对话框（见 2-import-home*.png / 2-import-confirm*.png / 2-import-menu*.png）' }
     if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
     if ($firstOpen) { Complete-FirstTaste }
     # 导入通常先打开阅读器。还要回首页验证本地书卡，课程和书单可能把它推到首屏以下。
@@ -1562,6 +1624,16 @@ try {
         $tries++
         Hover $midX $hoverY; Start-Sleep -Milliseconds 600
         $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
+        # 只有云端书卡时，顶栏导入仍可能触发首次做题引导；以选书后的真实页面为准。
+        if (-not $firstOpen -and ((Find-Text $lines '选一个答案') -or
+            (Find-Text $lines '正在用开头几章') -or (Find-Exact $lines '看讲解') -or
+            (Find-Exact $lines '再放一次') -or (Find-Exact $lines '再试一次') -or
+            (Find-Exact $lines '先翻开这本书'))) {
+            $firstOpen = $true
+            Complete-FirstTaste
+            $deadline = (Get-Date).AddSeconds(150)
+            continue
+        }
         $c = Get-HudCounter $script:LastPng
         if ($c) { $readerPage = $c.Text } elseif (-not $firstOpen) { $shelfHit = Find-Step2HomeBook $lines $BookTitle }
         if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }
@@ -2177,6 +2249,22 @@ try {
         }
         if (-not $switched) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
         Note '步骤5 已切到伴读抽屉的「讲解」页签'
+        # 「讲解」会保留上次的模块（例如自测）；先点模块条的「要点」，确认内容确实切过去。
+        $keyView = $false
+        foreach ($attempt in 1..3) {
+            Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 700
+            $lines = Shot 5 "key-tab-find$attempt"
+            $keyTab = Find-Step5KeyPointTab $lines $winW $winH
+            if (-not $keyTab) { Start-Sleep -Seconds 1; continue }
+            $null = Click-At $keyTab.X $keyTab.Y
+            foreach ($wait in 1..4) {
+                Start-Sleep -Milliseconds 700
+                $lines = Shot 5 "key-tab-on${attempt}-$wait"
+                if (Test-Step5KeyPointView $lines $winW $winH) { $keyView = $true; break }
+            }
+            if ($keyView) { break }
+        }
+        if (-not $keyView) { Fail 5 '未能从抽屉模块条切到「要点」（见 5-key-tab-*.png）' }
         # 讲解页的内容由「本章伴读包」驱动，六种状态并存，边等边认：
         #   就绪：标题「本章要点 · <本章>」+ 若干「N. 要点」+ 每条后面「原文第 N 页」锚点；
         #   空：本章暂无提取要点；未归类：当前页暂未归入正文小节；未登录：登录后可使用本章伴读；
@@ -2225,7 +2313,7 @@ try {
             }
             $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
             if (-not $loading5) {
-                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．])' } | Select-Object -First 1
+                $kp = Find-Step5ChapterPoint $lines $winW $winH
                 if (-not $kp) { $kp = Find-AnchorChip $lines $script:LastPng $winH }
             }
             if ($kp) { break }

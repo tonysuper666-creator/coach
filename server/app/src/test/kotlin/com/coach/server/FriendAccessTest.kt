@@ -78,6 +78,21 @@ class FriendAccessTest {
         fun parse(response: HttpResponse<String>) = LedgerJson.parseToJsonElement(response.body()).jsonObject
     }
 
+    @Test fun logoutRevokesOnlyTheAuthenticatedSession() = Harness().use { h ->
+        h.friends.sable = SableSessions(h.actor, SableVault(h.root.resolve("vault")), {
+            SableIdentity("stable-sub", "demo", "demo@example.org")
+        })
+        fun login() = parse(h.request("/v1/public/sable", "POST", json("token" to "synthetic-token-for-settings")))
+        val first = login()
+        val second = login()
+        val profile = parse(h.request("/v1/session", credential = first))
+        assertEquals("demo", profile.str("nickname"))
+        assertEquals("d***@example.org", profile.str("maskedEmail"))
+        assertEquals(204, h.request("/v1/session", "DELETE", credential = first).statusCode())
+        assertEquals(401, h.request("/v1/public/status", credential = first).statusCode())
+        assertEquals(200, h.request("/v1/public/status", credential = second).statusCode())
+    }
+
     @Test fun sableCredentialUsesFriendQuotaAndChecksRevocationOnStartupAndAfterTenMinutes() = Harness().use { h ->
         var time = 100L
         var active = true

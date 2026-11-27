@@ -48,7 +48,7 @@ internal class DesktopPairing(
                 try { transport.hello(null) } finally { transport.close() }
             }
             settings.saveAddress(url)
-            store.save(url, value)
+            store.save(url, value, SessionDisplay("配对码"))
             return DesktopIdentity(url, value)
         } finally { client.close() }
     }
@@ -61,7 +61,7 @@ internal class DesktopPairing(
             val value = client.sable(open, issuer)
             withContext(Dispatchers.IO) {
                 settings.saveAddress(url)
-                store.save(url, value)
+                store.save(url, value, SessionDisplay("Sable"))
             }
             return DesktopIdentity(url, value)
         } finally { client.close() }
@@ -137,6 +137,14 @@ internal class DesktopPairing(
             }
             AuthReachOutcome.Unreachable -> true
         }
+    }
+
+    suspend fun logout(identity: DesktopIdentity) {
+        val client = PairingClient(identity.serverUrl)
+        try {
+            client.logout(identity.credentials)
+            store.clear(identity.serverUrl, identity.credentials)
+        } finally { client.close() }
     }
 
     fun wasRevoked(): Boolean = store.wasRevoked()

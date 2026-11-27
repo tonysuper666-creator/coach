@@ -80,6 +80,12 @@ internal class UpdateSession(
         message = text
     }
 
+    fun current() {
+        ready = null
+        staged = null
+        message = ""
+    }
+
     fun defer() {
         deferred = true
     }
@@ -151,6 +157,8 @@ internal fun rememberWindowsUpdateSession(
     libraryDir: Path,
     save: suspend () -> Boolean,
     close: () -> Unit,
+    checkRequest: Int = 0,
+    onResult: (String) -> Unit = {},
     updatesDir: Path = windowsUpdatesDirectory(),
     launch: (Path) -> Boolean = ::startWindowsInstaller,
 ): UpdateSession {
@@ -160,18 +168,28 @@ internal fun rememberWindowsUpdateSession(
             WindowsRollback.consumeRollbackFailure(libraryDir)?.let { created.noteRollback(it) }
         }
     }
-    LaunchedEffect(session) {
-        val update = WindowsUpdate.installed() ?: return@LaunchedEffect
+    LaunchedEffect(session, checkRequest) {
+        val manual = checkRequest > 0
+        val update = WindowsUpdate.installed() ?: run {
+            if (manual) onResult("此安装包没有可用的更新渠道。")
+            return@LaunchedEffect
+        }
         try {
             val release = withContext(Dispatchers.IO) { update.check() }
             if (release != null) {
+                if (manual) onResult("有新版本 ${release.version}，正在校验安装包…")
                 val msi = withContext(Dispatchers.IO) { update.download(release, updatesDir) }
                 session.offer(release, msi)
+                if (manual) onResult("有新版本 ${release.version}")
+            } else {
+                session.current()
+                if (manual) onResult("已经是最新版本")
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Exception) {
             session.fail(updateFailureMessage(error))
+            if (manual) onResult("无法完成更新检查，请重试。")
         }
         try {
             session.fetchPrevious(update)

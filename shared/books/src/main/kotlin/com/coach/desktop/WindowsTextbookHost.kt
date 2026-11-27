@@ -103,6 +103,7 @@ internal fun WindowsTextbookHost(
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
+    val openAccountSettings: (() -> Unit)? = if (LocalAccountSettings.current == null) null else ({ settings = true })
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var creatingKind by remember { mutableStateOf<CollectionKind?>(null) }
     var activeCollection by remember { mutableStateOf<CollectionSummary?>(null) }
@@ -290,7 +291,12 @@ internal fun WindowsTextbookHost(
                                     (book.format == "pdf" || book.format in BookFormats.images) &&
                                         !(controller.library.preferredTextView(book.id) ?: defaultTextView)
                                 },
-                                extra = extra,
+                                extra = { close ->
+                                    if (openAccountSettings != null) {
+                                        V7TextButton({ close(); openAccountSettings() }, ringInside = true) { Text("账号与设置") }
+                                    }
+                                    extra(close)
+                                },
                             )
                         }
                         panel
@@ -327,6 +333,7 @@ internal fun WindowsTextbookHost(
                     }
 
                     CompositionLocalProvider(
+                        LocalOpenAccountSettings provides openAccountSettings,
                         LocalDeskSelect provides deskSelect,
                         LocalDeskTypeControl provides typeControl,
                         LocalReadingFont provides preferences.font,

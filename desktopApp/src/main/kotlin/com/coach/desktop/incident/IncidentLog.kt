@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal object IncidentLog {
     private val storeLock = Any()
     private var store: IncidentStore? = null
+    private var sessionStore: IncidentStore? = null
     private val crashHandlerInstalled = AtomicBoolean(false)
     @Volatile var suppressCleanExit = false
     @Volatile private var offer: PendingOffer? = null
@@ -26,10 +27,28 @@ internal object IncidentLog {
             onSyncFailure = { active.recordSyncFailure(it) },
         )
         offer = active.beginSession()
+        synchronized(storeLock) {
+            sessionStore = active
+        }
         if (shutdownHook.compareAndSet(false, true)) {
             Runtime.getRuntime().addShutdownHook(Thread({
-                if (!suppressCleanExit) runCatching { active.markClean() }
+                markStartedSessionClean()
             }, "incident-clean-exit"))
+        }
+    }
+
+    internal fun markStartedSessionClean() {
+        if (suppressCleanExit) return
+        val started = synchronized(storeLock) { sessionStore } ?: return
+        runCatching { started.markClean() }
+    }
+
+    internal fun resetForTest() {
+        synchronized(storeLock) {
+            store = null
+            sessionStore = null
+            offer = null
+            suppressCleanExit = false
         }
     }
 

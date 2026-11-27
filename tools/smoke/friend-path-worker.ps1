@@ -874,9 +874,9 @@ function Send-PageDigits([int]$page) {
 }
 
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
-$lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
-New-Item -ItemType Directory -Force $lib, $client | Out-Null
-$env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_TOKEN_FILE = (Join-Path $OutDir 'unused-token')
+$lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'; $incidents = Join-Path $OutDir 'incidents'
+New-Item -ItemType Directory -Force $lib, $client, $incidents | Out-Null
+$env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_INCIDENT_DIR = $incidents; $env:COACH_TOKEN_FILE = (Join-Path $OutDir 'unused-token')
 $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }

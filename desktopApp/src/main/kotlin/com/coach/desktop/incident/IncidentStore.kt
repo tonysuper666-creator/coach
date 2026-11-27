@@ -25,6 +25,7 @@ internal class IncidentStore(
 ) {
     private val operations = ArrayDeque<String>()
     private var sequence = 0L
+    private var sessionStarted = false
 
     @Synchronized
     fun note(name: String) {
@@ -81,12 +82,16 @@ internal class IncidentStore(
             pack(unconsented())
         } else null
         writeSession(open = true)
+        sessionStarted = true
         return offer
     }
 
     @Synchronized
     fun markClean() {
-        if (Files.isDirectory(root)) writeSession(open = false)
+        if (!sessionStarted || !Files.isDirectory(root)) return
+        val current = readSession()
+        if (current != null && current.pid != null && current.pid != pid()) return
+        writeSession(open = false)
     }
 
     @Synchronized

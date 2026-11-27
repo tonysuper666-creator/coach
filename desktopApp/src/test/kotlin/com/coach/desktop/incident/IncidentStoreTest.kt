@@ -134,6 +134,40 @@ class IncidentStoreTest {
         }
     }
 
+    @Test fun markCleanOnlyTouchesOwnedSessionAndResetLeavesExternalSessionIntact() {
+        val dir = Files.createTempDirectory("incident-clean-guard")
+        try {
+            val session = dir.resolve("session.txt")
+            Files.writeString(session, "open\n1000\n999\n")
+            // Unstarted store must not overwrite an existing open marker.
+            IncidentStore(dir, pid = { 999L }).markClean()
+            assertTrue(Files.readString(session).startsWith("open\n"))
+
+            // A started store must not overwrite a marker owned by another PID.
+            val owned = IncidentStore(dir, pid = { 100L })
+            owned.beginSession()
+            Files.writeString(session, "open\n2000\n200\n")
+            owned.markClean()
+            assertTrue(Files.readString(session).startsWith("open\n2000\n200"))
+
+            // Resetting IncidentLog after a test must leave external session markers untouched on shutdown.
+            val external = Files.createTempDirectory("incident-external")
+            try {
+                val externalSession = external.resolve("session.txt")
+                Files.writeString(externalSession, "open\n3000\n300\n")
+                IncidentLog.startSession(dir) { if (it == "COACH_INCIDENT_DIR") dir.toString() else null }
+                IncidentLog.resetForTest()
+                IncidentLog.markStartedSessionClean()
+                assertTrue(Files.readString(externalSession).startsWith("open\n3000\n300"))
+            } finally {
+                external.toFile().deleteRecursively()
+            }
+        } finally {
+            IncidentLog.resetForTest()
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun freezeDueMatchesTheTenSecondRule() {
         assertFalse(freezeDue(10_000, 0, armed = false, modal = false, lastFreezeAt = 0))
         assertFalse(freezeDue(10_000, 0, armed = true, modal = false, lastFreezeAt = 0))

@@ -106,6 +106,11 @@ object ExamPointDrillGate {
         """^.{2,70}?[,，、]\s*(?:p\.?\s*)?\d{1,5}(?:\s*[-–—,，、]\s*\d{1,5})*\s*$""",
         RegexOption.IGNORE_CASE,
     )
+    private val partDividerHeadingLine = Regex(
+        """^(?:#{1,6}\s*)?(?:Part\s+(?:[IVXLC]+|\d+)|第\s*[一二三四五六七八九十\d]+\s*[部编篇])(?:\s*[:：\-—.]\s*.*|\s*)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val partMiniTocLine = Regex("""^\d{1,2}\s+[A-Z\u4e00-\u9fff][^\r\n]{3,90}$""")
     private val trailingPageNum = Regex("""^(.+?\S)(?:\s*[…⋯]+|\s*(?:[.．·•\-–—_]\s*){2,}|\s+)(\d{1,4}|[ivxlcdm]{1,5})\s*$""")
     private val tocTailExcludedWord = Regex(
         """(?i)(?:^|\s)(?:in|of|at|to|by|for|from|on|with|and|or|as|than|over|under|between|about|after|before|year|years|age|chapter|section|table|figure|fig\.?|box|part|week|step|equation|eq\.?|definition|theorem|example|question|problem|exercise|case|model|stage|phase|level|type|class|grade|tier|group)$""",
@@ -174,6 +179,11 @@ object ExamPointDrillGate {
         val indexCount = lines.count { indexEntryLine.matches(it) }
         if (hasIndexHeading && (indexCount >= 2 || proseLines == 0)) return true
         if (indexCount >= 4 && indexCount * 10 >= lines.size * 5) return true
+        val hasPartHeading = lines.take(4).any { partDividerHeadingLine.matches(it) }
+        if (hasPartHeading && proseLines == 0) {
+            val miniTocEntries = lines.count { partMiniTocLine.matches(it) }
+            if (miniTocEntries >= 2 || trimmed.count { !it.isWhitespace() } < 350) return true
+        }
         return false
     }
 
@@ -213,44 +223,54 @@ object ExamPointDrillGate {
         if (exerciseInstructionLine.containsMatchIn(trimmed)) return true
         val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
         val numbered = lines.filter { numberedItemLine.containsMatchIn(it) }
-        if (numbered.size < 3) return false
         val promptLike = numbered.count { it.endsWith("?") || exercisePromptLead.containsMatchIn(it) }
-        val hasSubParts = subPartMarker.findAll(trimmed).count() >= 2
+        val subParts = subPartMarker.findAll(trimmed).count()
         val questionMarks = trimmed.count { it == '?' || it == '？' }
-        return promptLike >= 2 || (hasSubParts && questionMarks >= 2) || questionMarks >= 4
+        if (subParts >= 3 && (numbered.isNotEmpty() || questionMarks >= 1)) return true
+        if (numbered.size >= 2 && (promptLike >= 2 || (subParts >= 2 && questionMarks >= 1))) return true
+        if (numbered.size < 3) return false
+        return promptLike >= 1 || subParts >= 2 || questionMarks >= 3
     }
 
-    private fun isChapterOpeningBlock(text: String): Boolean {
+    private fun isChapterOpeningBlock(text: String, exerciseChapterNum: Int? = null): Boolean {
         val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
         if (lines.isEmpty()) return false
         val topLines = lines.take(6)
         if (topLines.any { chapterBoundaryLine.containsMatchIn(it) }) return true
         if (looksLikeExerciseBlock(text)) return false
-        for (i in topLines.indices) {
-            val line = topLines[i]
+        for (line in topLines) {
             val numMatch = numericChapterHeadingLine.matchEntire(line)
             if (numMatch != null) {
                 val chNum = numMatch.groupValues[1].toIntOrNull() ?: 0
                 val title = numMatch.groupValues[2].trim()
-                if (chNum in 1..60 && isPlausibleChapterTitle(title)) return true
+                val chapterProgressOk = exerciseChapterNum == null || chNum in (exerciseChapterNum + 1)..(exerciseChapterNum + 2)
+                if (chNum in 1..60 && chapterProgressOk && isPlausibleChapterTitle(title)) return true
             }
-            val bareMatch = bareChapterNumberLine.matchEntire(line)
+        }
+        for (i in topLines.indices) {
+            val bareMatch = bareChapterNumberLine.matchEntire(topLines[i])
             if (bareMatch != null && i + 1 < lines.size) {
                 val chNum = bareMatch.groupValues[1].toIntOrNull() ?: 0
                 val nextTitle = lines[i + 1].trimStart('#', ' ')
-                if (chNum in 1..60 && isPlausibleChapterTitle(nextTitle) && nextTitle.length >= 6) return true
+                val chapterProgressOk = exerciseChapterNum == null || chNum in (exerciseChapterNum + 1)..(exerciseChapterNum + 2)
+                if (chNum in 1..40 && chapterProgressOk &&
+                    nextTitle.firstOrNull()?.isLetter() == true &&
+                    isPlausibleChapterTitle(nextTitle) && nextTitle.length >= 6
+                ) return true
             }
         }
         return lines.take(15).any { line ->
             val m = firstSectionOfChapterLine.matchEntire(line) ?: return@any false
             val chNum = m.groupValues[1].toIntOrNull() ?: 0
             val title = m.groupValues[2].trim()
-            chNum in 1..60 && !exerciseHeadingLine.matches(line) && isPlausibleChapterTitle(title)
+            val chapterProgressOk = exerciseChapterNum == null || chNum in (exerciseChapterNum + 1)..(exerciseChapterNum + 2)
+            chNum in 1..60 && chapterProgressOk && !exerciseHeadingLine.matches(line) && isPlausibleChapterTitle(title)
         }
     }
 
     private fun isPlausibleChapterTitle(title: String): Boolean {
-        if (title.length !in 4..110) return false
+        if (title.length !in 4..100) return false
+        if (title.split(Regex("""\s+""")).size > 12) return false
         if (title.last() in setOf('.', '?', '!', '。', '？', '！', ';', '；')) return false
         if (exerciseHeadingLine.matches(title) || exercisePromptLead.containsMatchIn(title)) return false
         if (chapterUnitLead.containsMatchIn(title)) return false
@@ -268,6 +288,7 @@ object ExamPointDrillGate {
         var lastTextbookPage = -1
         var inExerciseTail = false
         var tailPages = 0
+        var exerciseChapterNum: Int? = null
         for (block in sorted) {
             if (block.role.equals("PAST_EXAM", ignoreCase = true) || CourseQualityGates.isPastExamTitle(block.bookTitle)) {
                 droppedPastExam = true
@@ -282,12 +303,14 @@ object ExamPointDrillGate {
                 if (!consecutive) {
                     inExerciseTail = false
                     tailPages = 0
+                    exerciseChapterNum = null
                 }
                 currentTextbook = block.bookId
                 lastTextbookPage = block.page
-                if (isChapterOpeningBlock(block.text)) {
+                if (isChapterOpeningBlock(block.text, if (inExerciseTail) exerciseChapterNum else null)) {
                     inExerciseTail = false
                     tailPages = 0
+                    exerciseChapterNum = null
                 }
                 val stripped = stripExerciseText(block.text)
                 if (inExerciseTail) {
@@ -299,6 +322,7 @@ object ExamPointDrillGate {
                         if (tailPages >= 1 && hasNoExercise) {
                             inExerciseTail = false
                             tailPages = 0
+                            exerciseChapterNum = null
                         } else {
                             tailPages++
                             droppedExercise = true
@@ -307,11 +331,15 @@ object ExamPointDrillGate {
                     } else {
                         inExerciseTail = false
                         tailPages = 0
+                        exerciseChapterNum = null
                     }
                 }
                 if (stripped != block.text) {
                     inExerciseTail = true
                     tailPages = 1
+                    exerciseChapterNum = block.text.lineSequence().map(String::trim)
+                        .firstOrNull { exerciseHeadingLine.matches(it) }
+                        ?.let { Regex("""^(?:#{1,6}\s*)?(\d{1,2})\.\d+""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
                     if (stripped.isBlank()) {
                         droppedExercise = true
                         continue
@@ -913,7 +941,11 @@ class ExamPointDrillPipeline(
     ): BatchTransportReply = checker.generateSection(
         systemPrompt = """
             你看不到标准答案，也不要猜测出题人的意图。只根据材料独立作答。
-            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）；同时按语义判断这道题是否真正考查当前考点 topicTitle 本身（中英文对应同一概念、或考查该实验/模型/假说的具体结果与机制，均属于在考点上，不要按英文字面词硬卡；只有当题目考的是同页无关概念、别的定义、目录定位或章末习题时，才设 onTopic 为 false）；若与本组前面某道题重复考查同一个定义，设 duplicate 为 true。
+            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）；同时判断这道题是否真正考查当前考点 topicTitle 本身：
+            - 中文题干对英文考点，按语义判断，不得因为语言不同或题干未出现英文考点原词就判离题。
+            - 只要题目考查的是当前考点主题下的具体指标、机制、推导结果、参数变动影响或相关行为反应，均属于在考点上（onTopic 设为 true）。
+            - 只有当题目明显考查同页另一个无关概念、目录定位或章末习题时，才设 onTopic 为 false；拿不准时默认 onTopic 为 true。
+            - 若与本组前面某道题重复考查同一个定义，设 duplicate 为 true。
             绝不能把章末习题、判断题待判陈述（True/False/Unclear）或分析题题设当作教材结论出处。
             有教材时 support 必须来自 CORE_TEXTBOOK。同一句两边都有时，bookId 填教材。
             论述提纲的每个要点按顺序给出：有原句支撑则 supported 为 true 并附 support，否则 supported 为 false。

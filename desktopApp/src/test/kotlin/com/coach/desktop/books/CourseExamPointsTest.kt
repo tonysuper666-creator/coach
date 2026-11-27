@@ -470,4 +470,116 @@ class CourseExamPointsTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun untaughtSyllabusChapterCannotBeStolenByEarlierWeekSlidesAndNoisyNamesAndExerciseContinuationsAreFiltered() {
+        // 1. Noisy slide footers, boilerplate labels ("Sources", "Examples", "Introduction", "Side note"),
+        //    cohort ranges ("Ages 55-64"), and long sentence headings must be excluded from exam points.
+        val footer = "Dr. Pat Smith - Energy Systems"
+        val noisePages = listOf(
+            ExamTeachingPage("tb", 10, CourseMaterialRole.CORE_TEXTBOOK, """
+                Sources: Synthetic data table notes.
+                Examples: Synthetic worked illustration.
+                Introduction: Opening remarks for this chapter.
+                Side note: Brief historical digression.
+                Ages 55-64: Demographic cohort slice.
+                Grid stability depends on rapid frequency response across every region: Long sentence noise.
+                Marginal abatement cost: Incremental cost of reducing one additional unit of emissions.
+            """.trimIndent()),
+            ExamTeachingPage("slides", 1, CourseMaterialRole.LECTURE_SLIDES, "$footer\nSources\nMarginal abatement cost overview"),
+            ExamTeachingPage("slides", 2, CourseMaterialRole.LECTURE_SLIDES, "$footer\nExamples\nMarginal abatement cost case"),
+            ExamTeachingPage("slides", 3, CourseMaterialRole.LECTURE_SLIDES, "$footer\nIntroduction\nSide note\nAges 55-64"),
+            ExamTeachingPage("slides", 4, CourseMaterialRole.LECTURE_SLIDES, "$footer\nDr. Pat Smith - ECON10100"),
+        )
+        val cleanedPoints = CourseExamPoints.identifyFromPages("noise-filter", noisePages).map { it.title }.toSet()
+        assertEquals(setOf("Marginal abatement cost"), cleanedPoints)
+
+        // 2. Multi-page exercise continuation pages (including wrapped "7 An insured..." and 2-problem (a)/(b)/(c) pages)
+        //    plus a "Part IV" chapter-list divider page must ALL be stripped when TOC chapter starts are known!
+        val bookPages = listOf(
+            BookPage(20, "2 Price sensitivity\nPrice elasticity: Response of quantity demanded to price changes across markets."),
+            BookPage(21, "2.6 Exercises\nTrue, False, or Unclear\n1. Price elasticity is always infinite."),
+            BookPage(22, "7 An imaginary household faces two tariffs over a single season without storage\n8 Another statement whose period wraps onto line two."),
+            BookPage(23, "1. Suppose a utility offers two plans. (a) Compute revenue. (b) Derive surplus. (c) Compare outcomes?\n2. Explain how subsidies alter peak load."),
+            BookPage(24, "Part IV\nInternational Grid Systems\n15 Regional Interconnectors\n16 The Nordic Grid Model\n17 The Continental Model"),
+            BookPage(25, "3 Demand for energy: the thermal model\nThermal inertia: Building mass slows indoor temperature swings."),
+        )
+        val cleaned = CourseExamPoints.cleanTextbookPagesByNumber(bookPages, chapterStartPages = setOf(20, 25))
+        assertEquals(setOf(20, 25), cleaned.keys)
+
+        // 3. Untaught Chapter 16 owned by W10 in the Handbook (even by title only, without "Chapter 16"!)
+        //    must NOT be stolen into W8 EXAMINABLE when W8 slides mention Ch 16 or a Ch 16 section!
+        val dir = Files.createTempDirectory("coach-w10-lock-")
+        try {
+            val library = TextbookLibrary(dir.resolve("lib"), lazyPdfExtras = false)
+            val tbPath = dir.resolve("Systems-Textbook.pdf")
+            val pageSpecs = listOf(
+                1 to listOf("14 Cost-Effectiveness Evaluation", "Incremental ratio: Extra cost per unit of gained output."),
+                2 to listOf("16 The Nordic Grid Model", "16.1 Cost-Effectiveness in Practice", "Nordic dispatch pool: Future topic taught only in week ten."),
+            )
+            PDDocument().use { pdf ->
+                pdf.documentInformation.title = "Energy Systems Textbook"
+                val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+                val outline = PDDocumentOutline().also { pdf.documentCatalog.documentOutline = it }
+                val pdfPages = mutableMapOf<Int, PDPage>()
+                for ((num, lines) in pageSpecs) {
+                    val page = PDPage()
+                    pdf.addPage(page)
+                    pdfPages[num] = page
+                    PDPageContentStream(pdf, page).use { out ->
+                        out.beginText()
+                        out.setFont(font, 11f)
+                        out.newLineAtOffset(40f, 700f)
+                        for (line in lines) {
+                            out.showText(line)
+                            out.newLineAtOffset(0f, -18f)
+                        }
+                        out.endText()
+                    }
+                }
+                fun addOutline(parent: PDOutlineItem?, title: String, pageNum: Int): PDOutlineItem {
+                    val item = PDOutlineItem().apply {
+                        this.title = title
+                        destination = PDPageFitDestination().apply { page = pdfPages[pageNum] }
+                    }
+                    if (parent == null) outline.addLast(item) else parent.addLast(item)
+                    return item
+                }
+                addOutline(null, "14 Cost-Effectiveness Evaluation", 1)
+                val ch16 = addOutline(null, "16 The Nordic Grid Model", 2)
+                addOutline(ch16, "16.1 Cost-Effectiveness in Practice", 2)
+                pdf.save(tbPath.toFile())
+            }
+            val handbookPath = dir.resolve("Module-Handbook.md")
+            Files.writeString(handbookPath, """
+                # Module Handbook
+                Week 8: Cost-Effectiveness Evaluation
+                Week 10: The Nordic Grid Model
+            """.trimIndent())
+            val w8Slides = dir.resolve("Week8-Slides.pptx")
+            writeSlides(w8Slides, listOf(
+                "Week 8 Cost-Effectiveness Evaluation",
+                "Reading: Chapter 14 and Chapter 16",
+                "Cost-Effectiveness in Practice\nIncremental ratio guides technology adoption.",
+            ))
+            val tbId = library.stageBookImport(tbPath).book.id
+            val hbId = library.stageBookImport(handbookPath).book.id
+            val w8Id = library.stageBookImport(w8Slides).book.id
+            val detail = library.withCourseDatabase { db ->
+                val (cid, _) = CourseStore.createCourse(
+                    db, "Energy Systems", CourseExamProfile(examEnabled = true), listOf(tbId, hbId, w8Id),
+                )
+                CourseAutoAligner.alignLocally(db, cid)
+            }
+            val w8Topic = detail.examinableTopics.first { it.weekNum == 8 }
+            assertEquals(listOf(1), w8Topic.sources.filter { it.bookId == tbId }.map { it.startPage },
+                "W8 must NOT steal Chapter 16 owned by pending W10 in Handbook")
+            assertTrue(detail.pendingTopics.any { it.weekNum == 10 && it.sources.any { s -> s.startPage == 2 } })
+            val pointTitles = detail.examinableTopics.filter { it.weekLabel == CourseExamPoints.LABEL }.map { it.title }.toSet()
+            assertTrue("Incremental ratio" in pointTitles)
+            assertFalse("Nordic dispatch pool" in pointTitles, "Untaught W10 Chapter 16 must produce zero exam points")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

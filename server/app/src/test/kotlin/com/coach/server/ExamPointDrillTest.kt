@@ -470,12 +470,38 @@ class ExamPointDrillTest {
         val blocks = listOf(
             CourseMaterialTextBlock("b1", "tb", "Book", "CORE_TEXTBOOK", 1, 55, 0,
                 "2.6 Exercises\nDetermine whether each of the following statements is true, false, or unclear.\n1. False claim."),
-            CourseMaterialTextBlock("b2", "tb", "Book", "CORE_TEXTBOOK", 1, 56, 0,
+            CourseMaterialTextBlock("b1b", "tb", "Book", "CORE_TEXTBOOK", 1, 56, 0,
+                "Part IV\nInternational Grid Systems\n15 Regional Interconnectors\n16 The Nordic Grid Model"),
+            CourseMaterialTextBlock("b2", "tb", "Book", "CORE_TEXTBOOK", 1, 57, 0,
                 "3 Demand for energy: the thermal model\nThermal inertia slows indoor temperature swings during peak tariffs."),
         )
         val (kept, reason) = ExamPointDrillGate.prepare(blocks)
         assertNull(reason)
-        assertEquals(listOf(56), kept.map { it.page })
+        assertEquals(listOf(57), kept.map { it.page })
+    }
+
+    @Test
+    fun checkerSystemPromptExplicitlyInstructsCrossLanguageSemanticOnTopicJudgment() = runBlocking {
+        val bodyQuote = "Participants showed no statistically significant reduction in blood pressure or cholesterol after two years."
+        val blocks = buildJsonArray { add(block("tb", "CORE_TEXTBOOK", bodyQuote, "Synthetic Textbook", page = 54)) }
+        val gen = script(haiku) {
+            buildJsonObject {
+                put("choices", buildJsonArray {
+                    add(choiceObj("c1", "两年后参与者的指标变化符合哪项结论？", "A", "血压与胆固醇未显著下降。", bodyQuote))
+                })
+                put("essay", kotlinx.serialization.json.JsonNull)
+            }.toString()
+        }
+        val check = script(gpt) { votes(listOf("c1" to "A"), quote = bodyQuote) }
+        val topicInput = buildJsonObject {
+            put("topicId", "point-exp")
+            put("topicTitle", "Synthetic Coverage Experiment")
+            put("sourcesHash", "src-zh-prompt")
+            put("examFormat", "只考选择题")
+            put("blocks", blocks)
+        }
+        ExamPointDrillPipeline(gen, check).generate(topicInput)
+        assertTrue(check.systems.single().contains("中文题干对英文考点，按语义判断"))
     }
 
     private fun choiceObj(
@@ -604,6 +630,7 @@ class ExamPointDrillTest {
     }.toString()
 
     private fun script(model: String, body: (call: Int) -> String) = object : BatchAiTransport {
+        val systems = mutableListOf<String>()
         val prompts = mutableListOf<String>()
         val tasks = mutableListOf<String>()
         val keys = mutableListOf<String>()
@@ -614,6 +641,7 @@ class ExamPointDrillTest {
             batchKey: String,
             maxTokens: Int,
         ): BatchTransportReply {
+            systems += systemPrompt
             prompts += userPrompt
             tasks += task
             keys += batchKey

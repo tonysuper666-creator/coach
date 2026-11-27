@@ -1061,6 +1061,50 @@ function Ensure-CompanionDrawerOpen(
     }
     [pscustomobject]@{ Tab = $tab; Lines = $lines }
 }
+# 只认抽屉模块条上与「自测」同排的独立「要点」，不能点击正文或顶栏中的同名文字。
+function Find-Step5KeyPointTab($lines, [int]$winW, [int]$winH) {
+    $keys = @(); $tests = @()
+    foreach ($line in @($lines)) {
+        $t = ([string]$line.Text -replace '\s', '')
+        if ($t -notmatch '^(?:要点|自测|推导|练习|习题)$') { continue }
+        $p = Get-LineClick $line
+        if (-not $p) { continue }
+        if ($winW -ge 1000 -and $p.X -lt ($winW * 0.5)) { continue }
+        if ($p.Y -lt ($winH * 0.20) -or $p.Y -gt ($winH * 0.90)) { continue }
+        if ($t -eq '要点') { $keys += $p } elseif ($t -eq '自测') { $tests += $p }
+    }
+    foreach ($key in $keys) {
+        foreach ($test in $tests) {
+            if ([Math]::Abs($key.Y - $test.Y) -le 20 -and $test.X -gt $key.X -and
+                ($test.X - $key.X) -le 180) { return $key }
+        }
+    }
+    return $null
+}
+function Test-Step5KeyPointView($lines, [int]$winW, [int]$winH) {
+    foreach ($line in @($lines)) {
+        $b = Get-LineBox $line
+        if ($winW -ge 1000 -and $b.X1 -lt ($winW * 0.5)) { continue }
+        if ($b.Y -lt ($winH * 0.20)) { continue }
+        $t = ([string]$line.Text -replace '\s', '')
+        if ($t -match '^讲的是[:：]?第\d+[页頁贞貞虫]|^本章要点[·:：．]|^正在讲解这一页|^正在按节整理|^本章暂无提取要点|^当前页暂未归入正文小节|^登录后可使用本章伴读|^伴读整理已在设置中关闭|^讲解服务.*连不上|^本章伴读.*连不上') { return $true }
+    }
+    return $false
+}
+function Find-Step5ChapterPoint($lines, [int]$winW, [int]$winH) {
+    $head = @($lines | Where-Object {
+        $b = Get-LineBox $_
+        ($winW -lt 1000 -or $b.X1 -ge ($winW * 0.5)) -and $b.Y -ge ($winH * 0.20) -and
+            (($_.Text -replace '\s', '') -match '^本章要点[·:：．]')
+    } | Select-Object -First 1)
+    if (-not $head.Count) { return $null }
+    $headY = (Get-LineBox $head[0]).Y
+    return ($lines | Where-Object {
+        $b = Get-LineBox $_
+        ($winW -lt 1000 -or $b.X1 -ge ($winW * 0.5)) -and $b.Y -gt $headY -and
+            (($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．]\S+)')
+    } | Select-Object -First 1)
+}
 # 步骤6「读前自测」从当前帧实时定位模块条、提交按钮与上方最后一个选项，避免滚动/抽屉高度变化后沿用旧帧坐标漏选。
 function Find-Step6ModuleStrip($lines, [int]$winW = 0, [int]$maxY = [int]::MaxValue) {
     $stripNames = @('自测', '要点', '推导', '练习', '习题')
@@ -2205,6 +2249,22 @@ try {
         }
         if (-not $switched) { Fail 5 '点了抽屉里的「讲解」页签，内容还停在「提问」（见 5-explain-tab-on*.png）' }
         Note '步骤5 已切到伴读抽屉的「讲解」页签'
+        # 「讲解」会保留上次的模块（例如自测）；先点模块条的「要点」，确认内容确实切过去。
+        $keyView = $false
+        foreach ($attempt in 1..3) {
+            Hover $midX ([int]($winH * 0.50)); Start-Sleep -Milliseconds 700
+            $lines = Shot 5 "key-tab-find$attempt"
+            $keyTab = Find-Step5KeyPointTab $lines $winW $winH
+            if (-not $keyTab) { Start-Sleep -Seconds 1; continue }
+            $null = Click-At $keyTab.X $keyTab.Y
+            foreach ($wait in 1..4) {
+                Start-Sleep -Milliseconds 700
+                $lines = Shot 5 "key-tab-on${attempt}-$wait"
+                if (Test-Step5KeyPointView $lines $winW $winH) { $keyView = $true; break }
+            }
+            if ($keyView) { break }
+        }
+        if (-not $keyView) { Fail 5 '未能从抽屉模块条切到「要点」（见 5-key-tab-*.png）' }
         # 讲解页的内容由「本章伴读包」驱动，六种状态并存，边等边认：
         #   就绪：标题「本章要点 · <本章>」+ 若干「N. 要点」+ 每条后面「原文第 N 页」锚点；
         #   空：本章暂无提取要点；未归类：当前页暂未归入正文小节；未登录：登录后可使用本章伴读；
@@ -2253,7 +2313,7 @@ try {
             }
             $loading5 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '正在按节整理' } | Select-Object -First 1
             if (-not $loading5) {
-                $kp = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^(?:核心[问同]题|\d+[.、．])' } | Select-Object -First 1
+                $kp = Find-Step5ChapterPoint $lines $winW $winH
                 if (-not $kp) { $kp = Find-AnchorChip $lines $script:LastPng $winH }
             }
             if ($kp) { break }

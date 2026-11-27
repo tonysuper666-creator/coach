@@ -190,7 +190,8 @@ internal object LiteratureMetadata {
         firstPagesText: List<String>,
     ): LiteraturePaperMeta {
         val info = runCatching { pdf?.documentInformation }.getOrNull()
-        val pdfTitle = info?.title?.let(LiteratureTextNorm::decodeHtmlEntities)?.takeIf { isUsefulTitle(it) }
+        val pdfTitle = info?.title?.let(LiteratureTextNorm::decodeHtmlEntities)
+            ?.takeIf { isUsefulTitle(it) && !isFileSlug(it) }
         val pdfAuthor = info?.author?.let(LiteratureTextNorm::decodeHtmlEntities)?.let(::formatAuthorList)?.takeIf { isUsefulAuthor(it) }
         val pdfMetaYears = buildSet {
             listOfNotNull(info?.subject, info?.keywords, info?.title).forEach { s ->
@@ -261,7 +262,8 @@ internal object LiteratureMetadata {
         val academicPageTitle = academicHeader?.first
             ?.let(LiteratureTextNorm::decodeHtmlEntities)
             ?.takeIf { isUsefulTitle(it) }
-        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle).takeIf { isUsefulTitle(it) }
+        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle)
+            .takeIf { isUsefulTitle(it) && !isFileSlug(it) }
         val storedLooksLikeFilename = decodedStored == null ||
             decodedStored.equals(rawStem, true) ||
             decodedStored.equals(fileStem, true) ||
@@ -282,7 +284,12 @@ internal object LiteratureMetadata {
         )
 
         val preferredStored = decodedStored.takeUnless { storedLooksLikeFilename }
-        val finalTitle = (pdfTitle ?: explicitPageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: decodedStored ?: strippedStem).take(220)
+        val unlabeled = if (pdfTitle == null && pageTitle == null && fileTitle == null && preferredStored == null) {
+            unlabeledFrontTitle(frontLines)?.let(LiteratureTextNorm::decodeHtmlEntities)?.takeIf { isUsefulTitle(it) }
+        } else {
+            null
+        }
+        val finalTitle = (pdfTitle ?: explicitPageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: unlabeled ?: decodedStored ?: strippedStem).take(220)
         // Priority: explicit cover label -> embedded PDF metadata -> heuristic page-1 header -> filename fallback.
         val finalAuthor = formatAuthorList((labeledAuthor ?: pdfAuthor ?: plainAuthor ?: expandedFileAuthor).orEmpty())
         return LiteraturePaperMeta(bookId, finalTitle, finalAuthor, finalYear)
@@ -476,6 +483,34 @@ internal object LiteratureMetadata {
             if (candidate.length in 6..180 && isUsefulTitle(candidate)) return candidate
         }
         return null
+    }
+
+    /** Used only when the file title and the stored title are both missing or are file slugs. */
+    private fun unlabeledFrontTitle(lines: List<String>): String? {
+        val header = lines.take(14)
+        for (i in header.indices) {
+            val line = header[i]
+            if (line.length !in 12..160 || line.last() in ".!?。！？") continue
+            if (!isUsefulTitle(line) || personNameLine.matches(line) || affiliationCue.containsMatchIn(line)) continue
+            if (nonTitleLine.containsMatchIn(line)) continue
+            val words = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+            if (words.size !in 3..22) continue
+            val look = header.subList(i + 1, minOf(header.size, i + 5))
+            val followedByByline = look.any { next ->
+                personNameLine.matches(next) || affiliationCue.containsMatchIn(next) ||
+                    next.equals("abstract", true) || next.equals("summary", true)
+            }
+            if (followedByByline) return line
+        }
+        return null
+    }
+
+    internal fun isFileSlug(raw: String): Boolean {
+        val clean = raw.trim().removeSuffix(".pdf").removeSuffix(".PDF")
+        if (clean.isEmpty() || clean.any { it.isWhitespace() }) return false
+        val parts = clean.split('-', '_', '–', '—').filter { it.isNotEmpty() }
+        if (parts.size < 3) return false
+        return parts.any { part -> part.length == 4 && part.all(Char::isDigit) }
     }
 
     private fun resolveConsensusYear(
@@ -1612,6 +1647,15 @@ internal object LiteraturePdfLayout {
                 take(tokens.joinToString(" "), tokens.size == 1)
                 take(tokens.first(), tokens.size == 1)
                 if (tokens.size > 1) take(tokens.last(), alone = false)
+                LiteraturePrintedPages.rangeStart(tokens.joinToString(" "))?.let { wideFolios += it }
+            }
+            val loneBand = (lines.take(4) + lines.takeLast(4)).filter { band -> edgeLines.none { it === band } }
+            for (line in loneBand) {
+                val tokens = line.map { it.text.trim() }.filter { it.isNotEmpty() }
+                if (tokens.size == 1) {
+                    val value = LiteraturePrintedPages.parseFolio(tokens.first())
+                    if (value != null && value !in 1500..2099) wideFolios += value
+                }
             }
             rememberEdgeFolios(page, wideFolios)
             val label = edgeLines.firstNotNullOfOrNull { line ->

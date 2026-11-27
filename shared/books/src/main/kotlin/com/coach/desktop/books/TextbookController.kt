@@ -1297,6 +1297,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     prompt = null,
                     source = null,
                     page = activeBook.readingPage,
+                    literatureQuoteMiss = null,
                     keepAskTabOpen = askDraft != null,
                     activeBooklistId = if (askDraft == null) current.activeBooklistId else collections.firstOrNull {
                         it.record.kind == CollectionKind.BOOKLIST && it.record.id == askDraft.collectionId
@@ -1492,6 +1493,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             if (state.book?.id != book.id) state
             else state.copy(
                 page = number,
+                literatureQuoteMiss = if (number != state.page) null else state.literatureQuoteMiss,
                 book = if (commitProgress && state.source == null) state.book.copy(readingPage = number) else state.book,
                 catalog = if (commitProgress && state.source == null) state.catalog.map { s ->
                     if (s.id == book.id) s.copy(readingPage = number) else s

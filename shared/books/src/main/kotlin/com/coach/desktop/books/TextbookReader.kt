@@ -1896,7 +1896,7 @@ internal fun TextbookReader(
                     Box(Modifier.fillMaxSize().background(paper)) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             OriginalBookPage(
-                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
+                                "${LiteratureTextNorm.decodeHtmlEntities(book.title)} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
                                 citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
                                 onSelection = {},
                             )
@@ -2837,7 +2837,7 @@ internal fun TextbookReader(
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
-            bookTitle = book.title,
+            bookTitle = LiteratureTextNorm.decodeHtmlEntities(book.title),
             sectionTitle = if (source != null) "出处 · ${source.title}" else
                 activeTocNode?.let { BookBoundaries.headerTitleForNode(navigationBook, it) }
                     ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
@@ -3121,7 +3121,7 @@ internal fun TextbookReader(
         if (notesPageOpen) {
             BookNotesPageOverlay(
                 bookId = book.id,
-                bookTitle = book.title,
+                bookTitle = LiteratureTextNorm.decodeHtmlEntities(book.title),
                 library = library,
                 lessonFirstPages = {
                     book.lessons.associate { lesson -> lesson.id to lesson.firstPage }

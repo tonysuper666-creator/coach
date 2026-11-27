@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -56,6 +57,34 @@ class LiteratureFollowTest {
         assertNull(LiteraturePrintedPages.parseFolio("xiv"))
         assertNull(LiteraturePrintedPages.parseFolio("HUNTER 1989"))
         assertEquals(20, LiteraturePrintedPages.parseFolio("p. 20"))
+        assertEquals(147, LiteraturePrintedPages.rangeStart("Notes Rec. R. Soc. Lond. 56 (2) 147-166"))
+        assertEquals(147, LiteraturePrintedPages.rangeStart("147\u2013163"))
+        assertNull(LiteraturePrintedPages.rangeStart("Vol. 56, No. 2 (May, 2002)"))
+        assertEquals(
+            listOf(147),
+            LiteraturePrintedPages.headerCandidates("Notes Rec. R. Soc. Lond. 147-166\nThe body starts here."),
+        )
+        assertEquals(
+            emptyList(),
+            LiteraturePrintedPages.headerCandidates(
+                """
+                Journal cover
+                Author(s): A Keeper
+                Source: Notes and Records, pp. 147-163
+                Published by: Royal Society
+                Stable URL: https://example.test/stable
+                Downloaded from the archive on Tuesday.
+                """.trimIndent(),
+            ),
+        )
+        // The page before a folio chain can take its own label. A cover further back stays empty.
+        assertEquals(
+            listOf(null, 147, 148, 149),
+            LiteraturePrintedPages.resolve(
+                listOf(emptyList(), emptyList(), listOf(148), listOf(149)),
+                listOf(999, 147, 148, 149),
+            ),
+        )
     }
 
     @Test fun runningHeaderIsNotASectionTitle() {
@@ -322,6 +351,247 @@ class LiteratureFollowTest {
         assertEquals(1, checks)
     }
 
+    @Test fun clippedWordBesideAFigureIsNotASection() {
+        val book = paper(
+            """
+            The Historical Journal
+            Introduction
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            Display
+            The theatre opened its doors for the visiting public that morning.
+            The surgeon continued the demonstration after the theatre opened for visitors
+
+            Cheselde
+            n stayed beside the plate while the audience watched the demonstration.
+
+            Figure 1. The plate shows the theatre from the gallery.
+            Patrons recorded the missing labels before the committee adjourned for summer.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            Sociability
+            Members compared each specimen with the custody ledger before the annual meeting.
+            However the archive argued that custody changed after the second inspection.
+            """.trimIndent(),
+            """
+            The Historical Journal
+            The surgeon William
+            Cheselde
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+        )
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val titles = sections.map { it.title }
+        assertEquals(listOf("Introduction", "Display", "Sociability"), titles)
+        val display = sections.first { it.title == "Display" }
+        assertTrue(display.sentences.size >= 2, display.sentences.map { it.quote }.toString())
+        assertTrue(display.sentences.any { "The theatre opened" in it.quote }, display.sentences.map { it.quote }.toString())
+        assertTrue(display.sentences.any { "Patrons recorded" in it.quote }, display.sentences.map { it.quote }.toString())
+    }
+
+    @Test fun splitHeaderAndIllustrationGarbageStayOutOfSectionTitles() {
+        val book = paper(
+            """
+            ESTABLISHING THE NEW SCIENCE
+            The keeper argued that the repository preserved provenance across the first decade.
+            Witnesses confirmed that written evidence stayed intact during the opening inspection.
+            Curators separated verified artifacts from hearsay with a bound register.
+            """.trimIndent(),
+            """
+            XQRT PLMN BVCD WKLP
+            Members compared each specimen with the custody ledger before the annual meeting.
+            However the archive argued that custody changed after the second inspection.
+            Patrons recorded the missing labels before the committee adjourned for summer.
+            """.trimIndent(),
+            """
+            ESTAB LIS HING THE NEW SCIENCE
+            The society retained duplicate minutes so later readers could check the chain.
+            Clerks copied the accession numbers into a second volume that winter.
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            """.trimIndent(),
+            """
+            ESTABLISHING THE NEW SCIENCE
+            Visitors described the cabinets without altering the original shelf marks.
+            The final inventory listed every accepted object in the west gallery.
+            Scholars still cite that inventory when they reconstruct the collection.
+            """.trimIndent(),
+        )
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val titles = sections.map { it.title }
+        assertTrue(sections.size in 3..8, titles.toString())
+        assertEquals(listOf("提出问题", "转折", "收束"), titles)
+        assertTrue(titles.none { "ESTAB" in it || "XQRT" in it || "SCIENCE" in it }, titles.toString())
+        assertEquals(12, sections.sumOf { it.sentences.size })
+    }
+
+    @Test fun authorAndAffiliationDoNotLetTheAbstractSwallowThePaper() {
+        val swallowed = paper(
+            """
+            Alice Marples
+            University of Bristol
+            Abstract
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+            *noHeadingPages().drop(1).toTypedArray(),
+        )
+        val sections = LiteratureSections.build(swallowed, LiteraturePassages.extractCandidates(swallowed))
+        val titles = sections.map { it.title }
+        assertEquals("Abstract", titles.first(), titles.toString())
+        assertTrue(titles.none { "Marples" in it || "University" in it || "Bristol" in it }, titles.toString())
+        assertTrue(titles.drop(1).all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
+        assertTrue(sections.first().sentences.all { it.pdfPage == 1 }, sections.first().sentences.map { it.pdfPage }.toString())
+        assertTrue(sections.first().sentences.none { it.quote.startsWith("However") })
+        assertTrue(sections.drop(1).sumOf { it.sentences.size } > sections.first().sentences.size)
+
+        val outlined = paper(
+            """
+            Abstract
+            The keeper argued that the repository preserved provenance across decades.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            """.trimIndent(),
+            """
+            Introduction
+            However the archive argued that custody changed after the second inspection.
+            Patrons recorded the missing labels before the committee adjourned for summer.
+            """.trimIndent(),
+            """
+            The Economy of Curiosity
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            Scholars still cite that inventory when they reconstruct the collection.
+            """.trimIndent(),
+        )
+        assertEquals(
+            listOf("Abstract", "Introduction", "The Economy of Curiosity"),
+            LiteratureSections.build(outlined, LiteraturePassages.extractCandidates(outlined)).map { it.title },
+        )
+    }
+
+    @Test fun catalogLinesAndAuthorBylineAreNotSectionTitles() {
+        val pages = noHeadingPages().toMutableList()
+        pages[0] = """
+            REFERENCE ARTICLE
+            Michael Hunter
+            Subject: Biographical Studies
+            The keeper argued that the repository preserved provenance across the first decade.
+            Witnesses confirmed that written evidence stayed intact during the opening inspection.
+            Curators separated verified artifacts from hearsay with a bound register.
+        """.trimIndent()
+        val sections = LiteratureSections.build(paper(*pages.toTypedArray()), LiteraturePassages.extractCandidates(paper(*pages.toTypedArray())))
+        val titles = sections.map { it.title }
+        assertTrue(titles.none {
+            val lower = it.lowercase()
+            "subject" in lower || "reference" in lower || "hunter" in lower || "biographical" in lower
+        }, titles.toString())
+        assertTrue(titles.all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
+        assertTrue(sections.size in 3..8, titles.toString())
+    }
+
+    @Test fun blankLineInsideAPageDoesNotMakeAStopFromHalfASentence() {
+        val book = paper(
+            """
+            The keeper argued that the repository preserved provenance across the opening inspection without a stop
+
+            Michael Hunter continued the same sentence after the blank line in the middle of the page.
+            The keeper argued that the repository preserved provenance across decades.
+            However the archive argued that custody changed after the second inspection.
+            Therefore the register claimed that evidence confirmed provenance beyond doubt.
+            Witnesses confirmed that written evidence stayed intact during inspections.
+            Readers still cite the register when they reconstruct that custody.
+            """.trimIndent(),
+        )
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val quotes = sections.flatMap { it.sentences }.map { it.quote }
+        assertTrue(quotes.none { it.startsWith("Michael Hunter") }, quotes.toString())
+        assertTrue(quotes.any { it.startsWith("The keeper argued that the repository preserved provenance across decades") })
+        val stop = LiteratureSections.pickStop(sections.flatMap { it.sentences }) { true }
+        assertNotNull(stop)
+        assertFalse(stop.quote.startsWith("Michael Hunter"))
+        assertTrue(stop.quote.trim().last() == '.')
+    }
+
+    @Test fun displayTitleDecodesEntitiesAndPrefersPaperTitleOverFileSlug() {
+        val entity = paper("Abstract\nThe keeper argued that the repository preserved provenance across decades.").copy(
+            title = "Society&#x2019;s Curiosity",
+        )
+        val decoded = literatureDisplayTitle(entity)
+        assertTrue("\u2019" in decoded, decoded)
+        assertFalse("&#x" in decoded, decoded)
+        val slug = entity.copy(
+            title = "Hunter-Between-Cabinet-1989",
+            literatureMeta = LiteraturePaperMeta("paper", "Establishing the New Science", "Michael Hunter", "1989"),
+        )
+        assertEquals("Establishing the New Science", literatureDisplayTitle(slug))
+        assertTrue(LiteratureMetadata.isFileSlug("Hunter-Between-Cabinet-1989"))
+        assertFalse(LiteratureMetadata.isFileSlug("Society&#x2019;s Curiosity"))
+    }
+
+    @Test fun fileSlugPdfUsesTheFrontPageTitle() {
+        val root = Files.createTempDirectory("coach-follow-slug-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = library.importBook(slugTitlePdf(root))
+            val paper = LiteratureFollow.load(library, imported.id)
+            assertEquals("Establishing the New Science", paper.title)
+            assertFalse("Hunter-Establishing" in paper.title)
+            val second = imported.copy(title = "Marples-Society-Curiosity-2019")
+            val shown = literatureDisplayTitle(
+                second.copy(literatureMeta = LiteraturePaperMeta(second.id, "Society&#x2019;s Curiosity")),
+            )
+            assertEquals("Society\u2019s Curiosity", shown)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun articleRangeAndBuriedFooterBecomePrintedPages() {
+        val root = Files.createTempDirectory("coach-follow-folio-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val ranged = library.importBook(articleRangePdf(root))
+            assertEquals(listOf(null, 147, 148, 149), library.literaturePageNumbers(ranged.id))
+            val buried = library.importBook(buriedFolioPdf(root))
+            assertEquals(listOf(147, 148, 149), library.literaturePageNumbers(buried.id))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun quoteMissClearsWhenThePageOrTheBookChanges() {
+        val root = Files.createTempDirectory("coach-follow-miss-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val first = library.importBook(folioPdf(root))
+            val second = library.importBook(plainPdf(root))
+            val courseId = library.withCourseDatabase { db ->
+                CourseStore.createCourse(db, "历史文献", CourseExamProfile(), listOf(first.id, second.id)).first
+            }
+            val controller = TextbookController(library)
+            val missing = "This sentence is not printed on the page at all."
+            runBlocking {
+                controller.jumpToLiteratureQuote(courseId, first.id, 1, missing)
+                assertEquals(LITERATURE_QUOTE_MISS, controller.state.value.literatureQuoteMiss)
+                controller.page(1)
+                assertEquals(LITERATURE_QUOTE_MISS, controller.state.value.literatureQuoteMiss)
+                controller.page(2)
+                assertNull(controller.state.value.literatureQuoteMiss)
+                controller.jumpToLiteratureQuote(courseId, first.id, 1, missing)
+                assertEquals(1, controller.state.value.page)
+                assertEquals(LITERATURE_QUOTE_MISS, controller.state.value.literatureQuoteMiss)
+                controller.openBook(second.id)
+                assertNull(controller.state.value.literatureQuoteMiss)
+                assertEquals(second.id, controller.state.value.book?.id)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun assertQuotesMapOntoReader(library: TextbookLibrary, bookId: String) {
         val literature = library.literatureBook(bookId)
         val reader = library.book(bookId)
@@ -417,6 +687,65 @@ class LiteratureFollowTest {
                 "Witnesses confirmed that written evidence stayed intact during inspections." to 656f,
             )
         }
+    }
+
+    private fun slugTitlePdf(root: Path): Path = pdf(root, "Hunter-Establishing-Science-1989.pdf", "Hunter-Establishing-Science-1989") { _ ->
+        listOf(
+            listOf(
+                "Establishing the New Science" to 740f,
+                "Michael Hunter" to 710f,
+                "University of Cambridge" to 680f,
+                "Abstract" to 650f,
+                "The keeper argued that the repository preserved provenance across decades." to 620f,
+            ),
+        )
+    }
+
+    private fun articleRangePdf(root: Path): Path = pdf(root, "Article_Range.pdf", "Article Range", labelStart = 200) { _ ->
+        listOf(
+            listOf(
+                "Journal cover" to 740f,
+                "Author(s): A Keeper" to 710f,
+                "Source: Notes and Records pp. 147-163" to 680f,
+                "Published by: Royal Society" to 650f,
+                "Stable URL: https://example.test/stable" to 620f,
+                "Downloaded from the archive on Tuesday." to 590f,
+            ),
+            listOf(
+                "Notes Rec. R. Soc. Lond. 147-166" to 740f,
+                "The keeper argued that the repository preserved provenance across decades." to 680f,
+                "Witnesses confirmed that written evidence stayed intact during inspections." to 650f,
+            ),
+            listOf(
+                "The keeper argued that the repository preserved provenance across decades." to 400f,
+                "148" to 36f,
+            ),
+            listOf(
+                "The keeper argued that the repository preserved provenance across decades." to 400f,
+                "149" to 36f,
+            ),
+        )
+    }
+
+    private fun buriedFolioPdf(root: Path): Path = pdf(root, "Buried_Folio.pdf", "Buried Folio", labelStart = 200) { _ ->
+        listOf(
+            listOf(
+                "Journal footer line without digits." to 18f,
+                "Downloaded from the archive on Tuesday." to 40f,
+                "147" to 64f,
+                "The keeper argued that the repository preserved provenance across decades." to 400f,
+                "Witnesses confirmed that written evidence stayed intact during inspections." to 430f,
+                "Notes Rec header without a number." to 740f,
+            ),
+            listOf(
+                "The keeper argued that the repository preserved provenance across decades." to 400f,
+                "148" to 36f,
+            ),
+            listOf(
+                "The keeper argued that the repository preserved provenance across decades." to 400f,
+                "149" to 36f,
+            ),
+        )
     }
 
     private fun folioPdf(root: Path): Path = pdf(root, "Folio_Study.pdf", "Folio Study", labelStart = 21) { _ ->

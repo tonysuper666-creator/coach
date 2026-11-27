@@ -932,7 +932,7 @@ private fun CourseMaterialsDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        mat.title,
+                                        LiteratureTextNorm.decodeHtmlEntities(mat.title),
                                         style = MaterialTheme.typography.titleSmall,
                                         color = colors.fgPrimary,
                                         modifier = Modifier.weight(1f).padding(end = 8.dp),

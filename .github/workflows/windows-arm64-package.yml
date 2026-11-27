@@ -74,11 +74,17 @@ jobs:
         env:
           COACH_HEAVY_HOST: local
           COACH_FRIEND_URL: ${{ inputs.private_friend_url == 'true' && secrets.COACH_FRIEND_URL || '' }}
+          COACH_UPDATE_CHANNEL: ${{ inputs.private_friend_url == 'true' && secrets.COACH_UPDATE_CHANNEL || '' }}
         run: |
           friend_args=()
           if [[ "$PRIVATE_FRIEND_URL" == true ]]; then
             [[ -n "$COACH_FRIEND_URL" ]] || { echo "private_friend_url=true but the COACH_FRIEND_URL secret is empty" >&2; exit 1; }
             friend_args=("-Pcoach.friendUrl=$COACH_FRIEND_URL")
+            # Release builds must carry the in-app update channel, otherwise installed copies never see a new version.
+            [[ -n "$COACH_UPDATE_CHANNEL" ]] || { echo "private_friend_url=true but the COACH_UPDATE_CHANNEL secret is empty" >&2; exit 1; }
+            channel_file="$RUNNER_TEMP/windows-update-channel.txt"
+            printf '%s' "$COACH_UPDATE_CHANNEL" > "$channel_file"
+            export COACH_UPDATE_CHANNEL_FILE="$channel_file"
           fi
           tools/dev/heavy ./gradlew :desktopApp:verifyReleaseVersion :desktopApp:packageMsi \
             -Pcoach.release=true \
@@ -138,6 +144,20 @@ jobs:
           $friendFlag = if ($env:PRIVATE_FRIEND_URL -eq 'true') { '--require-friend-url' } else { '--forbid-private-config' }
           python tools/smoke/audit-arm64-msi.py --msi $dest --sable-login $sable $friendFlag --out candidate/audit.txt
           if ($LASTEXITCODE -ne 0) { throw "ARM64 MSI audit failed with exit $LASTEXITCODE" }
+          if ($env:PRIVATE_FRIEND_URL -eq 'true') {
+            # The update channel lives in the desktop jar as /windows-update-channel.txt; a release MSI without it is rejected.
+            $x = Join-Path $env:RUNNER_TEMP 'msi-x'
+            msiexec /a $dest /qn TARGETDIR=$x | Out-Null
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $hit = $false
+            foreach ($j in Get-ChildItem -Path $x -Recurse -Filter *.jar) {
+              $z = [IO.Compression.ZipFile]::OpenRead($j.FullName)
+              try { if ($z.Entries | Where-Object { $_.FullName -eq 'windows-update-channel.txt' }) { $hit = $true } } finally { $z.Dispose() }
+              if ($hit) { break }
+            }
+            if (-not $hit) { throw 'Release MSI has no windows-update-channel.txt' }
+            'update_channel=injected' | Out-File -FilePath (Join-Path $candidateDir 'audit.txt') -Append -Encoding utf8
+          }
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           $meta = "msi_product_version=$($props['ProductVersion'])`nmsi_upgrade_code=$($props['UpgradeCode'])`nmsi_allusers=$($props['ALLUSERS'])`n"
           [IO.File]::AppendAllText((Join-Path $candidateDir 'audit.txt'), $meta, $utf8)
@@ -152,6 +172,28 @@ jobs:
           "msi_bytes=$bytes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
           "release_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
           "sable_login=$sable" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+      - name: Encrypt release candidate before upload
+        # Artifacts of a public repository can be downloaded by any signed-in GitHub user while they are retained.
+        # A release MSI embeds the private friend origin and update channel, so only ciphertext may leave the runner:
+        # a fresh AES-256 key encrypts the MSI, and that key is wrapped with the release public key whose private half
+        # exists only on the release Mac (tools/release/arm64-candidate.pub.pem).
+        if: ${{ inputs.private_friend_url == 'true' }}
+        shell: bash
+        env:
+          MSI_NAME: ${{ steps.prepare.outputs.msi_name }}
+        run: |
+          set -euo pipefail
+          cd candidate
+          [[ -f "$MSI_NAME" ]] || { echo "missing $MSI_NAME" >&2; exit 1; }
+          key="$RUNNER_TEMP/candidate.key"
+          # 64 hex chars, no newline: -pass file: reads only the first line, and a newline inside random bytes would truncate the passphrase
+          openssl rand -hex 32 | tr -d '\r\n' > "$key"
+          [[ $(wc -c < "$key") -eq 64 ]] || { echo "bad key length" >&2; exit 1; }
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$MSI_NAME" -out "$MSI_NAME.enc" -pass "file:$key"
+          openssl pkeyutl -encrypt -pubin -inkey ../tools/release/arm64-candidate.pub.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$key" -out "$MSI_NAME.key.enc"
+          rm -f "$MSI_NAME" "$key"
+          ls -l
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-arm64-package-candidate

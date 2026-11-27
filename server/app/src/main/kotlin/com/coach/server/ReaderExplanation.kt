@@ -5,6 +5,7 @@ import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.SourcePage
 import com.coach.domain.scope.VisibleScope
+import com.coach.protocol.ReaderTransientReply
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.util.concurrent.ConcurrentHashMap
@@ -141,7 +142,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
         val request = Request(timing)
         var outcome = "failed"
         if (requests.size >= 16 || requests.putIfAbsent(key, request) != null)
-            return reply("追问正在处理，请稍后手动重试。")
+            return reply(ReaderTransientReply.BUSY)
         if (cancelled.remove(key) != null) request.cancel()
         val contextSection = sectionContext?.let { fields ->
             val loc = fields[0].orEmpty()
@@ -281,7 +282,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                         diagnostics?.bridgeFailureStage = result.stage
                         throw FriendServiceError(friendFailureCode(result.terminal?.reason), result.terminal?.retryAfterSec)
                     }
-                    if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
+                    if (result !is BridgeResult.Success) return reply(ReaderTransientReply.UNFINISHED)
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")
                     if (guide) {
                         val checked = checkedGuidePayload(
@@ -360,7 +361,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
             diagnostics?.formatReason = e.reason
             diagnostics?.streamJsonError = e.streamError
             outcome = "format"
-            return reply("回答缺少可核对的页码依据，暂时无法确认。")
+            return reply(ReaderTransientReply.UNCHECKABLE)
         } catch (e: FriendServiceError) { throw e
         } catch (e: ReaderTimeout) {
             diagnostics?.timeoutStage = e.phase
@@ -371,7 +372,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
           catch (_: Exception) {
               if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
               if (friend != null) throw FriendServiceError()
-              return reply("依据读取或追问暂不可用，无法确认。可继续阅读。")
+              return reply(ReaderTransientReply.UNAVAILABLE)
           }
         finally {
             request.cancel(); requests.remove(key, request)
@@ -566,7 +567,7 @@ internal fun checkedReaderPayload(payload: String, pack: SourcePack,
         ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
     if (root.keys != setOf("paragraphs")) return reject(ReaderFormatReason.ROOT_FIELDS)
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
-    if (paragraphs.isEmpty()) return "依据不足，无法确认。" to JsonArray(emptyList())
+    if (paragraphs.isEmpty()) return ReaderTransientReply.INSUFFICIENT to JsonArray(emptyList())
     if (paragraphs.size !in 1..maxParagraphs) return reject(ReaderFormatReason.PARAGRAPH_COUNT)
     val rendered = paragraphs.map { value ->
         val paragraph = value as? JsonObject ?: return reject(ReaderFormatReason.PARAGRAPH_FIELDS)

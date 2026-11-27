@@ -528,8 +528,9 @@ internal data class GuideRegion(
     val printedPage: String? = null,
     val sourceOrder: String = text,
     val wideGapRanges: List<IntRange> = emptyList(),
-    /** Character spans in the note zone: below a separator line, and smaller than the body. */
+    /** UTF-16 spans selected from physical note lines before reading-order reflow. */
     val footnoteRanges: List<IntRange> = emptyList(),
+    val measured: Boolean = false,
 ) {
     private val continuous by lazy { LiteratureTextNorm.normalize(sourceOrder) }
     fun containsSentence(quote: String) = LiteratureTextNorm.normalize(quote) in continuous
@@ -539,7 +540,7 @@ internal data class GuideRegion(
 }
 
 internal object LiteraturePdfLayout {
-    private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float)
+    private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float, val pointSize: Float)
     private data class Row(val y: Float, val words: MutableList<Word> = mutableListOf())
     private data class DrawnRule(val displayY: Float, val minX: Float, val maxX: Float)
     private data class RuleSub(val minX: Double, val minY: Double, val maxX: Double, val maxY: Double)
@@ -602,7 +603,7 @@ internal object LiteraturePdfLayout {
                 content(line) && line.y < y - margin && line.size >= smallerThanBody
             }
             aboveBody && notesOnlyBelow(y)
-        }.maxOrNull() ?: return emptyList()
+        }.minOrNull() ?: return emptyList()
         val ranges = mutableListOf<IntRange>()
         for (line in lines) {
             if (!content(line) || line.y <= ruleY + margin) continue
@@ -651,6 +652,56 @@ internal object LiteraturePdfLayout {
         return if (higher > columnMedian * 1.08f && higher < columnMedian * 1.50f) higher else columnMedian
     }
 
+    /** Classify physical lines before breaking the page into reading-order bands. A band
+     * containing only footnotes cannot supply its own body size or see the rule above it.
+     * Project the result back onto words, so each eventual slice keeps its own offsets.
+     */
+    private fun columnNotes(rows: List<List<Word>>, rules: List<DrawnRule>): Set<Word> {
+        if (rows.size < 2) return emptySet()
+        var offset = 0
+        val lines = rows.map { words ->
+            val size = words.map { it.pointSize }.sorted()[words.size / 2]
+            val start = offset
+            offset += words.sumOf { it.text.length } + 1
+            FootnoteLine(words.first().y, size, start, offset - 1,
+                rule = words.all { textRule.matches(it.text) })
+        }
+        val median = lines.map { it.size }.sorted()[lines.size / 2]
+        val body = readingBodySize(lines, median)
+        val left = rows.minOf { it.first().x }
+        val right = rows.maxOf { it.last().right }
+        val separators = rules.filter { it.maxX >= left && it.minX <= right }.map { it.displayY }
+        val ruled = layoutFootnoteRanges(lines, median, separators).mapTo(HashSet()) { it.first }
+        val marked = mutableSetOf<Word>()
+        var noteSize = 0f
+        for ((i, words) in rows.withIndex()) {
+            val line = lines[i]
+            if (i > 0 && (line.size > noteSize * 1.06f || line.y - lines[i - 1].y > body * 2.7f)) noteSize = 0f
+            val first = words.first()
+            val previous = rows.getOrNull(i - 1)
+            // A superscript may occupy its own PDFBox baseline. Only a marker just
+            // left of the FIRST word belongs to this line, never one after body text.
+            val raised = previous?.singleOrNull()?.takeIf {
+                noteLabel.matches(it.text) && first.y - it.y in 0f..line.size &&
+                    first.x - it.right in -1f..(line.size * 2) && it.pointSize < line.size
+            }
+            val nextLeft = rows.getOrNull(i + 1)?.first()?.x
+            val inline = words.size > 1 && noteLabel.matches(first.text) &&
+                words[1].x - first.right <= body * 2 &&
+                (first.pointSize < line.size * 0.92f ||
+                    nextLeft != null && abs(nextLeft - words[1].x) <= body * 0.6f && nextLeft > first.x)
+            if (line.size < body * 0.95f && (raised != null || inline) &&
+                first.x - left <= body * 4 && i > 0) {
+                noteSize = line.size
+                if (raised != null) marked += raised
+            }
+            if (line.start in ruled || noteSize > 0f) marked += words
+        }
+        return marked
+    }
+
+    private val noteLabel = Regex("""(?:\d{1,3}[.)]?|\[\d{1,3}]|[*†‡§])""")
+
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
         val tm = position.textMatrix
         val tx = tm.translateX
@@ -672,10 +723,11 @@ internal object LiteraturePdfLayout {
                 var end = 0f
                 var y = 0f
                 var height = 0f
+                var pointSize = 0f
                 val token = StringBuilder()
                 fun flush() {
                     if (token.isNotEmpty() && token.any { !it.isWhitespace() }) {
-                        words += Word(token.toString(), start, end, y, height)
+                        words += Word(token.toString(), start, end, y, height, pointSize)
                     }
                     token.clear()
                 }
@@ -691,11 +743,14 @@ internal object LiteraturePdfLayout {
                     }
                     val x = glyph.xDirAdj
                     val h = glyph.heightDir.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
-                    if (token.isNotEmpty() && x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f) flush()
+                    val pt = glyph.yScale.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
+                    if (token.isNotEmpty() && (x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f ||
+                            abs(glyph.yDirAdj - y) > h * 0.35f && abs(pt - pointSize) > pt * 0.1f)) flush()
                     if (token.isEmpty()) {
                         start = x
                         y = glyph.yDirAdj
                         height = h
+                        pointSize = pt
                     } else if (h > height) {
                         height = h
                     }
@@ -768,14 +823,20 @@ internal object LiteraturePdfLayout {
             val leftSpan = if (leftCol.isNotEmpty()) leftCol.maxOf { it.right } - leftCol.minOf { it.x } else 0f
             val rightSpan = if (rightCol.isNotEmpty()) rightCol.maxOf { it.right } - rightCol.minOf { it.x } else 0f
             // Drop clipped edge facing-page slivers (much narrower than the main column and flush against page edge).
+            fun smallerMargin(side: List<Word>, opposite: List<Word>): Boolean {
+                if (side.isEmpty() || opposite.isEmpty()) return false
+                val sideSize = side.map { it.pointSize }.sorted()[side.size / 2]
+                val bodySize = opposite.map { it.pointSize }.sorted()[opposite.size / 2]
+                return sideSize < bodySize * 0.82f
+            }
             val leftIsEdgeSliver = leftCol.isNotEmpty() && rightCol.isNotEmpty() &&
                 leftSpan < rightSpan * 0.48f && leftCol.size < rightCol.size * 0.55 &&
                 leftCol.minOf { it.x } <= visibleMinX + bodyHeight * 1.5f
             val rightIsEdgeSliver = leftCol.isNotEmpty() && rightCol.isNotEmpty() &&
                 rightSpan < leftSpan * 0.48f && rightCol.size < leftCol.size * 0.55 &&
                 rightCol.maxOf { it.right } >= visibleMaxRight - bodyHeight * 1.5f
-            if (leftCol.isNotEmpty() && !leftIsEdgeSliver) kept += RegionSlice(0, leftCol)
-            if (rightCol.isNotEmpty() && !rightIsEdgeSliver) kept += RegionSlice(1, rightCol)
+            if (leftCol.isNotEmpty() && !leftIsEdgeSliver && !(leftSpan < rightSpan * 0.72f && smallerMargin(leftCol, rightCol))) kept += RegionSlice(0, leftCol)
+            if (rightCol.isNotEmpty() && !rightIsEdgeSliver && !(rightSpan < leftSpan * 0.72f && smallerMargin(rightCol, leftCol))) kept += RegionSlice(1, rightCol)
             kept
         } else {
             // Band-aware split for 2-column academic papers that also have full-width titles, abstracts, or figures.
@@ -819,6 +880,12 @@ internal object LiteraturePdfLayout {
             slices
         }
 
+        val noteWords = rawSlices.groupBy { it.side }.values.flatMapTo(HashSet()) { slices ->
+            val members = slices.flatMapTo(HashSet()) { it.words }
+            val physical = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
+            columnNotes(physical, drawnRules)
+        }
+
         return rawSlices.mapNotNull { slice ->
             val members = slice.words.toHashSet()
             val lines = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
@@ -851,14 +918,13 @@ internal object LiteraturePdfLayout {
             }
 
             val wideGapRanges = mutableListOf<IntRange>()
-            val builtLines = mutableListOf<FootnoteLine>()
+            val footnoteRanges = mutableListOf<IntRange>()
             val text = buildString {
                 var previousY: Float? = null
                 for ((li, line) in lines.withIndex()) {
                     val y = line.first().y
                     val size = line.map { it.height }.sorted()[line.size / 2]
-                    if (size < bodyHeight * 0.80f) {
-                        builtLines += FootnoteLine(y, size, length, length)
+                    if (size < bodyHeight * 0.80f && line.all { noteLabel.matches(it.text) }) {
                         if (isNotEmpty()) append("\n\n")
                         continue
                     }
@@ -874,19 +940,12 @@ internal object LiteraturePdfLayout {
                     }
                     val lineEnd = length
                     if (hasWideGap && lineEnd > lineStart) wideGapRanges += lineStart until lineEnd
-                    val lineText = substring(lineStart, lineEnd)
-                    builtLines += FootnoteLine(y, size, lineStart, lineEnd, rule = textRule.matches(lineText.trim()))
+                    if (line.any { it in noteWords }) footnoteRanges += lineStart until lineEnd
                     append('\n')
                     previousY = y
                 }
             }.trimEnd()
             if (text.isBlank()) return@mapNotNull null
-            val columnMinX = slice.words.minOf { it.x }
-            val columnMaxX = slice.words.maxOf { it.right }
-            val separatorYs = drawnRules
-                .filter { it.maxX >= columnMinX && it.minX <= columnMaxX }
-                .map { it.displayY }
-            val footnoteRanges = layoutFootnoteRanges(builtLines, bodyHeight, separatorYs)
             val reference = object : BookPdfStripper() {
                 override fun processTextPosition(position: BookPdfTextPosition) {
                     if (!insideCropBox(position, crop)) return
@@ -899,7 +958,7 @@ internal object LiteraturePdfLayout {
                     }
                 }
             }.apply { startPage = page; endPage = page; sortByPosition = true }.getText(pdf)
-            GuideRegion(text, label, reference, wideGapRanges, footnoteRanges)
+            GuideRegion(text, label, reference, wideGapRanges, footnoteRanges, measured = true)
         }
     }
 
@@ -907,7 +966,7 @@ internal object LiteraturePdfLayout {
      * Thin wide strokes, including rules drawn inside a form.
      * Display Y matches yDirAdj: crop height minus the crop-adjusted user Y, which is upperRightY minus raw user Y.
      * Each subpath is judged on its own, so a rule that shares a path with a taller stroke is still found.
-     * A bad page yields no rules. Without a rule the note zone stays empty.
+     * A page with unreadable graphics can still be classified by its note markers.
      */
     private fun horizontalRules(pdfPage: BookPdfPage): List<DrawnRule> {
         if (Math.floorMod(pdfPage.rotation, 360) != 0) return emptyList()
@@ -956,7 +1015,7 @@ internal object LiteraturePdfLayout {
                         val height = sub.maxY - sub.minY
                         if (width >= 24.0 && height <= 3.0 && width >= height * 8.0) {
                             val center = ((sub.minY + sub.maxY) / 2.0).toFloat()
-                            found += DrawnRule(crop.upperRightY - center, sub.minX.toFloat(), sub.maxX.toFloat())
+                            found += DrawnRule(crop.upperRightY - center, sub.minX.toFloat() - crop.lowerLeftX, sub.maxX.toFloat() - crop.lowerLeftX)
                         }
                     }
                     subs.clear()

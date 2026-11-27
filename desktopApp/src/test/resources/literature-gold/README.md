@@ -15,3 +15,13 @@ The three papers and their annotated excerpts are distributed under [CC BY 4.0](
 Run `:desktopApp:test --tests '*LiteratureGoldTest'` through the repository's heavy runner. Recall counts whole body sentences at the labeled page. Unexpected candidates, including note fragments, fail the check. The citation check uses the page text as its OCR response to isolate candidate selection and anchor consistency.
 
 On #696 at `b7f9a746` the unmodified product recovered 75 of 79 body sentences (94.94%). Eleven candidates leaked from notes (nine EPUB and two PDF). One additional candidate was a truncated body sentence.
+
+## Private PDF acceptance
+
+On the machine holding the originals, annotate all sentences and non-body fragments on each selected page. Store one UTF-8 TSV per input file named `<SHA-256 of original PDF bytes>.tsv` in a local directory. Columns are role, one-based PDF page, zero-based UTF-16 start, exclusive UTF-16 end, and lowercase SHA-256 of the exact UTF-8 encoded substring of `literatureBook` page text. Omit a header. This uses the same page text and offsets as the application's guide anchors.
+
+```sh
+tools/dev/heavy --local ./gradlew :desktopApp:literatureGoldAudit --args='"<label directory>" "<first PDF>" "<second PDF>"'
+```
+
+The check first validates every labeled span against the current page. A stale offset or wrong hash stops the run. Any candidate overlapping a note on a labeled page counts as leakage. A recovered body sentence must match both endpoints. The report gives counts and missing locations, and also fails on an unclassified candidate on a labeled page.

@@ -42,7 +42,8 @@ internal object LiteratureEpubText {
                 val doc = runCatching { EpubXml.parse(zip.getInputStream(entry).use { it.readBytes() }) }.getOrNull() ?: continue
                 fun isNote(e: org.w3c.dom.Element): Boolean {
                     val types = (e.getAttribute("epub:type") + " " + e.getAttribute("role")).lowercase().split(Regex("""\s+"""))
-                    return types.any { it in noteTypes }
+                    return types.any { it in noteTypes } ||
+                        e.getAttribute("class").lowercase().split(Regex("""\s+""")).any { it in noteTypes }
                 }
                 fun walk(node: org.w3c.dom.Node) {
                     if (node is org.w3c.dom.Element && isNote(node)) {

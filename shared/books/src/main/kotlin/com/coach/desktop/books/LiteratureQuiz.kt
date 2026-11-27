@@ -405,7 +405,7 @@ internal object LiteratureQuiz {
         if (LiteraturePassages.rejectedFootnote(excerpt)) {
             return (null to LiteraturePassages.FOOTNOTE_REJECTION).also { refOutcomes[ref] = it }
         }
-        if (!LiteraturePassages.bodySentence(anchor.quoteAnchor)) {
+        if (!LiteraturePassages.bodySentence(excerpt)) {
             return (null to "not_body_sentence:这不是完整的正文句子").also { refOutcomes[ref] = it }
         }
         val ocrText = try {

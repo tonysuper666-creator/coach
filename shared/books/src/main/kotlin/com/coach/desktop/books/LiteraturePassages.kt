@@ -121,9 +121,8 @@ internal object LiteraturePassages {
         region: GuideRegion,
         localStart: Int,
         localEnd: Int,
-    ): Boolean = isFootnoteSentence(quote) ||
-        followsFootnoteMarker(pageText, pageOffset) ||
-        region.overlapsFootnote(localStart, localEnd)
+    ): Boolean = region.overlapsFootnote(localStart, localEnd) ||
+        (!region.measured && (isFootnoteSentence(quote) || followsFootnoteMarker(pageText, pageOffset)))
 
     fun rejectedFootnote(excerpt: GuideExcerpt): Boolean {
         val anchor = excerpt.anchor
@@ -217,7 +216,8 @@ internal object LiteraturePassages {
         while (i >= 0 && text[i].isLetter()) i--
         val word = text.substring(i + 1, period)
         if (word.isEmpty()) return false
-        if (word.length == 1 && word[0].isUpperCase()) return true
+        if (word.length == 1 && (word[0].isUpperCase() ||
+                i >= 1 && text[i] == '.' && text[i - 1].isLetter() && (i == 1 || !text[i - 2].isLetter()))) return true
         return word.lowercase() in abbreviations
     }
 
@@ -345,7 +345,9 @@ internal object LiteraturePassages {
                     !isBackMatterHeading(line) && !isFootnoteSentence(line)
             }
 
-    fun bodySentence(s: String): Boolean {
+    fun bodySentence(excerpt: GuideExcerpt): Boolean = bodySentence(excerpt.anchor.quoteAnchor, excerpt.region.measured)
+
+    fun bodySentence(s: String, measured: Boolean = false): Boolean {
         val compact = compactSpace.replace(s, " ").trim()
         val limit = if (containsAbbreviationPeriod(compact)) ABBREVIATED_SENTENCE_MAX else BODY_SENTENCE_MAX
         return compact.length in 6..limit &&
@@ -353,8 +355,7 @@ internal object LiteraturePassages {
             !hasControlOrBrokenChar(s) &&
             end.containsMatchIn(compact) &&
             !publisher.containsMatchIn(s) &&
-            !note.containsMatchIn(s) &&
-            !isFootnoteSentence(s) &&
+            !(if (measured) isBibliographicFootnote(s) else note.containsMatchIn(s) || isFootnoteSentence(s)) &&
             compact.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
             (compact.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(compact).take(4).count() >= 4)
     }
@@ -401,7 +402,7 @@ internal object LiteraturePassages {
             if (backMatter) continue
             val pageLines = page.guideRegions.flatMap { it.text.lines() }
             if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) continue
-            if (page.number > notesOpen && isEndnotePage(pageLines)) {
+            if (page.number > notesOpen && page.guideRegions.none { it.measured && it.footnoteRanges.isNotEmpty() } && isEndnotePage(pageLines)) {
                 backMatter = true
                 continue
             }
@@ -413,7 +414,7 @@ internal object LiteraturePassages {
             var skipSection = false
             for (region in page.guideRegions) {
                 val regionLines = region.text.lines()
-                if (isFootnoteBlock(regionLines)) {
+                if (!region.measured && isFootnoteBlock(regionLines)) {
                     base += region.text.length + 2
                     continue
                 }
@@ -449,7 +450,7 @@ internal object LiteraturePassages {
                             if (!pageTopTail && !blankTail &&
                                 !rejectedFootnote(quote, page.text, at, region, localStart, localEnd) &&
                                 !region.overlapsWideGap(localStart, localEnd) &&
-                                bodySentence(quote) &&
+                                bodySentence(quote, region.measured) &&
                                 region.containsSentence(quote)
                             ) {
                                 pageCandidates += Candidate(page, region, at, quote)
@@ -466,6 +467,11 @@ internal object LiteraturePassages {
                 var prevCaptionEnded = false
                 for ((index, raw) in regionLines.withIndex()) {
                     val line = raw.trim()
+                    if (region.overlapsFootnote(offset, offset + raw.length)) {
+                        finishParagraph()
+                        offset += raw.length + 1
+                        continue
+                    }
                     if (index < abstractLineIdx) {
                         offset += raw.length + 1
                         continue
@@ -500,7 +506,7 @@ internal object LiteraturePassages {
                     val undelimitedCap = !delimitedCap && LiteratureScaffoldNoise.isUndelimitedCaptionStart(line)
                     val abstractMatch = if (page.number == 1) inlineAbstractLead.find(raw) else null
                     val number = noteNumber(line) ?: 0
-                    val afterBody = !isEdge &&
+                    val afterBody = !region.measured && !isEdge &&
                         region.text.substring(0, offset.coerceAtMost(region.text.length)).lineSequence().any { endsSentence(it) }
                     val midBare = isBareNoteNumber(line) && number >= 10 && afterBody
                     val marker = isBareNoteNumber(line) || note.containsMatchIn(line) ||
@@ -515,7 +521,7 @@ internal object LiteraturePassages {
                     // That line is not the note. The sentence keeps going, including when the next word is capitalized.
                     val superscriptInsideSentence = unfinished && isBareNoteNumber(line) && number >= 10 && !nextIsNote
                     val continuesOpenSentence = unfinished && !marker
-                    val footnoteLine = line.isNotEmpty() && !continuesOpenSentence && !superscriptInsideSentence &&
+                    val footnoteLine = !region.measured && line.isNotEmpty() && !continuesOpenSentence && !superscriptInsideSentence &&
                         (isFootnoteSentence(line) || marker)
                     when {
                         backMatter -> break
@@ -584,10 +590,7 @@ internal object LiteraturePassages {
             candidates += pageCandidates
         }
         if (candidates.isEmpty()) return emptyList()
-        val seen = HashSet<String>(candidates.size)
-        return candidates.mapNotNull { c ->
-            val norm = LiteratureTextNorm.normalize(c.quote)
-            if (!seen.add(norm)) return@mapNotNull null
+        return candidates.map { c ->
             val anchorId = "${book.id}#p${c.page.number}-${c.offset}"
             GuideExcerpt(book, BookCompanionAnchor(c.page.number, anchorId, c.offset, c.offset + c.quote.length, c.quote), c.region)
         }
@@ -621,8 +624,8 @@ internal object LiteraturePassages {
         questions: List<String>,
         excludedQuotes: Set<String> = emptySet(),
     ): List<GuideExcerpt> {
-        val active = if (excludedQuotes.isEmpty()) candidates
-        else candidates.filterNot { LiteratureTextNorm.normalize(it.anchor.quoteAnchor) in excludedQuotes }
+        val seen = excludedQuotes.toMutableSet()
+        val active = candidates.filter { seen.add(LiteratureTextNorm.normalize(it.anchor.quoteAnchor)) }
         if (active.isEmpty()) return emptyList()
         val paperTokens = tokens("${meta.author} ${meta.title} ${meta.year}")
         val vocab = active.map { tokens(it.anchor.quoteAnchor) }
@@ -675,7 +678,7 @@ internal object LiteraturePassages {
         val cues = intentCues.filter { it.first.containsMatchIn(question) }.map { it.second }
         val scored = mutableListOf<Pair<GuideExcerpt, Int>>()
         for (book in books) {
-            val all = candidatesByBook[book.id].orEmpty()
+            val all = candidatesByBook[book.id].orEmpty().distinctBy { LiteratureTextNorm.normalize(it.anchor.quoteAnchor) }
             val meta = metas[book.id] ?: LiteraturePaperMeta(book.id, LiteratureTextNorm.decodeHtmlEntities(book.title))
             val paperTokens = tokens("${meta.author} ${meta.title} ${meta.year}")
             val mentionsPaper = qTokens.any(paperTokens::contains)

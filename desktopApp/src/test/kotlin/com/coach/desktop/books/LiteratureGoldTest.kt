@@ -9,6 +9,28 @@ import kotlin.test.assertTrue
 class LiteratureGoldTest {
     private data class Label(val page: Int, val role: String, val sentence: String)
 
+    @Test fun forcedCitationsToBothPdfFootersFailBeforeOcr() {
+        val root = Files.createTempDirectory("literature-footer")
+        try {
+            val path = Path.of(checkNotNull(javaClass.getResource("/literature-gold/shape.pdf")).toURI())
+            val library = TextbookLibrary(root)
+            val book = library.literatureBook(library.importBook(path).id)
+            val quote = "A separate inventory records the same transfer in the following year."
+            for (page in book.pages) {
+                val region = page.guideRegions.single { quote in it.text }
+                val start = page.text.indexOf(quote)
+                val anchor = BookCompanionAnchor(page.number, "probe", start, start + quote.length, quote)
+                val forced = GuideExcerpt(book, anchor, region)
+                val (_, reason) = LiteratureCitationCheck.check(listOf(forced), 0, book.id) { _, _ ->
+                    error("A note reached OCR")
+                }
+                kotlin.test.assertEquals(LiteraturePassages.FOOTNOTE_REJECTION, reason)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     // Keep punctuation and every word: a truncated or joined body sentence is a miss.
     private fun key(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
         .replace(Regex("""(?<=\p{L})-\s*\n\s*(?=\p{Ll})"""), "")

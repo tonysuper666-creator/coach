@@ -62,6 +62,8 @@ internal data class ReadingMethodSignals(
     val thinText: Boolean = false,
     /** Scanned PDF whose pages are mostly recognized by OCR already, so the text is usable. */
     val ocrDone: Boolean = false,
+    /** Classical Chinese text (e.g. Pre-Qin philosophy, Han chronicles, late-Qing translations). */
+    val classicalChinese: Boolean = false,
 )
 
 internal data class ReadingMethodChoice(val method: ReadingMethod, val reason: String)
@@ -109,6 +111,10 @@ internal object ReadingMethodSelector {
                 "这本有公式，但没有章末习题，先不按先做后讲，读到一节停下来用自己的话说。"
             }
         }
+        if (signals.historyCues >= 2 && signals.literatureCues == 0 && noExercises && fewFormulas) {
+            val chapters = if (signals.chapterCount > 0) "全书 ${signals.chapterCount} 章，" else ""
+            return "这是历史书，${chapters}没有章末题。读到一节就停一下，用自己的话说这段讲了什么。"
+        }
         val treatise = noExercises && fewFormulas && (
             signals.argumentCues > 0 || (signals.pageCount >= 150 && signals.chapterCount >= 8)
             )
@@ -118,20 +124,20 @@ internal object ReadingMethodSelector {
         if (treatise) {
             return "这是按章展开的论述，没有成套习题，读到一节就停下来，用自己的话说。"
         }
+        if (signals.classicalChinese && noExercises && fewFormulas && signals.chapterCount >= 2) {
+            val noun = if (signals.numberedChapters * 2 >= signals.chapterCount) "章" else "篇"
+            return "全书 ${signals.chapterCount} $noun，没有章末题。先结合注疏读懂原文，再停下来用自己的话说这一段的意思。"
+        }
         val shortLiterary = signals.format.lowercase() in setOf("txt", "epub", "md") &&
             signals.pageCount in 1..120 &&
             noExercises &&
             fewFormulas
         if ((signals.literatureCues > 0 || shortLiterary) && signals.chapterCount >= 2) {
-            val noun = if (signals.numberedChapters * 2 >= signals.chapterCount) "章" else "则短篇"
+            val noun = if (signals.numberedChapters * 2 >= signals.chapterCount || signals.classicalChinese) "章" else "则短篇"
             return "全书 ${signals.chapterCount} $noun，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。"
         }
         if (signals.literatureCues > 0 || shortLiterary) {
             return "这是文学作品，读到一节就停一下，用自己的话说刚刚读到的意思。"
-        }
-        if (signals.historyCues >= 2 && signals.literatureCues == 0 && noExercises && fewFormulas) {
-            val chapters = if (signals.chapterCount > 0) "全书 ${signals.chapterCount} 章，" else ""
-            return "这是历史书，${chapters}没有章末题。读到一节就停一下，用自己的话说这段讲了什么。"
         }
         if (signals.thinText && signals.chapterCount < 2 && noExercises && signals.pageCount > 0) {
             return "这是扫描版，共 ${signals.pageCount} 页，正文还没认出。读到一节就停一下，用自己的话说刚刚读到的意思。"
@@ -360,12 +366,12 @@ internal object ReadingMethodSignalsReader {
     private val numberedProblem = Regex("""^(?:\(\d{1,2}\)|\d{1,2}[.)])\s+\S.{6,}""")
     private val formulaMark = Regex("""公式|equation|formula|[=∑∫≤≥≈≠]""", RegexOption.IGNORE_CASE)
     private val formulaWord = Regex("""公式|equation|formula""", RegexOption.IGNORE_CASE)
-    private val historyCue = Regex("""(?i)history|historical|dynasty|历史|战争""")
+    private val historyCue = Regex("""(?i)history|historical|dynasty|历史|战争|史記|史记|本紀|本纪|世家|列傳|列传""")
     private val argumentCue = Regex("""(?i)treatise|essay|discourse|inquiry|论著|学说""")
     private val literatureCue = Regex("""(?i)novel|poem|poetry|fiction|小说|散文|杂文""")
     private val lectureKind = Regex("""(?i)lecture|slides?""")
     private val numberedChapterTitle = Regex(
-        """^第\s*[零〇一二三四五六七八九十百千万两兩0-9]{1,4}\s*[章节篇]""",
+        """^(?:第?\s*[零〇一二三四五六七八九十百千万两兩0-9]{1,4}\s*[章节篇]|導言[零〇一二三四五六七八九十百]+|論[零〇一二三四五六七八九十百]+|[\p{IsHan}]{1,6}第[一二三四五六七八九十百]+)$""",
     )
 
     fun fromBook(book: Textbook, materialKind: String? = null, sourceName: String? = null): ReadingMethodSignals {
@@ -428,6 +434,7 @@ internal object ReadingMethodSignalsReader {
             thinText = thinPdfText(book),
             ocrDone = book.format.equals("pdf", ignoreCase = true) && book.pages.isNotEmpty() &&
                 book.pages.count { it.ocr } * 2 >= book.pages.size,
+            classicalChinese = ClassicalAnnotationLayer.isClassicalChineseBook(book),
         )
     }
 

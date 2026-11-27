@@ -81,12 +81,40 @@ class SourceCitationGate(private val anchors: Map<String,String>) {
         if (!Regex("【S[0-9]+】[。.!！?？\\s]*$").containsMatchIn(paragraph)) return null
         var unquoted = paragraph
         for ((open, close) in listOf('“' to '”','"' to '"','「' to '」','『' to '』','«' to '»')) {
-            val pattern = Regex("${Regex.escape(open.toString())}([^${Regex.escape(close.toString())}]+)${Regex.escape(close.toString())}")
-            for (quote in pattern.findAll(paragraph)) {
-                if (refs.none { anchors.getValue(it).contains(quote.groupValues[1]) }) return null
+            if (open == close) {
+                val pattern = Regex("${Regex.escape(open.toString())}([^${Regex.escape(close.toString())}]+)${Regex.escape(close.toString())}")
+                for (quote in pattern.findAll(unquoted)) {
+                    if (refs.none { anchors.getValue(it).contains(quote.groupValues[1]) }) return null
+                }
+                unquoted = unquoted.replace(pattern, "")
+                if (open in unquoted) return null
+            } else {
+                // Support nested quotes like 「...一作「搶」...」 by balancing open/close delimiters.
+                val sb = StringBuilder(unquoted.length)
+                var i = 0
+                while (i < unquoted.length) {
+                    val ch = unquoted[i]
+                    if (ch == open) {
+                        var depth = 1
+                        var j = i + 1
+                        while (j < unquoted.length && depth > 0) {
+                            if (unquoted[j] == open) depth++
+                            else if (unquoted[j] == close) depth--
+                            j++
+                        }
+                        if (depth != 0) return null
+                        val inner = unquoted.substring(i + 1, j - 1)
+                        if (inner.isEmpty() || refs.none { anchors.getValue(it).contains(inner) }) return null
+                        i = j
+                    } else if (ch == close) {
+                        return null
+                    } else {
+                        sb.append(ch)
+                        i++
+                    }
+                }
+                unquoted = sb.toString()
             }
-            unquoted = unquoted.replace(pattern, "")
-            if (open in unquoted || close in unquoted) return null
         }
         val singleQuotes = listOf(
             Regex("‘([^’]+)’"),

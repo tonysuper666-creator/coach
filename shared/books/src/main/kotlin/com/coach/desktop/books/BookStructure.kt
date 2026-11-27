@@ -210,7 +210,7 @@ internal object BookStructurePlanner {
 
     // 扩充后的标题规则（带层级推断）
     private val MD_HEADING = Regex("""^(#{1,6})\s+(.+)$""")
-    private val CN_CHAPTER = Regex("""^第[一二三四五六七八九十百千0-9]+[篇部编章](?:[\s：:·\-—]+.+|$)""")
+    private val CN_CHAPTER = Regex("""^(?:第[一二三四五六七八九十百千0-9]+[篇部编章](?:[\s：:·\-—]+.+|$)|[零〇一二三四五六七八九十百千]+章)$""")
     private val CN_SECTION = Regex("""^第[一二三四五六七八九十百千0-9]+[节讲回课单元](?:[\s：:·\-—]+.+|$)""")
     private val CN_NUM_L1 = Regex("""^[一二三四五六七八九十百]+[、.．]\s*\S.*$""")
     private val CN_NUM_L2 = Regex("""^[（(][一二三四五六七八九十0-9]+[）)]\s*\S.*$""")
@@ -250,9 +250,8 @@ internal object BookStructurePlanner {
         MD_HEADING.matchEntire(trimmed)?.let { m ->
             val title = m.groupValues[2].trim()
             if (title.isNotEmpty()) {
-                val inferred = inferTextHeadingLevel(title)
                 val mdLevel = m.groupValues[1].length
-                return HeadingMatch(inferred ?: mdLevel, title, HeadingSource.HEADING_RULE)
+                return HeadingMatch(mdLevel, title, HeadingSource.HEADING_RULE)
             }
         }
         val len = ExplainClassifier.nonWhitespaceLength(trimmed)

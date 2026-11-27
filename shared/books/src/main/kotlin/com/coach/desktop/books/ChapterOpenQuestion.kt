@@ -151,6 +151,7 @@ internal object ChapterOpenJson {
                         put("id", block.id)
                         put("page", block.page)
                         put("text", block.text.take(900))
+                        put("startUtf16", block.start)
                     })
                 }
             })

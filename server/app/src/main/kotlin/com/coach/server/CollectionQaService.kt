@@ -76,6 +76,91 @@ object ServerSentenceCitationGate {
         return sb.toString().replace(whitespaceRegex, " ").trim()
     }
 
+    private fun isCjkChar(ch: Char): Boolean =
+        ch in '\u4e00'..'\u9fff' || ch in '\u3400'..'\u4dbf' || ch in '\u3000'..'\u303f' || ch in '\uff00'..'\uffef'
+
+    private fun compactCjk(raw: String): String {
+        val norm = normalizeText(raw)
+        return norm.replace(Regex("""(?<=[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef])"""), "")
+    }
+
+    private fun findCompactCjkRawSlice(quote: String, rawPageText: String): String? {
+        val compactQ = compactCjk(quote)
+        if (compactQ.length < 4) return null
+        val compactChars = StringBuilder(rawPageText.length)
+        val rawStarts = ArrayList<Int>(rawPageText.length)
+        val rawEnds = ArrayList<Int>(rawPageText.length)
+        var i = 0
+        while (i < rawPageText.length) {
+            val cp = rawPageText.codePointAt(i)
+            val charLen = Character.charCount(cp)
+            val piece = rawPageText.substring(i, i + charLen)
+            if (!piece.all { it.isWhitespace() }) {
+                val nfkc = normalizeText(piece)
+                for (ch in nfkc) {
+                    if (!ch.isWhitespace()) {
+                        compactChars.append(ch)
+                        rawStarts += i
+                        rawEnds += i + charLen
+                    }
+                }
+            }
+            i += charLen
+        }
+        val compactQuery = buildString(compactQ.length) {
+            compactQ.forEach { if (!it.isWhitespace()) append(it) }
+        }
+        if (compactQuery.length < 4) return null
+        val idx = compactChars.toString().indexOf(compactQuery, ignoreCase = true)
+        if (idx < 0 || idx + compactQuery.length - 1 >= rawEnds.size) return null
+        val rawStart = rawStarts[idx]
+        val rawEnd = rawEnds[idx + compactQuery.length - 1]
+        return if (rawEnd > rawStart) rawPageText.substring(rawStart, rawEnd).trim().takeIf { it.isNotEmpty() } else null
+    }
+
+    private fun findOrderedTokenSpan(qTokens: List<String>, normPage: String): String? {
+        if (qTokens.size < 3) return null
+        val pageTokens = tokenRegex.findAll(normPage.lowercase()).toList()
+        if (pageTokens.size < qTokens.size) return null
+        val limit = pageTokens.size - qTokens.size
+        outer@ for (i in 0..limit) {
+            if (pageTokens[i].value != qTokens[0]) continue
+            var prevEnd = pageTokens[i].range.last + 1
+            for (j in 1 until qTokens.size) {
+                val tok = pageTokens[i + j]
+                if (tok.value != qTokens[j]) continue@outer
+                if (tok.range.first - prevEnd > 48) continue@outer
+                prevEnd = tok.range.last + 1
+            }
+            return normPage.substring(pageTokens[i].range.first, pageTokens[i + qTokens.size - 1].range.last + 1)
+        }
+        return null
+    }
+
+    private fun splitWindowUnits(normPage: String): List<IntRange> {
+        val out = ArrayList<IntRange>()
+        for (span in wordSpanRegex.findAll(normPage)) {
+            val s = span.value
+            if (s.none(::isCjkChar)) {
+                out += span.range
+            } else {
+                val base = span.range.first
+                var idx = 0
+                while (idx < s.length) {
+                    if (isCjkChar(s[idx])) {
+                        out += (base + idx)..(base + idx)
+                        idx++
+                    } else {
+                        val start = idx
+                        while (idx < s.length && !isCjkChar(s[idx])) idx++
+                        out += (base + start) until (base + idx)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     fun verifyOrSnapAnchor(quote: String, rawPageText: String): AnchorResult {
         val normPage = normalizeText(rawPageText)
         val q = normalizeText(quote)
@@ -93,12 +178,32 @@ object ServerSentenceCitationGate {
             )
         }
 
+        if (q.any(::isCjkChar)) {
+            findCompactCjkRawSlice(quote, rawPageText)?.let { matched ->
+                return AnchorResult(
+                    rawExactMatch = true,
+                    verified = true,
+                    canonicalAnchor = matched,
+                )
+            }
+        }
+
         val qTokens = tokenRegex.findAll(q.lowercase()).map { it.value }.toList()
         if (qTokens.size < 3) {
             return AnchorResult(rawExactMatch = false, verified = false, canonicalAnchor = "")
         }
 
-        val words = wordSpanRegex.findAll(normPage).toList()
+        if (q.any(::isCjkChar)) {
+            findOrderedTokenSpan(qTokens, normPage)?.let { matched ->
+                return AnchorResult(
+                    rawExactMatch = false,
+                    verified = true,
+                    canonicalAnchor = trimPureProseAnchor(matched),
+                )
+            }
+        }
+
+        val words = splitWindowUnits(normPage)
         if (words.isEmpty()) {
             return AnchorResult(rawExactMatch = false, verified = false, canonicalAnchor = "")
         }
@@ -108,8 +213,8 @@ object ServerSentenceCitationGate {
         var bestSlice = ""
         val maxStart = (words.size - win).coerceAtLeast(0)
         for (i in 0..maxStart) {
-            val sPos = words[i].range.first
-            val ePos = words[minOf(words.size - 1, i + win - 1)].range.last + 1
+            val sPos = words[i].first
+            val ePos = words[minOf(words.size - 1, i + win - 1)].last + 1
             val cand = normPage.substring(sPos, ePos)
             val candLow = cand.lowercase()
             var hits = 0

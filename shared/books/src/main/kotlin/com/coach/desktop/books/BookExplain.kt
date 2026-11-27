@@ -62,6 +62,7 @@ internal data class ExplainSectionContext(
     val previousRecap: String?,
     val nextTitle: String?,
     val sectionBlocks: List<SourceBlock>,
+    val annotationContext: String? = null,
 )
 
 internal data class FollowUpTurn(val question: String, val answer: String)
@@ -243,6 +244,7 @@ internal object ExplainWire {
         put("location", ctx.location.trim().take(300))
         ctx.previousRecap?.trim()?.takeIf { it.isNotEmpty() }?.let { put("previousRecap", it.take(600)) }
         ctx.nextTitle?.trim()?.takeIf { it.isNotEmpty() }?.let { put("nextTitle", it.take(200)) }
+        ctx.annotationContext?.trim()?.takeIf { it.isNotEmpty() }?.let { put("annotationContext", it.take(600)) }
     }
 
     fun parseGuide(body: JsonObject, sent: List<SourceBlock>): SectionGuideResult {

@@ -128,6 +128,103 @@ internal object SentenceCitationGate {
         return out.toString()
     }
 
+    private fun isCjkChar(ch: Char): Boolean =
+        ch in '\u4e00'..'\u9fff' || ch in '\u3400'..'\u4dbf' || ch in '\u3000'..'\u303f' || ch in '\uff00'..'\uffef'
+
+    private fun compactCjkWithRawOffsets(raw: String): NormalizedWithOffsets {
+        val normChars = StringBuilder(raw.length)
+        val rawStarts = ArrayList<Int>(raw.length)
+        val rawEnds = ArrayList<Int>(raw.length)
+        var pendingSpace = false
+        var spaceRawStart = 0
+        var spaceRawEnd = 0
+        var lastWasCjk = false
+        var i = 0
+        while (i < raw.length) {
+            val cp = raw.codePointAt(i)
+            val charLen = Character.charCount(cp)
+            val pieceNorm = expandCharPiece(raw.substring(i, i + charLen))
+            if (pieceNorm.isEmpty() || pieceNorm.all { it.isWhitespace() }) {
+                if (normChars.isNotEmpty() && !lastWasCjk) {
+                    if (!pendingSpace) {
+                        spaceRawStart = i
+                        pendingSpace = true
+                    }
+                    spaceRawEnd = i + charLen
+                }
+            } else {
+                for (ch in pieceNorm) {
+                    if (ch.isWhitespace()) {
+                        if (normChars.isNotEmpty() && !lastWasCjk) {
+                            if (!pendingSpace) {
+                                spaceRawStart = i
+                                pendingSpace = true
+                            }
+                            spaceRawEnd = i + charLen
+                        }
+                    } else {
+                        val isCjk = isCjkChar(ch)
+                        if (pendingSpace && !isCjk) {
+                            normChars.append(' ')
+                            rawStarts += spaceRawStart
+                            rawEnds += spaceRawEnd
+                        }
+                        pendingSpace = false
+                        normChars.append(ch)
+                        rawStarts += i
+                        rawEnds += i + charLen
+                        lastWasCjk = isCjk
+                    }
+                }
+            }
+            i += charLen
+        }
+        return NormalizedWithOffsets(normChars.toString(), rawStarts.toIntArray(), rawEnds.toIntArray())
+    }
+
+    private fun findOrderedTokenSpan(qTokens: List<String>, normPage: String): Pair<Int, Int>? {
+        if (qTokens.size < 3) return null
+        val pageTokens = tokenRegex.findAll(normPage.lowercase()).toList()
+        if (pageTokens.size < qTokens.size) return null
+        val limit = pageTokens.size - qTokens.size
+        outer@ for (i in 0..limit) {
+            if (pageTokens[i].value != qTokens[0]) continue
+            var prevEnd = pageTokens[i].range.last + 1
+            for (j in 1 until qTokens.size) {
+                val tok = pageTokens[i + j]
+                if (tok.value != qTokens[j]) continue@outer
+                if (tok.range.first - prevEnd > 48) continue@outer
+                prevEnd = tok.range.last + 1
+            }
+            return pageTokens[i].range.first to (pageTokens[i + qTokens.size - 1].range.last + 1)
+        }
+        return null
+    }
+
+    private fun splitWindowUnits(normPage: String): List<IntRange> {
+        val out = ArrayList<IntRange>()
+        for (span in wordSpanRegex.findAll(normPage)) {
+            val s = span.value
+            if (s.none(::isCjkChar)) {
+                out += span.range
+            } else {
+                val base = span.range.first
+                var idx = 0
+                while (idx < s.length) {
+                    if (isCjkChar(s[idx])) {
+                        out += (base + idx)..(base + idx)
+                        idx++
+                    } else {
+                        val start = idx
+                        while (idx < s.length && !isCjkChar(s[idx])) idx++
+                        out += (base + start) until (base + idx)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     fun verifyOrSnapAnchor(quote: String, rawPageText: String): AnchorResult {
         val mapped = normalizeWithRawOffsets(rawPageText)
         val normPage = mapped.text
@@ -153,12 +250,53 @@ internal object SentenceCitationGate {
             )
         }
 
+        // Handle hard-wrapped CJK lines / full-width indents where rawPageText has whitespace inside CJK runs,
+        // including short 1-2 clause quotes whose tokenRegex count is < 3.
+        if (q.any(::isCjkChar)) {
+            val compactPage = compactCjkWithRawOffsets(rawPageText)
+            val compactQ = compactCjkWithRawOffsets(quote).text
+            if (compactQ.length >= 4) {
+                val cIdx = compactPage.text.indexOf(compactQ, ignoreCase = true)
+                if (cIdx >= 0) {
+                    val (rawStart, rawEnd) = mapNormSpanToRaw(compactPage, rawPageText, cIdx, cIdx + compactQ.length)
+                    if (rawEnd > rawStart) {
+                        val rawSlice = rawPageText.substring(rawStart, rawEnd)
+                        val trimmed = rawSlice.trim()
+                        val trimDelta = if (trimmed.isNotEmpty()) rawSlice.indexOf(trimmed).coerceAtLeast(0) else 0
+                        val adjStart = rawStart + trimDelta
+                        val adjEnd = if (trimmed.isNotEmpty()) adjStart + trimmed.length else rawEnd
+                        return AnchorResult(
+                            rawExactMatch = true,
+                            verified = true,
+                            canonicalAnchor = if (trimmed.isNotEmpty()) trimmed else rawSlice,
+                            startUtf16 = adjStart,
+                            endUtf16 = adjEnd,
+                        )
+                    }
+                }
+            }
+        }
+
         val qTokens = tokenRegex.findAll(q.lowercase()).map { it.value }.toList()
         if (qTokens.size < 3) {
             return AnchorResult(rawExactMatch = false, verified = false, canonicalAnchor = "")
         }
 
-        val words = wordSpanRegex.findAll(normPage).toList()
+        if (q.any(::isCjkChar)) {
+            findOrderedTokenSpan(qTokens, normPage)?.let { (sPos, ePos) ->
+                val rawSlice = normPage.substring(sPos, ePos)
+                val (rawStart, rawEnd) = mapNormSpanToRaw(mapped, rawPageText, sPos, ePos)
+                return AnchorResult(
+                    rawExactMatch = false,
+                    verified = true,
+                    canonicalAnchor = trimPureProseAnchor(rawSlice),
+                    startUtf16 = rawStart,
+                    endUtf16 = rawEnd,
+                )
+            }
+        }
+
+        val words = splitWindowUnits(normPage)
         if (words.isEmpty()) {
             return AnchorResult(rawExactMatch = false, verified = false, canonicalAnchor = "")
         }
@@ -169,8 +307,8 @@ internal object SentenceCitationGate {
         var bestEnd = 0
         val maxStart = (words.size - win).coerceAtLeast(0)
         for (i in 0..maxStart) {
-            val sPos = words[i].range.first
-            val ePos = words[minOf(words.size - 1, i + win - 1)].range.last + 1
+            val sPos = words[i].first
+            val ePos = words[minOf(words.size - 1, i + win - 1)].last + 1
             val cand = normPage.substring(sPos, ePos)
             val candLow = cand.lowercase()
             var hits = 0

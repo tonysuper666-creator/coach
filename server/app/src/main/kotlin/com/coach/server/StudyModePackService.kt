@@ -520,12 +520,18 @@ internal object StudyModeAnchorGate {
         val contextHint: String,
     )
 
+    private val cjkSpaceBetweenRegex = Regex("""(?<=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])""")
+    private val cjkTokenRegex = Regex("""[\u4e00-\u9fff]|[a-z0-9]+""")
+
     fun normalize(raw: String): String =
         Normalizer.normalize(raw, Normalizer.Form.NFKC)
             .replace('\u00AD'.toString(), "")
             .replace(whitespaceRegex, " ")
             .trim()
             .lowercase(Locale.US)
+
+    private fun compactCjkNormalize(raw: String): String =
+        normalize(raw).replace(cjkSpaceBetweenRegex, "")
 
     fun hasMinimumLength(quote: String): Boolean {
         val asciiWords = asciiTokenRegex.findAll(quote).count()
@@ -534,16 +540,19 @@ internal object StudyModeAnchorGate {
         return cjkCount >= 6
     }
 
-    /** Extract candidate whole sentences (>= 5 ASCII words) from a chapter's pages to aid targeted repair. */
+    /** Extract candidate whole sentences (>= 5 ASCII words or >= 8 CJK chars) from a chapter's pages to aid targeted repair. */
     fun extractCandidateSentences(pages: List<StudyPageInput>, centerPage: Int, radius: Int = 2): List<Pair<Int, String>> {
         val candidates = mutableListOf<Pair<Int, String>>()
         pages.filter { kotlin.math.abs(it.pdfPage - centerPage) <= radius }
             .sortedBy { kotlin.math.abs(it.pdfPage - centerPage) }
             .forEach { p ->
                 val collapsed = Normalizer.normalize(p.text, Normalizer.Form.NFKC).replace(whitespaceRegex, " ")
-                collapsed.split(Regex("(?<=[.!?。；])\\s+"))
+                collapsed.split(Regex("""(?<=[.!?。！？；])\s*|\n+"""))
                     .map { it.trim() }
-                    .filter { it.length in 28..240 && asciiTokenRegex.findAll(it).count() >= 4 }
+                    .filter { s ->
+                        (s.length in 28..240 && asciiTokenRegex.findAll(s).count() >= 4) ||
+                            (s.length in 8..160 && s.count { it in '\u4e00'..'\u9fff' } >= 8)
+                    }
                     .take(10)
                     .forEach { sent -> candidates.add(p.pdfPage to sent) }
             }
@@ -554,11 +563,43 @@ internal object StudyModeAnchorGate {
         val trimmed = trailingPunctRegex.replace(quote.trim(), "")
         if (trimmed.isBlank() || !hasMinimumLength(trimmed)) return null
         val normQuote = normalize(trimmed)
-        if (normQuote.length < 12) return null
+        if (normQuote.length < 12 && trimmed.count { it in '\u4e00'..'\u9fff' } < 6) return null
         val claimedText = pageNormMap[claimedPage]
         if (claimedText != null && normQuote in claimedText) return claimedPage
         for ((pg, normText) in pageNormMap) {
             if (pg != claimedPage && normQuote in normText) return pg
+        }
+        // CJK line-wrap / whitespace tolerance (e.g. hard-wrapped TXT or 〈〉 note spacing)
+        if (trimmed.any { it in '\u4e00'..'\u9fff' }) {
+            val compactQ = compactCjkNormalize(trimmed)
+            if (compactQ.length >= 6) {
+                if (claimedText != null && compactQ in compactCjkNormalize(claimedText)) return claimedPage
+                for ((pg, normText) in pageNormMap) {
+                    if (pg != claimedPage && compactQ in compactCjkNormalize(normText)) return pg
+                }
+            }
+            val qTokens = cjkTokenRegex.findAll(normQuote).map { it.value }.toList()
+            if (qTokens.size >= 6) {
+                fun matchesInOrder(text: String): Boolean {
+                    val pageTokens = cjkTokenRegex.findAll(text).toList()
+                    if (pageTokens.size < qTokens.size) return false
+                    outer@ for (i in 0..(pageTokens.size - qTokens.size)) {
+                        if (pageTokens[i].value != qTokens[0]) continue
+                        var prevEnd = pageTokens[i].range.last + 1
+                        for (j in 1 until qTokens.size) {
+                            val tok = pageTokens[i + j]
+                            if (tok.value != qTokens[j] || tok.range.first - prevEnd > 48) continue@outer
+                            prevEnd = tok.range.last + 1
+                        }
+                        return true
+                    }
+                    return false
+                }
+                if (claimedText != null && matchesInOrder(claimedText)) return claimedPage
+                for ((pg, normText) in pageNormMap) {
+                    if (pg != claimedPage && matchesInOrder(normText)) return pg
+                }
+            }
         }
         return null
     }
@@ -1528,14 +1569,15 @@ class StudyModePackService(
             }
         }
 
-        // Chunk chapters into groups of 4 (6 chunks for 24 ch) with concise schemas so Batch finishes well under maxTokens=8192.
-        val chunks = req.chapters.sortedBy { it.chapterNum }.chunked(4)
+        // Chunk chapters into groups of 4 (or 8 for 61+ chapters) so Batch finishes well under maxTokens=8192.
+        val groupSize = if (req.chapters.size > 60) 8 else 4
+        val chunks = req.chapters.sortedBy { it.chapterNum }.chunked(groupSize)
         val totalIn = AtomicInteger(0)
         val totalOut = AtomicInteger(0)
 
-        val mapSys = """Build ultra-concise BOOK_MAP chapter one-pagers (4 chapters per JSON response; total output <= 2500 tokens).
+        val mapSys = """Build ultra-concise BOOK_MAP chapter one-pagers (up to $groupSize chapters per JSON response; total output <= 2500 tokens).
 CRITICAL RULES:
-1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 words copied directly from [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false,"pdfPage":12}]}]}
+1. Return ONLY JSON: {"chapters":[{"chapterNum":1,"chapterTitle":"...","chapterRole":"CORE|FOUNDATION|EXTENSION","oneLiner":"中文一句话<=18字","estimatedMinutes":15,"readingDepth":"CORE_SKIM|DEEP|REFERENCE","prerequisites":["Ch.X"],"unlocks":["Ch.Y"],"keyTerms":[{"term":"EN term","gloss":"中文释义<=8字"}],"coreClaims":[{"claim":"中文核心论断<=14字","importance":"CORE","pdfPage":12,"quoteAnchor":"VERBATIM 5-9 English words OR 6-18 Chinese chars copied directly from [p.12]"}],"sections":[{"sectionTitle":"中文小节名","summary":"<=12字","skipUnlessExam":false,"pdfPage":12}]}]}
 2. Emit MAX 1 coreClaim, 1 keyTerm, and 1-2 short sections per chapter; every section MUST include integer pdfPage copied from Sections (p.XXX) or [p.XXX]; coreClaims[*].quoteAnchor strictly verbatim from [p.XXX].
 3. ${StudyModePromptBuilder.langInstruction(req.explainLang)}"""
 
@@ -1550,7 +1592,10 @@ CRITICAL RULES:
                         }
                         val firstPage = ch.pages.firstOrNull()
                         if (firstPage != null) {
-                            val clean = Normalizer.normalize(firstPage.text, Normalizer.Form.NFKC).replace(Regex("\\s+"), " ").trim()
+                            val clean = Normalizer.normalize(firstPage.text, Normalizer.Form.NFKC)
+                                .replace(Regex("""(?<=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf，。；：！？「」『』〈〉（）【】、])"""), "")
+                                .replace(Regex("\\s+"), " ")
+                                .trim()
                             val cut = clean.take(900)
                             val lastDot = cut.lastIndexOf(". ")
                             val trimmed = if (clean.length > 900 && lastDot >= 450) cut.substring(0, lastDot + 1) else cut
@@ -1828,7 +1873,7 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
     }
 }
 
-private object StudyModeRequestParser {
+internal object StudyModeRequestParser {
     fun parseModeRequest(bookId: String, mode: ServerStudyMode, input: JsonObject, friend: String?, device: String): StudyModeRequest {
         require(bookId.isNotBlank() && bookId.length <= 128) { "bookId 不合法。" }
         val chapterNum = input["chapterNum"]?.jsonPrimitive?.intOrNull
@@ -1879,7 +1924,7 @@ private object StudyModeRequestParser {
     fun parseBatchRequest(bookId: String, input: JsonObject, friend: String?, device: String): BookMapBatchRequest {
         require(bookId.isNotBlank() && bookId.length <= 128) { "bookId 不合法。" }
         val chaptersArr = input["chapters"] as? JsonArray ?: throw IllegalArgumentException("缺少 chapters 列表。")
-        require(chaptersArr.size in 1..60) { "chapters 数量须在 1..60 之间。" }
+        require(chaptersArr.size in 1..200) { "chapters 数量须在 1..200 之间。" }
         val chapters = chaptersArr.map { elem ->
             val obj = elem as? JsonObject ?: throw IllegalArgumentException("chapters 元素必须是对象。")
             val num = obj["chapterNum"]?.jsonPrimitive?.intOrNull ?: throw IllegalArgumentException("章节缺少 chapterNum。")

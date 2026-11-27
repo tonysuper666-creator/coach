@@ -79,6 +79,7 @@ internal class TextbookLibrary(
     private val textScrollModeCache = ConcurrentHashMap<String, Boolean>()
     private val readSpotCache = ConcurrentHashMap<String, CachedValue<Pair<Int, Int>?>>()
     private val quoteJumps = ConcurrentHashMap<String, BookPassage>()
+    private val facingTitleCache = ConcurrentHashMap<String, String>()
     private val pageHighlightRawCache = ConcurrentHashMap<Pair<String, Int>, List<Triple<Int, Int, String>>>()
     private val textViewWrites = Mutex()
     private val textLayerLock = Any()
@@ -1965,11 +1966,38 @@ internal class TextbookLibrary(
         }
     }
 
+    /**
+     * Title for the follow page, the course card, and the reader header.
+     * A file slug is replaced by the chapter or article title read from the body.
+     * A title that is already prose is only decoded and stripped of private-use characters.
+     */
+    fun facingTitle(bookId: String, stored: String): String {
+        val key = bookId + "\u0000" + stored
+        facingTitleCache[key]?.let { return it }
+        val resolved = if (!LiteratureMetadata.isFileSlug(stored)) {
+            sanitizeDisplayTitle(stored)
+        } else {
+            runCatching {
+                literatureDisplayTitle(
+                    Textbook(
+                        id = bookId,
+                        title = stored,
+                        format = "pdf",
+                        pages = emptyList(),
+                        literatureMeta = literaturePaperMeta(bookId),
+                    ),
+                )
+            }.getOrDefault(sanitizeDisplayTitle(stored))
+        }
+        facingTitleCache[key] = resolved
+        return resolved
+    }
+
     /** Pre-fill author, year, and HTML-decoded title from PDF metadata, source filename, and front pages. */
     fun literaturePaperMeta(bookId: String): LiteraturePaperMeta {
         val source = book(bookId)
         val filename = sourceFilename(bookId)
-        val frontPages = source.pages.take(2).map { it.text }
+        val frontPages = source.pages.take(6).map { it.text }
         val file = original(bookId, "pdf").toFile()
         return if (source.format == "pdf" && file.isFile) {
             runCatching {
@@ -2143,7 +2171,7 @@ internal class TextbookLibrary(
                 bookId = source.id,
                 storedTitle = source.title,
                 sourceFilename = filename,
-                firstPagesText = extractedPages.take(2).map { it.text }.ifEmpty { source.pages.take(2).map { it.text } },
+                firstPagesText = extractedPages.take(6).map { it.text }.ifEmpty { source.pages.take(6).map { it.text } },
             )
             extractedPages to extractedMeta
         }

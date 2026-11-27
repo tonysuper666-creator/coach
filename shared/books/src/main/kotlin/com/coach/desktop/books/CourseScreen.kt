@@ -163,6 +163,7 @@ internal fun CourseScreen(
     onOpenLiteratureComparison: (() -> Unit)? = null,
     onOpenLiteratureFollow: (() -> Unit)? = null,
     onGenerateExamDrills: (() -> Unit)? = null,
+    displayBookTitle: (bookId: String, stored: String) -> String = { _, stored -> sanitizeDisplayTitle(stored) },
     drillProgress: ExamDrillProgress? = null,
 ) {
     val colors = CoachTheme.colors
@@ -555,6 +556,7 @@ internal fun CourseScreen(
                         topic = topic,
                         isExam = isExam,
                         planMetaLine = cardMeta,
+                        displayBookTitle = displayBookTitle,
                         onOpen = { onOpenTopic(topic) },
                         onRenameClick = { renamingTopic = topic },
                         onUnlinkClick = { unlinkingTopic = topic },
@@ -640,7 +642,7 @@ internal fun CourseScreen(
                                             color = colors.fgPrimary,
                                         )
                                         val srcDesc = excluded.sources.firstOrNull()?.let {
-                                            "《${it.bookTitle}》第 ${it.startPage}–${it.endPage} 页"
+                                            "《${displayBookTitle(it.bookId, it.bookTitle)}》第 ${it.startPage}–${it.endPage} 页"
                                         } ?: "未在当前大纲中出现"
                                         Text(
                                             srcDesc,
@@ -668,6 +670,7 @@ internal fun CourseScreen(
     if (materialsDialogOpen) {
         CourseMaterialsDialog(
             detail = detail,
+            displayBookTitle = displayBookTitle,
             onDismiss = { materialsDialogOpen = false },
             onUpdateMaterialAssignment = onUpdateMaterialAssignment,
             onRemoveMaterial = onRemoveMaterial,
@@ -748,7 +751,7 @@ internal fun CourseScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "L${src.authorityRank} ${src.bookTitle}",
+                                "L${src.authorityRank} ${displayBookTitle(src.bookId, src.bookTitle)}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.weight(1f).padding(end = 8.dp),
                             )
@@ -778,6 +781,7 @@ private fun CourseTopicCard(
     topic: CourseTopicEntry,
     isExam: Boolean = true,
     planMetaLine: String = "",
+    displayBookTitle: (bookId: String, stored: String) -> String = { _, stored -> sanitizeDisplayTitle(stored) },
     onOpen: () -> Unit,
     onRenameClick: () -> Unit,
     onUnlinkClick: () -> Unit,
@@ -876,7 +880,7 @@ private fun CourseTopicCard(
                             border = BorderStroke(1.dp, colors.borderSubtle),
                         ) {
                             Text(
-                                if (isExam) "L${src.authorityRank} ${src.role.labelZh} · ${src.bookTitle}" else "${src.role.labelZh} · ${src.bookTitle}",
+                                courseMaterialLabel(src, isExam, displayBookTitle),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = colors.fgSecondary,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -889,9 +893,19 @@ private fun CourseTopicCard(
     }
 }
 
+private fun courseMaterialLabel(
+    source: CourseTopicSourceLink,
+    isExam: Boolean,
+    displayBookTitle: (bookId: String, stored: String) -> String,
+): String {
+    val title = displayBookTitle(source.bookId, source.bookTitle)
+    return if (isExam) "L${source.authorityRank} ${source.role.labelZh} · $title" else "${source.role.labelZh} · $title"
+}
+
 @Composable
 private fun CourseMaterialsDialog(
     detail: CourseDetailSnapshot,
+    displayBookTitle: (bookId: String, stored: String) -> String,
     onDismiss: () -> Unit,
     onUpdateMaterialAssignment: (bookId: String, weekNum: Int?, role: CourseMaterialRole) -> Unit,
     onRemoveMaterial: (bookId: String) -> Unit,
@@ -932,7 +946,7 @@ private fun CourseMaterialsDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        LiteratureTextNorm.decodeHtmlEntities(mat.title),
+                                        displayBookTitle(mat.bookId, mat.title),
                                         style = MaterialTheme.typography.titleSmall,
                                         color = colors.fgPrimary,
                                         modifier = Modifier.weight(1f).padding(end = 8.dp),

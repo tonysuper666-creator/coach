@@ -152,6 +152,9 @@ internal fun TextbookReader(
         LaunchedEffect(book.id, ui.page) { onPage(book.pages.first().number) }
         return
     }
+    val shownBookTitle = remember(book.id, book.title) {
+        runCatching { library.facingTitle(book.id, book.title) }.getOrDefault(sanitizeDisplayTitle(book.title))
+    }
     val hasOriginal = book.format == "pdf" || book.format in BookFormats.images
     val originalPdf = book.format == "pdf"
     val textOnlySource = !hasOriginal || page.ocr
@@ -1896,7 +1899,7 @@ internal fun TextbookReader(
                     Box(Modifier.fillMaxSize().background(paper)) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             OriginalBookPage(
-                                "${LiteratureTextNorm.decodeHtmlEntities(book.title)} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
+                                "$shownBookTitle ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
                                 citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
                                 onSelection = {},
                             )
@@ -2837,7 +2840,7 @@ internal fun TextbookReader(
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
-            bookTitle = LiteratureTextNorm.decodeHtmlEntities(book.title),
+            bookTitle = shownBookTitle,
             sectionTitle = if (source != null) "出处 · ${source.title}" else
                 activeTocNode?.let { BookBoundaries.headerTitleForNode(navigationBook, it) }
                     ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
@@ -3121,7 +3124,7 @@ internal fun TextbookReader(
         if (notesPageOpen) {
             BookNotesPageOverlay(
                 bookId = book.id,
-                bookTitle = LiteratureTextNorm.decodeHtmlEntities(book.title),
+                bookTitle = shownBookTitle,
                 library = library,
                 lessonFirstPages = {
                     book.lessons.associate { lesson -> lesson.id to lesson.firstPage }

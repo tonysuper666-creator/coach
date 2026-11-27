@@ -129,11 +129,22 @@ internal object LiteratureTextNorm {
     }
 }
 
-/** Shelf, reader, library, and export show the characters the title meant, not the HTML escapes. */
-internal fun visibleBookTitle(raw: String): String {
-    if (raw.isBlank() || '&' !in raw) return raw
-    return LiteratureTextNorm.decodeHtmlEntities(raw)
+/** Titles shown to a reader: HTML entities become characters, and private-use glyphs are dropped. */
+internal fun sanitizeDisplayTitle(raw: String): String {
+    val decoded = LiteratureTextNorm.decodeHtmlEntities(raw)
+    val kept = StringBuilder(decoded.length)
+    var index = 0
+    while (index < decoded.length) {
+        val code = decoded.codePointAt(index)
+        val privateUse = code in 0xE000..0xF8FF || code in 0xF0000..0xFFFFD || code in 0x100000..0x10FFFD
+        if (!privateUse) kept.appendCodePoint(code)
+        index += Character.charCount(code)
+    }
+    return kept.toString().replace(Regex("""\s+"""), " ").trim()
 }
+
+/** Shelf, reader, library, and export show the characters the title meant, not the HTML escapes. */
+internal fun visibleBookTitle(raw: String): String = sanitizeDisplayTitle(raw)
 
 internal object LiteratureMetadata {
     private val junkTitle = Regex(
@@ -157,8 +168,14 @@ internal object LiteratureMetadata {
     private val anyYearToken = Regex("""(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)""")
     private val jstorAuthor = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Author(?:\(s\))?\s*[:：]\s*(.+)$""")
     private val multilineAuthorLabel = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Author(?:\(s\))?\s*[:：]\s*$""")
-    private val multilineTitleLabel = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Title\s*[:：]\s*$""")
-    private val explicitTitleLine = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Title\s*[:：]\s*(.+)$""")
+    private val titledLabel = Regex("""(?i)^(chapter\s+title|article\s+title|book\s+title|title)\s*[:：]\s*(.*)$""")
+    private val fieldStop = Regex(
+        """(?i)^(?:(?:book|chapter|article)\s+)?author(?:\(s\))?\s*[:：]|^(?:editor(?:\(s\))?|pub\.?\s*year|publication\s+date|published(?:\s+in\s+print)?|source|date|year|isbn|issn|doi)\s*[:：]""",
+    )
+    private val titleSmallWords = setOf("of", "the", "in", "and", "a", "to", "for", "on", "or", "by", "an", "from", "with")
+    private val sectionOnly = Regex(
+        """(?i)^(?:abstract|introduction|background|contents|preface|foreword|references|bibliography|acknowledgements|summary|conclusion|index|appendix)$""",
+    )
     private val explicitYearLine = Regex("""(?im)^(?:Pub\.?\s*year|Publication\s+Date|Source|Published|Date|Year)\s*[:：].*?(?<!\d)(1[89]\d{2}|20\d{2})(?!\d)""")
     private val downloadNoiseLine = Regex("""(?i)downloaded|accessed|printed on|retrieved|terms of use|stable url|copyright|©""")
     private val coverAuthor = Regex("""(?im)^(?:Author(?:\(s\))?|By)\s*[:：]\s*(.+)$""")
@@ -250,17 +267,28 @@ internal object LiteratureMetadata {
             }
         }
 
-        val page1 = firstPagesText.firstOrNull().orEmpty()
-        val frontText = firstPagesText.take(2).joinToString("\n")
+        val pages = firstPagesText.take(6)
+        val page1 = pages.firstOrNull().orEmpty()
+        val frontText = pages.take(2).joinToString("\n")
         val frontLines = page1.lines().map(String::trim).filter(String::isNotEmpty)
 
         val academicHeader = extractAcademicFrontHeader(frontLines)
         val labeledAuthor = extractLabeledAuthor(page1, frontLines)
-        val explicitPageTitle = extractFrontPageTitle(page1, frontLines)
-            ?.let(LiteratureTextNorm::decodeHtmlEntities)
+        val labeled = collectLabeledTitles(pages)
+        val chapterLabeled = labeled.firstOrNull { it.kind == "chapter" || it.kind == "article" }?.title
+        val workLabeled = labeled.firstOrNull { it.kind == "work" }?.title
+        val bookLabeled = labeled.firstOrNull { it.kind == "book" }?.title
+        val pageTitleSpecial = extractFrontPageTitle(frontLines)?.let(::sanitizeDisplayTitle)
             ?.takeIf { isUsefulTitle(it) }
+        // A coursepack cover's "Book title:" is the collection. The chapter title is printed on a later page.
+        val bodyChapter = if (chapterLabeled == null && workLabeled == null && pageTitleSpecial == null && bookLabeled != null) {
+            inBodyChapterTitle(pages, bookLabeled)
+        } else {
+            null
+        }
+        val pageTitle = chapterLabeled ?: workLabeled ?: pageTitleSpecial ?: bodyChapter ?: bookLabeled
         val academicPageTitle = academicHeader?.first
-            ?.let(LiteratureTextNorm::decodeHtmlEntities)
+            ?.let(::sanitizeDisplayTitle)
             ?.takeIf { isUsefulTitle(it) }
         val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle)
             .takeIf { isUsefulTitle(it) && !isFileSlug(it) }
@@ -269,8 +297,7 @@ internal object LiteratureMetadata {
             decodedStored.equals(fileStem, true) ||
             decodedStored.equals(strippedStem, true) ||
             (' ' !in decodedStored && '-' in decodedStored)
-        val pageTitle = explicitPageTitle ?: academicPageTitle
-        val knownTitle = pdfTitle ?: explicitPageTitle ?: (if (storedLooksLikeFilename) academicPageTitle else decodedStored) ?: academicPageTitle
+        val knownTitle = pdfTitle ?: pageTitle ?: (if (storedLooksLikeFilename) academicPageTitle else decodedStored) ?: academicPageTitle
         val plainAuthor = (academicHeader?.second ?: extractPlainHeaderAuthor(frontLines, knownTitle))
             ?.takeIf { cand -> knownTitle == null || !titleContainsCandidate(knownTitle, cand) }
         val expandedFileAuthor = fileAuthor?.let { surname -> expandSurnameFromText(surname, frontText) ?: surname }
@@ -285,12 +312,14 @@ internal object LiteratureMetadata {
 
         val preferredStored = decodedStored.takeUnless { storedLooksLikeFilename }
         val unlabeled = if (pdfTitle == null && pageTitle == null && fileTitle == null && preferredStored == null) {
-            unlabeledFrontTitle(frontLines)?.let(LiteratureTextNorm::decodeHtmlEntities)?.takeIf { isUsefulTitle(it) }
+            unlabeledFrontTitle(frontLines)?.let(::sanitizeDisplayTitle)?.takeIf { isUsefulTitle(it) }
         } else {
             null
         }
-        val finalTitle = (pdfTitle ?: explicitPageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: unlabeled ?: decodedStored ?: strippedStem).take(220)
-        // Priority: explicit cover label -> embedded PDF metadata -> heuristic page-1 header -> filename fallback.
+        val finalTitle = sanitizeDisplayTitle(
+            pdfTitle ?: pageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: unlabeled ?: decodedStored ?: strippedStem,
+        ).take(220)
+        // Priority: chapter or article label, then the title printed above the author, then a non-slug stored title.
         val finalAuthor = formatAuthorList((labeledAuthor ?: pdfAuthor ?: plainAuthor ?: expandedFileAuthor).orEmpty())
         return LiteraturePaperMeta(bookId, finalTitle, finalAuthor, finalYear)
     }
@@ -461,17 +490,113 @@ internal object LiteratureMetadata {
         return null
     }
 
-    private fun extractFrontPageTitle(page1: String, lines: List<String>): String? {
-        explicitTitleLine.find(page1)?.groupValues?.get(1)?.trim()?.takeIf { isUsefulTitle(it) }?.let { return it }
-        val mlIdx = lines.indexOfFirst { multilineTitleLabel.matches(it) }
-        if (mlIdx >= 0 && mlIdx + 1 < lines.size) {
-            val first = lines[mlIdx + 1]
-            val second = lines.getOrNull(mlIdx + 2)?.takeIf {
-                !it.contains(':') && !multilineAuthorLabel.matches(it) && !nonTitleLine.containsMatchIn(it) && it.length <= 60
+    private data class LabeledTitle(val kind: String, val title: String)
+
+    /** Chapter and article labels win over a collection's "Book title:". Wrapped lines are joined. */
+    private fun collectLabeledTitles(pages: List<String>): List<LabeledTitle> {
+        val found = mutableListOf<LabeledTitle>()
+        for (page in pages) {
+            val lines = page.lines().map(String::trim).filter(String::isNotEmpty)
+            var index = 0
+            while (index < lines.size) {
+                val match = titledLabel.matchEntire(lines[index])
+                if (match == null) {
+                    index++
+                    continue
+                }
+                val kind = when (match.groupValues[1].lowercase()) {
+                    "chapter title" -> "chapter"
+                    "article title" -> "article"
+                    "book title" -> "book"
+                    else -> "work"
+                }
+                val parts = mutableListOf<String>()
+                val inline = match.groupValues[2].trim()
+                if (inline.isNotEmpty()) parts += inline
+                var next = index + 1
+                while (next < lines.size && parts.size < 4) {
+                    val line = lines[next]
+                    if (titledLabel.matches(line) || fieldStop.matches(line)) break
+                    if (line.length > 80 || line.last() in ".!?。！？") break
+                    parts += line
+                    next++
+                }
+                val joined = sanitizeDisplayTitle(parts.joinToString(" "))
+                if (isUsefulTitle(joined)) found += LabeledTitle(kind, joined)
+                index = maxOf(next, index + 1)
             }
-            val joined = listOfNotNull(first, second).joinToString(" ").trim()
-            if (isUsefulTitle(joined)) return joined
         }
+        return found
+    }
+
+    /**
+     * The line printed above the chapter's own author, after the coursepack cover.
+     * A later section heading is not used: it is followed by a sentence, not by the author.
+     */
+    private fun inBodyChapterTitle(pages: List<String>, bookTitle: String): String? {
+        val bookKey = titleKey(bookTitle)
+        pages.forEachIndexed { pageIndex, page ->
+            val lines = page.lines().map(String::trim).filter(String::isNotEmpty).take(24)
+            val start = if (pageIndex == 0) {
+                val lastLabel = lines.indexOfLast { titledLabel.matches(it) || fieldStop.matches(it) }
+                if (lastLabel < 0) lines.size else lastLabel + 1
+            } else {
+                0
+            }
+            for (index in start until lines.size) {
+                chapterAt(lines, index, bookKey)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun chapterAt(lines: List<String>, index: Int, bookKey: String): String? {
+        val line = lines[index]
+        if (!chapterLine(line)) return null
+        var title = line
+        var nextIndex = index + 1
+        val second = lines.getOrNull(nextIndex)
+        if (second != null && chapterLine(second) && second.substringBefore(' ').lowercase() in titleSmallWords) {
+            title = "$line $second"
+            nextIndex++
+        }
+        val after = lines.getOrNull(nextIndex).orEmpty()
+        if (!opensChapter(after)) return null
+        // The author sits directly above an affiliation. The chapter title sits above the author.
+        if (personNameLine.matches(title) && (affiliationCue.containsMatchIn(after) || after.equals("abstract", true) || after.equals("summary", true))) {
+            return null
+        }
+        val look = lines.subList(nextIndex, minOf(lines.size, nextIndex + 6))
+        val confirmed = look.any { line ->
+            affiliationCue.containsMatchIn(line) || line.equals("abstract", true) || line.equals("summary", true) ||
+                (line.length >= 40 && line.last() in ".!?。")
+        }
+        if (!confirmed) return null
+        val key = titleKey(title)
+        if (key.isEmpty() || key == bookKey || bookKey.startsWith(key) || key.startsWith(bookKey)) return null
+        return sanitizeDisplayTitle(title)
+    }
+
+    private fun chapterLine(line: String): Boolean {
+        if (line.length !in 12..160 || line.last() in ".!?。！？") return false
+        if (titledLabel.matches(line) || fieldStop.matches(line) || sectionOnly.matches(line)) return false
+        if (!isUsefulTitle(line) || affiliationCue.containsMatchIn(line)) return false
+        if (nonTitleLine.containsMatchIn(line)) return false
+        val words = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+        if (words.size !in 2..18) return false
+        return words.all { word -> word.lowercase() in titleSmallWords || word.first().isUpperCase() }
+    }
+
+    private fun opensChapter(line: String): Boolean {
+        if (line.isEmpty()) return false
+        if (personNameLine.matches(line) || affiliationCue.containsMatchIn(line)) return true
+        return line.equals("abstract", true) || line.equals("summary", true)
+    }
+
+    private fun titleKey(raw: String): String =
+        sanitizeDisplayTitle(raw).lowercase().replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
+
+    private fun extractFrontPageTitle(lines: List<String>): String? {
         val refArtIdx = lines.indexOfFirst { it.equals("REFERENCE ARTICLE", true) }
         if (refArtIdx >= 0 && refArtIdx + 1 < lines.size) {
             val cand = lines[refArtIdx + 1].trim()

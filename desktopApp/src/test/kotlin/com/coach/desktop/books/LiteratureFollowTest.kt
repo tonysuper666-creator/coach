@@ -429,6 +429,37 @@ class LiteratureFollowTest {
         assertEquals(12, sections.sumOf { it.sentences.size })
     }
 
+    @Test fun illustrationPageOcrThatStillHasVowelsIsNotASection() {
+        val prose = listOf(
+            "The keeper argued that the repository preserved provenance across the first decade.",
+            "Witnesses confirmed that written evidence stayed intact during the opening inspection.",
+            "Curators separated verified artifacts from hearsay with a bound register.",
+            "Members compared each specimen with the custody ledger before the annual meeting.",
+            "However the archive argued that custody changed after the second inspection.",
+            "Patrons recorded the missing labels before the committee adjourned for summer.",
+            "The society retained duplicate minutes so later readers could check the chain.",
+            "Clerks copied the accession numbers into a second volume that winter.",
+            "Therefore the register claimed that evidence confirmed provenance beyond doubt.",
+            "Visitors described the cabinets without altering the original shelf marks.",
+            "The final inventory listed every accepted object in the west gallery.",
+            "Scholars still cite that inventory when they reconstruct the collection.",
+        )
+        val pages = listOf(
+            prose.take(3).joinToString("\n"),
+            "Woval Socieiy Londen",
+            prose.subList(3, 6).joinToString("\n"),
+            "Royail Sociefye Musevm",
+            prose.drop(6).joinToString("\n"),
+        )
+        val book = paper(*pages.toTypedArray())
+        val sections = LiteratureSections.build(book, LiteraturePassages.extractCandidates(book))
+        val titles = sections.map { it.title }
+        assertTrue(sections.size in 3..8, titles.toString())
+        assertTrue(titles.all { it == "提出问题" || it == "转折" || it == "收束" || it.startsWith("第 ") }, titles.toString())
+        assertTrue(titles.none { "Woval" in it || "Royail" in it || "Socieiy" in it }, titles.toString())
+        assertEquals(prose.size, sections.sumOf { it.sentences.size })
+    }
+
     @Test fun authorAndAffiliationDoNotLetTheAbstractSwallowThePaper() {
         val swallowed = paper(
             """
@@ -544,6 +575,64 @@ class LiteratureFollowTest {
                 second.copy(literatureMeta = LiteraturePaperMeta(second.id, "Society&#x2019;s Curiosity")),
             )
             assertEquals("Society\u2019s Curiosity", shown)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun chapterTitleBeatsTheCollectionTitleAndPrivateUseIsStripped() {
+        val cover = """
+            Book title: Establishing the new science: the experience of the
+            early Royal Society
+            Book author(s):
+            A. N. Other
+            Pub. year: 1989
+        """.trimIndent()
+        val plate = "Woval Socieiy Londen"
+        val chapter = """
+            Notes and Records
+            Instruments of the Early Society
+            Michael Hunter
+            University of Cambridge
+            Abstract
+            The keeper argued that the repository preserved provenance across decades.
+        """.trimIndent()
+        val meta = LiteratureMetadata.extract(
+            pdf = null,
+            bookId = "hunter",
+            storedTitle = "Hunter-Between-Cabinet-1989-pp122-155",
+            sourceFilename = "Hunter-Between-Cabinet-1989-pp122-155.pdf",
+            firstPagesText = listOf(cover, plate, chapter),
+        )
+        assertEquals("Instruments of the Early Society", meta.title)
+        assertFalse("Establishing the new science" in meta.title)
+        val boxed = meta.copy(title = meta.title + "\uE000")
+        val shown = literatureDisplayTitle(
+            paper(chapter).copy(
+                title = "Hunter-Between-Cabinet-1989-pp122-155",
+                literatureMeta = boxed,
+            ),
+        )
+        assertEquals("Instruments of the Early Society", shown)
+        assertFalse('\uE000' in shown)
+        assertEquals("Society\u2019s Curiosity", sanitizeDisplayTitle("Society&#x2019;s Curiosity"))
+        assertEquals("Founder members", sanitizeDisplayTitle("Founder members\uE000"))
+    }
+
+    @Test fun importedChapterPdfShowsTheBodyTitleOnTheFollowPage() {
+        val root = Files.createTempDirectory("coach-follow-chapter-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val imported = library.importBook(chapterTitlePdf(root))
+            val paper = LiteratureFollow.load(library, imported.id)
+            assertEquals("Instruments of the Early Society", paper.title)
+            assertFalse("Hunter-Between" in paper.title, paper.title)
+            assertFalse("Establishing the new" in paper.title, paper.title)
+            assertEquals("Instruments of the Early Society", library.facingTitle(imported.id, imported.title))
+            assertEquals(
+                "Society\u2019s Curiosity",
+                library.facingTitle(imported.id, "Society&#x2019;s Curiosity"),
+            )
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -687,6 +776,33 @@ class LiteratureFollowTest {
                 "Witnesses confirmed that written evidence stayed intact during inspections." to 656f,
             )
         }
+    }
+
+    private fun chapterTitlePdf(root: Path): Path = pdf(
+        root,
+        "Hunter-Between-Cabinet-1989-pp122-155.pdf",
+        "Hunter-Between-Cabinet-1989-pp122-155",
+    ) { _ ->
+        listOf(
+            listOf(
+                "Book title: Establishing the new science: the experience of the" to 740f,
+                "early Royal Society" to 720f,
+                "Book author(s):" to 690f,
+                "A. N. Other" to 670f,
+                "Pub. year: 1989" to 650f,
+            ),
+            listOf(
+                "Woval Socieiy Londen" to 400f,
+            ),
+            listOf(
+                "Notes and Records" to 740f,
+                "Instruments of the Early Society" to 700f,
+                "Michael Hunter" to 670f,
+                "University of Cambridge" to 650f,
+                "Abstract" to 620f,
+                "The keeper argued that the repository preserved provenance across decades." to 590f,
+            ),
+        )
     }
 
     private fun slugTitlePdf(root: Path): Path = pdf(root, "Hunter-Establishing-Science-1989.pdf", "Hunter-Establishing-Science-1989") { _ ->

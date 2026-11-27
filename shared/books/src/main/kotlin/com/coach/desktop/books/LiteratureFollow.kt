@@ -192,7 +192,9 @@ internal object LiteratureSections {
                 !isDanglingFragment(book, excerpt, headers)
         }
         if (usable.isEmpty()) return emptyList()
-        val marks = headingMarks(book, headers).filter { beforeNotes(it.pdfPage, it.offset, notes) }
+        val marks = headingMarks(book, headers)
+            .filter { beforeNotes(it.pdfPage, it.offset, notes) }
+            .filter { headingOnAProsePage(it, usable) }
         val populated = marks.filterIndexed { index, mark ->
             val next = marks.getOrNull(index + 1)
             usable.any { excerpt ->
@@ -273,6 +275,19 @@ internal object LiteratureSections {
 
     private fun after(mark: HeadingMark, page: Int, offset: Int): Boolean =
         mark.pdfPage > page || (mark.pdfPage == page && mark.offset > offset)
+
+    /**
+     * An illustration page's OCR line can look like a title and still contain a vowel in every
+     * fragment. It is not a section unless a body sentence follows it on that same page.
+     * Keyword headings and Chinese headings stay, because their prose often starts on the next page.
+     */
+    private fun headingOnAProsePage(mark: HeadingMark, usable: List<GuideExcerpt>): Boolean {
+        if (mark.title.count { it.code in 0x3400..0x9fff } >= 2) return true
+        if (keywordHeading.matches(mark.title)) return true
+        return usable.any { excerpt ->
+            excerpt.anchor.pdfPage == mark.pdfPage && excerpt.anchor.startUtf16 > mark.offset
+        }
+    }
 
     private fun headingMarks(book: Textbook, headers: Set<String>): List<HeadingMark> {
         val marks = mutableListOf<HeadingMark>()
@@ -678,10 +693,10 @@ internal object LiteratureQuoteMap {
     }
 }
 
-/** Follow page, course list, and reader title share this. A stored file slug loses to the extracted paper title. */
+/** Follow page, course card, and reader title share this. A stored file slug loses to the extracted paper title. */
 internal fun literatureDisplayTitle(book: Textbook): String {
-    val stored = LiteratureTextNorm.decodeHtmlEntities(book.title)
-    val meta = book.literatureMeta?.title?.let(LiteratureTextNorm::decodeHtmlEntities)?.takeIf { it.isNotBlank() }
+    val stored = sanitizeDisplayTitle(book.title)
+    val meta = book.literatureMeta?.title?.let(::sanitizeDisplayTitle)?.takeIf { it.isNotBlank() }
     return if (meta != null && LiteratureMetadata.isFileSlug(book.title) && !LiteratureMetadata.isFileSlug(meta)) meta else stored
 }
 

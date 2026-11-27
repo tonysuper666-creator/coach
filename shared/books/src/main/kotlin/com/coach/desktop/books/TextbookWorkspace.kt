@@ -517,6 +517,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             } else CourseScreen(
                                 detail = detail,
+                                displayBookTitle = controller.library::facingTitle,
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
                                 onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {

@@ -2631,9 +2631,24 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
 
             val allBookIds = pending.flatMap { it.sources.map { s -> s.bookId } }.distinct()
-            val pagesByBook = withContext(Dispatchers.IO) {
+            val textbookBookIds = detail.materials
+                .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+                .map { it.bookId }
+                .toSet()
+            val (pagesByBook, chapterStartPagesByBook) = withContext(Dispatchers.IO) {
                 library.withCourseDatabase { db ->
-                    allBookIds.associateWith { bookId -> CourseStore.loadPagesForBook(db, bookId, maxPages = Int.MAX_VALUE) }
+                    val pages = allBookIds.associateWith { bookId ->
+                        CourseStore.loadPagesForBook(db, bookId, maxPages = Int.MAX_VALUE)
+                    }
+                    val chapterStarts = allBookIds.filter { it in textbookBookIds }.associateWith { bookId ->
+                        val structure = BookStructureStore.loadStructure(db, bookId, pages[bookId].orEmpty())
+                        structure?.tocNodes
+                            ?.filter { it.kind == TocNodeKind.CHAPTER }
+                            ?.map { it.startPage }
+                            ?.toSet()
+                            .orEmpty()
+                    }
+                    pages to chapterStarts
                 }
             }
             val workerCount = concurrency.coerceIn(1, 16)
@@ -2670,7 +2685,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             try {
                                 val pointPages = point.sources.map { it.bookId }.distinct()
                                     .associateWith { pagesByBook[it].orEmpty() }
-                                val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pointPages)
+                                val request = CourseAutoAligner.buildTopicPackRequest(
+                                    detail,
+                                    point,
+                                    pointPages,
+                                    chapterStartPagesByBook,
+                                )
                                 if (ownerOnly.get() != null) return@withPermit
                                 val reply = explainer.examPointDrill(request)
                                 if (reply.code == "owner_only") {

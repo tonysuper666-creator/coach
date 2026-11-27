@@ -15,10 +15,14 @@ internal object CourseExamPoints {
     private val whitespace = Regex("""[\s\p{Z}]+""")
     private val cjkChar = Regex("""[\u4E00-\u9FFF]""")
     private val trailingPageNum = Regex("""^(.+?\S)(?:\s*[…⋯]+|\s*(?:[.．·•\-–—_]\s*){2,}|\s+)(\d{1,4}|[ivxlcdm]{1,5})\s*$""")
-    private val allowedNumberedPrefix = Regex(
-        """(?i)(?:^|\s)(?:part|type|phase|stage|tier|level|class|grade|order|wave|pillar|generation|act|amendment|rule|model|plan|pillar|version)$""",
+    private val allowedSmallNumberPrefix = Regex(
+        """(?i)(?:^|\s)(?:part|type|phase|stage|tier|level|class|grade|order|wave|pillar|generation|act|amendment|rule|version)$""",
     )
     private val formulaOrNoiseChar = Regex("""[=\[\]{}<>∑∫→←⇒≤≥≠≈±×÷^|\\−+]""")
+    private val courseCodeNoise = Regex("""^[A-Z]{2,6}\d{3,6}\b""")
+    private val functionCallNoise = Regex("""^[A-Za-z]{1,2}\([^)]{1,20}\)$""")
+    private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
+    private val sentenceVerbNoise = Regex("""(?i)\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming)\b""")
     private val nonTopicLabel = Regex(
         """(?i)^(?:example|note|notes|figure|fig\.?|table|box|source|step|case|question|questions|problem|problems|exercise|exercises|answer|answers|solution|solutions|hint|remark|proof|equation|eq\.?|formula|definition|def\.?|theorem|lemma|proposition|corollary|assumption|chart|graph|panel|exhibit|diagram|warning|tip|recall|key|true|false|unclear|uncertain|appendix|part|chapter|section|unit|module|lecture|week)(?:\s+[a-z0-9]+(?:\.[a-z0-9]+)*)?$""",
     )
@@ -55,7 +59,7 @@ internal object CourseExamPoints {
         """^(?:\[\d{1,4}\]|\d{1,3}[.．]\s+.{10,}(?:\d{4}|Press|Journal|Vol\.|pp\.|出版社)|[A-Z][a-z]+,\s+[A-Z]\..{6,}\(\d{4}\))""",
     )
     private val tocTailExcludedWord = Regex(
-        """(?i)(?:^|\s)(?:in|of|at|to|by|for|from|on|with|and|or|as|than|over|under|between|about|after|before|year|years|age|chapter|section|table|figure|fig\.?|box|part|week|step|equation|eq\.?|definition|theorem|example|question|problem|exercise|case|model|stage|phase|level|type|class|grade|tier|group)$""",
+        """(?i)(?:^|\s)(?:in|of|at|to|by|for|from|on|with|and|or|as|than|over|under|between|about|after|before|year|years|age|chapter|section|table|figure|fig\.?|box|part|week|step|equation|eq\.?|definition|theorem|example|question|problem|exercise|case|stage|phase|level|type|class|grade|tier|group)$""",
     )
     private val exerciseHeadingLine = Regex(
         """^(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*\s+)?(?:Exercises(?:\s+and\s+Problems)?|Chapter\s+Exercises|End[- ]of[- ]Chapter\s+(?:Exercises|Questions|Problems)|Review\s+Questions|Study\s+Questions|Discussion\s+Questions|Practice\s+Questions|Comprehension\s+Questions|Analytical\s+(?:Problems|Questions)|Numerical\s+(?:Problems|Questions)|Problems(?:\s+and\s+Applications)?|Questions\s+and\s+Problems|Essay\s+Questions|Short\s+Answer\s+Questions|Multiple\s+Choice\s+Questions|Self[- ]Test|Check\s+Your\s+Understanding|True\s*,\s*False\s*,?\s*(?:or\s+)?(?:Unclear|Uncertain)|True\s+or\s+False|章末习题|本章习题|课后习题|习题|思考题|复习思考题|练习题|判断题|简答题|计算题|案例分析题)\s*[:：.]?$""",
@@ -68,11 +72,25 @@ internal object CourseExamPoints {
         """^(?:#{1,6}\s*)?(?:(?:Chapter|Part|Unit)\s+(?:\d{1,2}|[IVXLC]+)\b|第\s*[0-9一二三四五六七八九十百千]+\s*[章节篇])""",
         RegexOption.IGNORE_CASE,
     )
+    /** Numeric chapter heading such as "3 Demand for health: the Grossman model" (no period/paren after number). */
+    private val numericChapterHeadingLine = Regex(
+        """^(?:#{1,6}\s*)?(\d{1,2})\s+([A-Z\u4e00-\u9fff][^\r\n]{2,110})$""",
+    )
+    /** First numbered section of a chapter, e.g. "3.1 The demand for health". */
+    private val firstSectionOfChapterLine = Regex(
+        """^(?:#{1,6}\s*)?(\d{1,2})\.1\s+([A-Z\u4e00-\u9fff][^\r\n]{2,100})$""",
+    )
+    private val bareChapterNumberLine = Regex("""^(\d{1,2})$""")
+    private val chapterUnitLead = Regex(
+        """(?i)^(?:years?|months?|days?|hours?|minutes?|seconds?|percent|percentage|million|billion|thousand|hundred|dollars?|pounds?|euros?|mg|kg|km|cm|mm|per|vs\.?|and|or|to|of|for|from|with|in|on|at|by)\b""",
+    )
     private val numberedItemLine = Regex("""^\s*(?:\d{1,2}[.)]|(?:Question|Problem|Exercise)\s+\d{1,2}[.:]?)\s+\S""", RegexOption.IGNORE_CASE)
     private val exercisePromptLead = Regex(
-        """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse)\b""",
+        """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse|State|Indicate|Decide)\b""",
     )
     private val subPartMarker = Regex("""(?m)(?:^|\s)(?:\([a-e]\)|[a-e]\.)\s+[A-Z]""")
+
+    private const val MAX_EXERCISE_TAIL_PAGES = 6
 
     fun normalize(text: String): String =
         Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase().replace(whitespace, " ").trim()
@@ -96,11 +114,10 @@ internal object CourseExamPoints {
         val num = pageTok.toIntOrNull()
         if (num != null) {
             if (num in 1900..2099 || num == 0) return false
-            if (allowedNumberedPrefix.containsMatchIn(prefix)) return false
+            if (num in 1..5 && allowedSmallNumberPrefix.containsMatchIn(prefix)) return false
             if (tocTailExcludedWord.containsMatchIn(prefix)) return false
             return true
         }
-        // Lowercase roman numeral page (e.g. "Preface xi") when separated by dots or >=2 spaces, or under 5 chars
         return pageTok.all { it in "ivxlcdm" } && !tocTailExcludedWord.containsMatchIn(prefix)
     }
 
@@ -136,6 +153,75 @@ internal object CourseExamPoints {
     }
 
     /**
+     * Recognizes the opening page of a new chapter using BOTH TOC chapter start pages AND text headings,
+     * including numeric chapter lines like "3 Demand for health: the Grossman model", two-line "3\nDemand...",
+     * and first-section openers like "3.1 ...".
+     */
+    fun isChapterOpeningPage(
+        pageNumber: Int,
+        text: String,
+        chapterStartPages: Set<Int> = emptySet(),
+        excludedChapterNum: Int? = null,
+    ): Boolean {
+        if (pageNumber in chapterStartPages) return true
+        val lines = text.lineSequence()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
+            .toList()
+        if (lines.isEmpty()) return false
+        val topLines = lines.take(6)
+        if (topLines.any { chapterBoundaryLine.containsMatchIn(it) }) return true
+
+        // Do not mistake an exercise continuation page for a chapter opening.
+        if (looksLikeExerciseContinuationPage(text)) return false
+
+        for (line in topLines) {
+            val numMatch = numericChapterHeadingLine.matchEntire(line)
+            if (numMatch != null) {
+                val chNum = numMatch.groupValues[1].toIntOrNull() ?: 0
+                val title = numMatch.groupValues[2].trim()
+                if (chNum in 1..60 && chNum != excludedChapterNum && isPlausibleChapterTitle(title)) return true
+            }
+        }
+        for (i in topLines.indices) {
+            val bareMatch = bareChapterNumberLine.matchEntire(topLines[i])
+            if (bareMatch != null && i + 1 < lines.size) {
+                val chNum = bareMatch.groupValues[1].toIntOrNull() ?: 0
+                val nextTitle = lines[i + 1].trimStart('#', ' ')
+                if (chNum in 1..40 && chNum != excludedChapterNum &&
+                    nextTitle.firstOrNull()?.isLetter() == true &&
+                    isPlausibleChapterTitle(nextTitle) && nextTitle.length >= 6
+                ) return true
+            }
+        }
+        // A "N.1 <Title>" first-section heading on a non-exercise page also proves we have entered chapter N.
+        if (lines.take(15).any { line ->
+                val m = firstSectionOfChapterLine.matchEntire(line) ?: return@any false
+                val chNum = m.groupValues[1].toIntOrNull() ?: 0
+                val title = m.groupValues[2].trim()
+                chNum in 1..60 && chNum != excludedChapterNum && !exerciseHeadingLine.matches(line) && isPlausibleChapterTitle(title)
+            }
+        ) {
+            return true
+        }
+        return false
+    }
+
+    private fun extractExerciseChapterNumber(rawLines: List<String>, cutIndex: Int): Int? {
+        val line = rawLines.getOrNull(cutIndex)?.trim().orEmpty()
+        return Regex("""^(?:#{1,6}\s*)?(\d{1,2})\.\d+""").find(line)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    private fun isPlausibleChapterTitle(title: String): Boolean {
+        if (title.length !in 4..110) return false
+        if (title.last() in setOf('.', '?', '!', '。', '？', '！', ';', '；')) return false
+        if (exerciseHeadingLine.matches(title) || exercisePromptLead.containsMatchIn(title)) return false
+        if (chapterUnitLead.containsMatchIn(title)) return false
+        if (hasTrailingPageNumber(title)) return false
+        return title.any(Char::isLetter)
+    }
+
+    /**
      * Strips end-of-chapter exercises from a single textbook page/block.
      * Returns empty string when the entire page is exercises.
      */
@@ -153,7 +239,7 @@ internal object CourseExamPoints {
     /**
      * Walks consecutive textbook pages in page order so multi-page end-of-chapter exercises
      * (e.g., heading on page N, numbered True/False/Unclear statements on N+1, analytical problems on N+2)
-     * are stripped cleanly up to the next chapter boundary.
+     * are stripped cleanly up to the next chapter boundary — and NEVER past the next chapter.
      */
     fun stripExercisesFromTextbookPages(
         pages: List<ExamTeachingPage>,
@@ -162,6 +248,8 @@ internal object CourseExamPoints {
         val out = mutableListOf<ExamTeachingPage>()
         var currentBook: String? = null
         var inExerciseTail = false
+        var tailPages = 0
+        var exerciseChapterNum: Int? = null
         for (page in pages) {
             if (page.role != CourseMaterialRole.CORE_TEXTBOOK) {
                 out += page
@@ -170,29 +258,50 @@ internal object CourseExamPoints {
             if (page.bookId != currentBook) {
                 currentBook = page.bookId
                 inExerciseTail = false
+                tailPages = 0
+                exerciseChapterNum = null
             }
             val chapterStarts = chapterStartPagesByBook[page.bookId].orEmpty()
-            val rawLines = page.text.lines()
-            val startsChapter = page.page in chapterStarts ||
-                rawLines.map(String::trim).filter(String::isNotEmpty).take(4).any { chapterBoundaryLine.containsMatchIn(it) }
+            val startsChapter = isChapterOpeningPage(page.page, page.text, chapterStarts, if (inExerciseTail) exerciseChapterNum else null)
             if (startsChapter) {
                 inExerciseTail = false
+                tailPages = 0
+                exerciseChapterNum = null
             }
-            if (inExerciseTail) {
-                // Stay in exercise tail until a new chapter boundary appears.
-                continue
-            }
+            val rawLines = page.text.lines()
             val cutIndex = findExerciseStartLineIndex(rawLines)
+            val looksExercise = looksLikeExerciseContinuationPage(page.text)
+            if (inExerciseTail) {
+                if (looksExercise || cutIndex == 0 || tailPages < MAX_EXERCISE_TAIL_PAGES) {
+                    // If a page after the first tail page has rich narrative prose and zero numbered items,
+                    // we have safely re-entered body text even if the chapter heading wasn't recognized.
+                    if (tailPages >= 1 && !looksExercise && cutIndex < 0 && looksLikeNarrativeBodyPage(page.text)) {
+                        inExerciseTail = false
+                        tailPages = 0
+                        exerciseChapterNum = null
+                    } else {
+                        tailPages++
+                        continue
+                    }
+                } else {
+                    inExerciseTail = false
+                    tailPages = 0
+                    exerciseChapterNum = null
+                }
+            }
             if (cutIndex >= 0) {
                 inExerciseTail = true
+                tailPages = 1
+                exerciseChapterNum = extractExerciseChapterNumber(rawLines, cutIndex)
                 val before = rawLines.subList(0, cutIndex).joinToString("\n").trim()
                 if (hasSubstantiveBody(before)) {
                     out += page.copy(text = before)
                 }
                 continue
             }
-            if (looksLikeExerciseContinuationPage(page.text)) {
+            if (looksExercise) {
                 inExerciseTail = true
+                tailPages = 1
                 continue
             }
             out += page
@@ -200,34 +309,69 @@ internal object CourseExamPoints {
         return out
     }
 
-    /** Compute the set of textbook pages (or cleaned text per page) after stripping TOC and exercise tails. */
+    /** Compute cleaned textbook pages by page number after stripping TOC and bounded chapter-end exercise tails. */
     fun cleanTextbookPagesByNumber(
         pages: List<BookPage>,
         chapterStartPages: Set<Int> = emptySet(),
     ): Map<Int, String> {
         val result = LinkedHashMap<Int, String>(pages.size)
         var inExerciseTail = false
+        var tailPages = 0
+        var exerciseChapterNum: Int? = null
         for (page in pages.sortedBy { it.number }) {
             if (isTocOrIndexPage(page.text)) continue
+            val startsChapter = isChapterOpeningPage(page.number, page.text, chapterStartPages, if (inExerciseTail) exerciseChapterNum else null)
+            if (startsChapter) {
+                inExerciseTail = false
+                tailPages = 0
+                exerciseChapterNum = null
+            }
             val rawLines = page.text.lines()
-            val startsChapter = page.number in chapterStartPages ||
-                rawLines.map(String::trim).filter(String::isNotEmpty).take(4).any { chapterBoundaryLine.containsMatchIn(it) }
-            if (startsChapter) inExerciseTail = false
-            if (inExerciseTail) continue
             val cutIndex = findExerciseStartLineIndex(rawLines)
+            val looksExercise = looksLikeExerciseContinuationPage(page.text)
+            if (inExerciseTail) {
+                if (looksExercise || cutIndex == 0 || tailPages < MAX_EXERCISE_TAIL_PAGES) {
+                    if (tailPages >= 1 && !looksExercise && cutIndex < 0 && looksLikeNarrativeBodyPage(page.text)) {
+                        inExerciseTail = false
+                        tailPages = 0
+                        exerciseChapterNum = null
+                    } else {
+                        tailPages++
+                        continue
+                    }
+                } else {
+                    inExerciseTail = false
+                    tailPages = 0
+                    exerciseChapterNum = null
+                }
+            }
             if (cutIndex >= 0) {
                 inExerciseTail = true
+                tailPages = 1
+                exerciseChapterNum = extractExerciseChapterNumber(rawLines, cutIndex)
                 val before = rawLines.subList(0, cutIndex).joinToString("\n").trim()
                 if (hasSubstantiveBody(before)) result[page.number] = before
                 continue
             }
-            if (looksLikeExerciseContinuationPage(page.text)) {
+            if (looksExercise) {
                 inExerciseTail = true
+                tailPages = 1
                 continue
             }
             result[page.number] = page.text
         }
         return result
+    }
+
+    private fun looksLikeNarrativeBodyPage(text: String): Boolean {
+        val lines = text.lineSequence().map(String::trim).filter {
+            it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) && !ExplainClassifier.isPageNumber(it)
+        }.toList()
+        if (lines.any { numberedItemLine.containsMatchIn(it) }) return false
+        if (subPartMarker.containsMatchIn(text)) return false
+        if (text.count { it == '?' || it == '？' } >= 3) return false
+        val proseChars = lines.filter { it.length >= 60 }.sumOf { it.length }
+        return proseChars >= 500
     }
 
     private fun findExerciseStartLineIndex(rawLines: List<String>): Int {
@@ -280,6 +424,8 @@ internal object CourseExamPoints {
             return false
         }
         if (formulaOrNoiseChar.containsMatchIn(heading)) return false
+        if (courseCodeNoise.containsMatchIn(heading) || functionCallNoise.matches(heading)) return false
+        if (journalCitationNoise.containsMatchIn(heading)) return false
         val first = heading.first()
         // Reject lowercase-initial fragments ("to live", "in the past", "regime are clear", ...)
         if (first in 'a'..'z') return false
@@ -288,13 +434,18 @@ internal object CourseExamPoints {
         val hasCjk = cjkChar.containsMatchIn(heading)
         // Reject short Latin fragments of <= 6 characters ("Model", "Movies", "j=1", "C2", ...)
         if (!hasCjk && heading.length <= 6) return false
+        // Reject all-uppercase running headers / section banners ("HEALTH ECONOMICS", "GRANDPA", ...)
+        if (!hasCjk) {
+            val lettersOnly = heading.filter(Char::isLetter)
+            if (lettersOnly.length >= 5 && lettersOnly.all(Char::isUpperCase)) return false
+        }
         val key = normalize(heading)
         if (key.length < 2 || key in boilerplate) return false
         if (nonTopicLabel.matches(heading)) return false
-        // Bare first line of a page (not markdown, not definition, not numbered): reject sentence fragments
-        if (!markdown && !defined && !numbered) {
+        if (!hasCjk) {
             val words = heading.split(whitespace)
-            if (!hasCjk && words.size > 7) return false
+            if (!markdown && !defined && !numbered && words.size > 7) return false
+            if (words.size > 8 && sentenceVerbNoise.containsMatchIn(heading)) return false
         }
         return true
     }

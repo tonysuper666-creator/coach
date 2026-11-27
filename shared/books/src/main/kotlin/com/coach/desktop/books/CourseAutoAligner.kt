@@ -25,10 +25,23 @@ internal object CourseAutoAligner {
     private val syllabusZhWeekLineRegex = Regex(
         """^(?:\s*[-*#•|]*\s*)第\s*(\d{1,2})(?:\s*[-–—到至]\s*(\d{1,2}))?\s*周(?:\s*[:：\-—.|]\s*(.*)|\s+(.+)|\s*)$""",
     )
-    private val chapterTokenRegex = Regex("""(?i)\b(?:ch(?:apter)?s?\.?|第)\s*(\d{1,2})\b""")
+    private val chapterTokenRegex = Regex("""(?i)\b(?:ch(?:apter)?s?\.?)\s*(\d{1,2})\b|第\s*(\d{1,2})\s*章""")
     private val leadingChapterNumRegex = Regex("""^(?:chapter\s+|第\s*)?(\d{1,2})(?:[\s.:：—\-]+|章)""", RegexOption.IGNORE_CASE)
-    private val chapterSequenceRegex = Regex(
-        """(?i)(?:\b(?:chapters?|chs?\.?)\s*|第\s*)(\d{1,2}(?:\s*(?:[-–—~到至]|to)\s*\d{1,2})?(?:\s*(?:[,，、&/]|\band\b)\s*\d{1,2}(?:\s*(?:[-–—~到至]|to)\s*\d{1,2})?)*)(?:\s*章)?""",
+    private val chapterEnSequenceRegex = Regex(
+        """(?i)\b(?:chapters?|chs?\.?)\s*(\d{1,2}(?:\s*(?:[-–—~]|to)\s*\d{1,2})?(?:\s*(?:[,&/]|\band\b)\s*\d{1,2}(?:\s*(?:[-–—~]|to)\s*\d{1,2})?)*)""",
+    )
+    private val chapterZhSequenceRegex = Regex(
+        """第\s*(\d{1,2}(?:\s*(?:[-–—~到至])\s*\d{1,2})?(?:\s*(?:[,，、&/和与])\s*\d{1,2}(?:\s*(?:[-–—~到至])\s*\d{1,2})?)*)\s*章""",
+    )
+    private val weekMentionRegex = Regex("""(?i)\b(?:week|wk)\s*(\d{1,2})\b|第\s*(\d{1,2})\s*周""")
+    private val overviewSlideRegex = Regex(
+        """(?i)\b(?:course\s+(?:outline|schedule|overview|plan|syllabus)|module\s+(?:outline|schedule|overview)|lecture\s+schedule|timetable|assessment\s+schedule)\b|课程安排|教学进度|课程大纲""",
+    )
+    private val crossRefChapterLineRegex = Regex(
+        """(?i)\b(?:see|recall\s+from|covered\s+in|discussed\s+in|return\s+to|later\s+in|earlier\s+in|refer\s+to|preview\s+of)\s+(?:chapters?|chs?\.?)\b|\b(?:next|previous|last)\s+week\b""",
+    )
+    private val slideReadingLineRegex = Regex(
+        """(?i)\b(?:reading|readings|textbook|bht|required|recommended|chapters?|chs?\.?)\b|第\s*\d{1,2}.*章""",
     )
     private val chapterHeadingRegex = Regex("""(?i)^chapter\s+\d+|^第\s*[0-9一二三四五六七八九十]+\s*章""")
     private val sectionHeadingLineRegex = Regex("""^(?:#{2,4}\s+\S.*|\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+\S.*)""")
@@ -42,6 +55,8 @@ internal object CourseAutoAligner {
         "unit", "class", "seminar", "workshop", "problem", "problems", "exercise", "exercises",
         "question", "questions", "answer", "answers", "example", "examples", "case", "study",
         "model", "models", "theory", "analysis", "empirical", "evidence", "data", "policy",
+        "economics", "economic", "market", "markets", "system", "systems", "care", "public",
+        "private", "role", "issues", "perspectives", "basic", "basics", "advanced", "modern",
         "are", "was", "were", "have", "has", "had", "will", "can", "may", "not", "all", "its",
     )
 
@@ -66,24 +81,28 @@ internal object CourseAutoAligner {
         if (text.isBlank()) return emptySet()
         val out = linkedSetOf<Int>()
         val rangeSep = Regex("""\s*(?:[-–—~到至]|(?i)\bto\b)\s*""")
-        val itemSep = Regex("""\s*(?:[,，、&/]|(?i)\band\b)\s*""")
-        for (match in chapterSequenceRegex.findAll(text)) {
-            val expr = match.groupValues[1]
-            for (part in expr.split(itemSep)) {
-                val trimmed = part.trim()
-                if (trimmed.isEmpty()) continue
-                val bounds = trimmed.split(rangeSep).mapNotNull { it.trim().toIntOrNull() }
-                if (bounds.size == 2) {
-                    val start = bounds[0]
-                    val end = bounds[1]
-                    if (start in 1..60 && end in start..60 && (end - start) <= 15) {
-                        for (n in start..end) out += n
+        val itemSep = Regex("""\s*(?:[,，、&/和与]|(?i)\band\b)\s*""")
+        fun collect(regex: Regex) {
+            for (match in regex.findAll(text)) {
+                val expr = match.groupValues[1]
+                for (part in expr.split(itemSep)) {
+                    val trimmed = part.trim()
+                    if (trimmed.isEmpty()) continue
+                    val bounds = trimmed.split(rangeSep).mapNotNull { it.trim().toIntOrNull() }
+                    if (bounds.size == 2) {
+                        val start = bounds[0]
+                        val end = bounds[1]
+                        if (start in 1..60 && end in start..60 && (end - start) <= 15) {
+                            for (n in start..end) out += n
+                        }
+                    } else if (bounds.size == 1 && bounds[0] in 1..60) {
+                        out += bounds[0]
                     }
-                } else if (bounds.size == 1 && bounds[0] in 1..60) {
-                    out += bounds[0]
                 }
             }
         }
+        collect(chapterEnSequenceRegex)
+        collect(chapterZhSequenceRegex)
         return out
     }
 
@@ -130,7 +149,6 @@ internal object CourseAutoAligner {
                 }
             }
             if (activeWeeks.isNotEmpty() && activeLineBudget > 0) {
-                // Stop absorbing lines if a major unrelated section heading starts.
                 if (Regex("""(?i)^(?:assessment|grading|office\s+hours|plagiarism|academic\s+integrity|bibliography)\b""").containsMatchIn(trimmed)) {
                     activeWeeks = emptyList()
                     activeLineBudget = 0
@@ -201,7 +219,7 @@ internal object CourseAutoAligner {
         val textbookChapters = textbookMaterials.flatMap { loadTextbookChapters(db, it) }
         val firstChapterByBook = textbookChapters.distinctBy { it.bookId }.associateBy { it.bookId }
 
-        // Words appearing in the course/textbook title or in >35% of chapters are too generic to match chapters alone.
+        // Words appearing in the course/textbook title or in >30% of chapters are too generic to match chapters alone.
         val genericCourseWords = buildSet {
             addAll(keywordsOf(current.title))
             textbookMaterials.forEach { addAll(keywordsOf(it.title)) }
@@ -210,9 +228,16 @@ internal object CourseAutoAligner {
                 for (ch in textbookChapters) {
                     for (kw in ch.keywords) docFreq[kw] = (docFreq[kw] ?: 0) + 1
                 }
-                val threshold = (textbookChapters.size * 35) / 100
+                val threshold = (textbookChapters.size * 30) / 100
                 docFreq.forEach { (kw, count) -> if (count > threshold && count >= 3) add(kw) }
             }
+        }
+
+        // Precompute authoritative syllabus chapter assignments per week so one week never steals another week's chapters.
+        val syllabusChaptersByWeek = syllabusByWeek.mapValues { (_, block) -> extractChapterNumbers(block.fullText) }
+        val chapterOwnersFromSyllabus = HashMap<Int, MutableSet<Int>>()
+        for ((wk, chNums) in syllabusChaptersByWeek) {
+            for (chNum in chNums) chapterOwnersFromSyllabus.getOrPut(chNum) { mutableSetOf() }.add(wk)
         }
 
         val coveredChapterKeys = mutableSetOf<Triple<String, Int, String>>()
@@ -245,48 +270,83 @@ internal object CourseAutoAligner {
                 ?: matsForWeek.firstOrNull()?.let { cleanTopicTitle(it.title, wk) }
                 ?: "第 $wk 周专题"
 
-            val weekExplicitChapters = linkedSetOf<Int>()
-            val weekHeadingLines = mutableListOf<String>()
-            val weekHeadingNorms = mutableListOf<String>()
+            val syllabusChapters = syllabusChaptersByWeek[wk].orEmpty()
+            val slideReadingChapters = linkedSetOf<Int>()
+            val primaryTitleText = buildList {
+                if (syllabusBlock != null) add(syllabusBlock.fullText) else add(weekTitle)
+                for (m in matsForWeek) add(cleanTopicTitle(m.title, wk))
+            }
+            val slideTitlesNorm = mutableListOf<String>()
             if (syllabusBlock != null) {
-                weekExplicitChapters += extractChapterNumbers(syllabusBlock.fullText)
-                weekHeadingLines += syllabusBlock.fullText.lines().map(String::trim).filter(String::isNotEmpty)
+                slideTitlesNorm += CourseExamPoints.normalize(syllabusBlock.fullText)
             } else {
-                weekExplicitChapters += extractChapterNumbers(weekTitle)
-                weekHeadingLines += weekTitle
+                slideTitlesNorm += CourseExamPoints.normalize(weekTitle)
             }
 
-            val weekKeywords = linkedSetOf<String>()
-            weekKeywords += keywordsOf(syllabusBlock?.fullText ?: weekTitle)
-            for (m in matsForWeek) {
-                val effRole = specByBook[m.bookId]?.role ?: m.role
-                weekKeywords += keywordsOf(m.title)
-                weekHeadingLines += m.title
-                weekExplicitChapters += extractChapterNumbers(m.title)
-                if (effRole != CourseMaterialRole.CORE_TEXTBOOK && effRole != CourseMaterialRole.SYLLABUS) {
-                    val matPages = CourseStore.loadPagesForBook(db, m.bookId, maxPages = 120)
-                    for (p in matPages) {
-                        val cleanText = if (effRole == CourseMaterialRole.USER_NOTES) {
-                            CourseClientGates.sanitizeUserNote(p.text).cleanText
-                        } else {
-                            p.text
-                        }
-                        weekExplicitChapters += extractChapterNumbers(cleanText)
-                        val nonEmpty = cleanText.lineSequence().map(String::trim).filter {
-                            it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) && !ExplainClassifier.isPageNumber(it)
-                        }.take(4).toList()
-                        for (headingLine in nonEmpty) {
-                            weekHeadingLines += headingLine
-                            weekKeywords += keywordsOf(headingLine)
-                        }
-                    }
-                } else {
-                    weekKeywords += keywordsOf(previewByBook[m.bookId].orEmpty().take(500))
+            // Prefer lecture slides/handouts for topic/section matching; only fall back to tutorials/keys if no slides exist.
+            val slideLikeMats = matsForWeek.filter {
+                val r = specByBook[it.bookId]?.role ?: it.role
+                r in setOf(CourseMaterialRole.LECTURE_SLIDES, CourseMaterialRole.HANDOUT)
+            }.ifEmpty {
+                matsForWeek.filter {
+                    val r = specByBook[it.bookId]?.role ?: it.role
+                    r !in setOf(CourseMaterialRole.CORE_TEXTBOOK, CourseMaterialRole.SYLLABUS)
                 }
             }
-            for (h in weekHeadingLines) weekHeadingNorms += CourseExamPoints.normalize(h)
-            val weekHeadingTextNorm = weekHeadingNorms.joinToString("\n")
-            val weekHeadingKeywordSets = weekHeadingLines.map { keywordsOf(it) - genericCourseWords }.filter { it.isNotEmpty() }
+            for (m in slideLikeMats) {
+                val effRole = specByBook[m.bookId]?.role ?: m.role
+                slideTitlesNorm += CourseExamPoints.normalize(cleanTopicTitle(m.title, wk))
+                slideReadingChapters += extractChapterNumbers(m.title)
+                val matPages = CourseStore.loadPagesForBook(db, m.bookId, maxPages = 120)
+                for ((pageIdx, p) in matPages.withIndex()) {
+                    val cleanText = if (effRole == CourseMaterialRole.USER_NOTES) {
+                        CourseClientGates.sanitizeUserNote(p.text).cleanText
+                    } else {
+                        p.text
+                    }
+                    // Skip semester-wide outline / schedule slides that list many weeks or many chapters at once.
+                    val weeksMentioned = weekMentionRegex.findAll(cleanText)
+                        .mapNotNull { it.groupValues[1].toIntOrNull() ?: it.groupValues[2].toIntOrNull() }
+                        .toSet()
+                    val isOverviewSlide = overviewSlideRegex.containsMatchIn(cleanText) ||
+                        weeksMentioned.size >= 2 ||
+                        (weeksMentioned.size == 1 && wk !in weeksMentioned)
+                    if (isOverviewSlide) continue
+
+                    val nonEmpty = cleanText.lineSequence().map(String::trim).filter {
+                        it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) && !ExplainClassifier.isPageNumber(it)
+                    }.toList()
+                    // Capture only the slide title (first short heading line on each slide) for exact section matching.
+                    val firstTitle = nonEmpty.firstOrNull { line ->
+                        line.length in 5..90 && line.last() !in setOf('.', '?', '!', '。', '？', '！')
+                    }
+                    if (firstTitle != null) {
+                        slideTitlesNorm += CourseExamPoints.normalize(firstTitle)
+                    }
+                    // Extract explicit chapter reading assignments ONLY from top intro slides or explicit reading lines,
+                    // never from passing cross-references ("see chapter 18") or multi-chapter overview lists.
+                    if (pageIdx < 5) {
+                        val pageChapters = linkedSetOf<Int>()
+                        for (line in nonEmpty) {
+                            if (crossRefChapterLineRegex.containsMatchIn(line)) continue
+                            val lineWeeks = weekMentionRegex.findAll(line)
+                                .mapNotNull { it.groupValues[1].toIntOrNull() ?: it.groupValues[2].toIntOrNull() }
+                                .toSet()
+                            if (lineWeeks.isNotEmpty() && wk !in lineWeeks) continue
+                            if (slideReadingLineRegex.containsMatchIn(line)) {
+                                pageChapters += extractChapterNumbers(line)
+                            }
+                        }
+                        if (pageChapters.size in 1..3) {
+                            slideReadingChapters += pageChapters
+                        }
+                    }
+                }
+            }
+
+            // Focused keywords ONLY from the syllabus week entry and material titles (never 600 body words!).
+            val focusedWeekKeywords = primaryTitleText.flatMap { keywordsOf(it) }.toSet()
+            val slideTitlesJoined = slideTitlesNorm.joinToString("\n")
 
             val status = if (hasPrimaryTeachingMaterial || matsForWeek.isNotEmpty()) {
                 CourseTopicStatus.EXAMINABLE
@@ -307,23 +367,35 @@ internal object CourseAutoAligner {
                 )
             }
             for (ch in textbookChapters) {
+                val syllabusOwners = ch.chapterNum?.let { chapterOwnersFromSyllabus[it] }.orEmpty()
+                val assignedElsewhereBySyllabus = syllabusOwners.isNotEmpty() && wk !in syllabusOwners
+
+                val explicitSyllabusMatch = ch.chapterNum != null && ch.chapterNum in syllabusChapters
+                val explicitSlideMatch = !assignedElsewhereBySyllabus && ch.chapterNum != null && ch.chapterNum in slideReadingChapters
+
+                val cleanChTitle = ch.title
+                    .replace(Regex("""(?i)^(?:chapter\s+\d+|第\s*\d+\s*章|\d{1,2})[\s.:：—\-]+"""), "")
+                    .trim()
+                val normChTitle = CourseExamPoints.normalize(cleanChTitle)
+                val exactTitlePhraseMatch = !assignedElsewhereBySyllabus &&
+                    normChTitle.length >= 8 &&
+                    slideTitlesNorm.any { normChTitle in it }
+
                 val specificTitleKw = (ch.keywords - genericCourseWords).ifEmpty { ch.keywords }
-                val overlaps = specificTitleKw.count { it in weekKeywords }
-                val sameChapterNum = ch.chapterNum != null && ch.chapterNum in weekExplicitChapters
-                val sectionMatched = ch.sectionTitles.any { secTitle ->
+                val titleHits = specificTitleKw.count { it in focusedWeekKeywords }
+                val titleKeywordMatch = !assignedElsewhereBySyllabus &&
+                    titleHits >= 2 &&
+                    titleHits * 2 >= specificTitleKw.size
+
+                // High-precision section match: exact normalized section phrase (len >= 12) in a slide title or syllabus block.
+                val sectionMatched = !assignedElsewhereBySyllabus && ch.sectionTitles.any { secTitle ->
                     val stripped = secTitle.replace(Regex("""^\d{1,2}(?:\.\d{1,2})+\s+"""), "").trim()
                     val normSec = CourseExamPoints.normalize(stripped)
-                    if (normSec.length >= 8 && normSec in weekHeadingTextNorm) return@any true
-                    val secSpecific = keywordsOf(stripped) - genericCourseWords
-                    if (secSpecific.size >= 2) {
-                        val lineHit = weekHeadingKeywordSets.any { lineKw -> secSpecific.count { it in lineKw } >= 2 }
-                        if (lineHit) return@any true
-                        if (secSpecific.size >= 3 && secSpecific.count { it in weekKeywords } >= 3) return@any true
-                    }
-                    false
+                    normSec.length >= 12 && normSec in slideTitlesJoined
                 }
-                val excludedByHint = !sameChapterNum && ch.keywords.any { it in excludedHints } && overlaps < 2 && !sectionMatched
-                if ((sameChapterNum || overlaps >= 2 || sectionMatched) && !excludedByHint) {
+
+                val excludedByHint = !explicitSyllabusMatch && ch.keywords.any { it in excludedHints } && !titleKeywordMatch && !sectionMatched
+                if ((explicitSyllabusMatch || explicitSlideMatch || exactTitlePhraseMatch || titleKeywordMatch || sectionMatched) && !excludedByHint) {
                     coveredChapterKeys += Triple(ch.bookId, ch.startPage, ch.title)
                     links += CourseTopicLinkPlan(
                         bookId = ch.bookId,
@@ -678,8 +750,10 @@ internal object CourseAutoAligner {
         return stripped.ifBlank { "第 $weekNum 周专题" }
     }
 
-    private fun chapterNumberOf(text: String): Int? =
-        chapterTokenRegex.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..60 }
+    private fun chapterNumberOf(text: String): Int? {
+        val m = chapterTokenRegex.find(text) ?: return null
+        return (m.groupValues[1].toIntOrNull() ?: m.groupValues[2].toIntOrNull())?.takeIf { it in 1..60 }
+    }
 
     private fun leadingChapterNum(text: String): Int? =
         leadingChapterNumRegex.find(text.trim())?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..60 }
@@ -806,7 +880,15 @@ internal object CourseAutoAligner {
         detail: CourseDetailSnapshot,
         topic: CourseTopicEntry,
         pagesByBook: Map<String, List<BookPage>>,
+        chapterStartPagesByBook: Map<String, Set<Int>> = emptyMap(),
     ): JsonObject {
+        val derivedStartsByBook = detail.allTopics
+            .asSequence()
+            .filter { it.weekLabel != CourseExamPoints.LABEL }
+            .flatMap { it.sources.asSequence() }
+            .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            .groupBy({ it.bookId }, { it.startPage })
+            .mapValues { (_, starts) -> starts.toSet() }
         val cleanTextbookByBook = HashMap<String, Map<Int, String>>()
         val candidateBlocks = mutableListOf<Triple<CourseTopicSourceLink, Int, String>>()
         for (src in topic.sources) {
@@ -814,7 +896,9 @@ internal object CourseAutoAligner {
             val windowPages = allPages.filter { it.number in src.startPage..src.endPage }
             if (src.role == CourseMaterialRole.CORE_TEXTBOOK) {
                 val cleaned = cleanTextbookByBook.getOrPut(src.bookId) {
-                    CourseExamPoints.cleanTextbookPagesByNumber(allPages)
+                    val chapterStarts = chapterStartPagesByBook[src.bookId].orEmpty() +
+                        derivedStartsByBook[src.bookId].orEmpty()
+                    CourseExamPoints.cleanTextbookPagesByNumber(allPages, chapterStarts)
                 }
                 for (p in windowPages.take(20)) {
                     val text = cleaned[p.number].orEmpty()

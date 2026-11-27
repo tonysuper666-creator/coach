@@ -121,9 +121,19 @@ object ExamPointDrillGate {
         """^(?:#{1,6}\s*)?(?:(?:Chapter|Part|Unit)\s+(?:\d{1,2}|[IVXLC]+)\b|第\s*[0-9一二三四五六七八九十百千]+\s*[章节篇])""",
         RegexOption.IGNORE_CASE,
     )
+    private val numericChapterHeadingLine = Regex(
+        """^(?:#{1,6}\s*)?(\d{1,2})\s+([A-Z\u4e00-\u9fff][^\r\n]{2,110})$""",
+    )
+    private val firstSectionOfChapterLine = Regex(
+        """^(?:#{1,6}\s*)?(\d{1,2})\.1\s+([A-Z\u4e00-\u9fff][^\r\n]{2,100})$""",
+    )
+    private val bareChapterNumberLine = Regex("""^(\d{1,2})$""")
+    private val chapterUnitLead = Regex(
+        """(?i)^(?:years?|months?|days?|hours?|minutes?|seconds?|percent|percentage|million|billion|thousand|hundred|dollars?|pounds?|euros?|mg|kg|km|cm|mm|per|vs\.?|and|or|to|of|for|from|with|in|on|at|by)\b""",
+    )
     private val numberedItemLine = Regex("""^\s*(?:\d{1,2}[.)]|(?:Question|Problem|Exercise)\s+\d{1,2}[.:]?)\s+\S""", RegexOption.IGNORE_CASE)
     private val exercisePromptLead = Regex(
-        """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse)\b""",
+        """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse|State|Indicate|Decide)\b""",
     )
     private val subPartMarker = Regex("""(?m)(?:^|\s)(?:\([a-e]\)|[a-e]\.)\s+[A-Z]""")
 
@@ -132,13 +142,6 @@ object ExamPointDrillGate {
     )
     private val cjkRegex = Regex("""[\u4E00-\u9FFF]""")
     private val enWordRegex = Regex("""[a-z0-9]+""")
-    private val topicGenericWords = setOf(
-        "the", "and", "for", "with", "from", "into", "that", "this", "these", "those", "under", "over",
-        "care", "health", "model", "models", "theory", "effect", "effects", "policy", "system", "systems",
-        "market", "markets", "analysis", "economics", "economic", "hypothesis", "principle", "concept",
-        "method", "approach", "process", "factor", "factors", "level", "rate", "type", "form", "case",
-        "study", "chapter", "section", "overview", "introduction", "basic", "general", "simple", "real",
-    )
     private val stemStopWords = setOf(
         "the", "and", "for", "with", "from", "into", "that", "this", "these", "those", "which", "what",
         "why", "how", "when", "where", "who", "does", "do", "did", "is", "are", "was", "were", "be",
@@ -147,7 +150,6 @@ object ExamPointDrillGate {
         "correct", "incorrect", "describes", "explains", "defines", "definition", "about", "under",
         "when", "while", "because", "therefore", "however", "between", "among", "not", "only", "all",
     )
-    private val parentheticalAliasRegex = Regex("""\(([A-Za-z][A-Za-z0-9-]{1,10})\)""")
 
     fun essayEligible(examFormat: String, techniques: List<String>): Boolean {
         val named = techniques.map { it.trim().uppercase() }.filter { it.isNotEmpty() }
@@ -218,6 +220,44 @@ object ExamPointDrillGate {
         return promptLike >= 2 || (hasSubParts && questionMarks >= 2) || questionMarks >= 4
     }
 
+    private fun isChapterOpeningBlock(text: String): Boolean {
+        val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.isEmpty()) return false
+        val topLines = lines.take(6)
+        if (topLines.any { chapterBoundaryLine.containsMatchIn(it) }) return true
+        if (looksLikeExerciseBlock(text)) return false
+        for (i in topLines.indices) {
+            val line = topLines[i]
+            val numMatch = numericChapterHeadingLine.matchEntire(line)
+            if (numMatch != null) {
+                val chNum = numMatch.groupValues[1].toIntOrNull() ?: 0
+                val title = numMatch.groupValues[2].trim()
+                if (chNum in 1..60 && isPlausibleChapterTitle(title)) return true
+            }
+            val bareMatch = bareChapterNumberLine.matchEntire(line)
+            if (bareMatch != null && i + 1 < lines.size) {
+                val chNum = bareMatch.groupValues[1].toIntOrNull() ?: 0
+                val nextTitle = lines[i + 1].trimStart('#', ' ')
+                if (chNum in 1..60 && isPlausibleChapterTitle(nextTitle) && nextTitle.length >= 6) return true
+            }
+        }
+        return lines.take(15).any { line ->
+            val m = firstSectionOfChapterLine.matchEntire(line) ?: return@any false
+            val chNum = m.groupValues[1].toIntOrNull() ?: 0
+            val title = m.groupValues[2].trim()
+            chNum in 1..60 && !exerciseHeadingLine.matches(line) && isPlausibleChapterTitle(title)
+        }
+    }
+
+    private fun isPlausibleChapterTitle(title: String): Boolean {
+        if (title.length !in 4..110) return false
+        if (title.last() in setOf('.', '?', '!', '。', '？', '！', ';', '；')) return false
+        if (exerciseHeadingLine.matches(title) || exercisePromptLead.containsMatchIn(title)) return false
+        if (chapterUnitLead.containsMatchIn(title)) return false
+        if (hasTrailingPageNumber(title)) return false
+        return title.any(Char::isLetter)
+    }
+
     fun prepare(blocks: List<CourseMaterialTextBlock>): Pair<List<CourseMaterialTextBlock>, String?> {
         var droppedPastExam = false
         var droppedToc = false
@@ -227,6 +267,7 @@ object ExamPointDrillGate {
         var currentTextbook: String? = null
         var lastTextbookPage = -1
         var inExerciseTail = false
+        var tailPages = 0
         for (block in sorted) {
             if (block.role.equals("PAST_EXAM", ignoreCase = true) || CourseQualityGates.isPastExamTitle(block.bookTitle)) {
                 droppedPastExam = true
@@ -238,19 +279,39 @@ object ExamPointDrillGate {
             }
             if (block.role == "CORE_TEXTBOOK") {
                 val consecutive = block.bookId == currentTextbook && block.page in lastTextbookPage..(lastTextbookPage + 2)
-                if (!consecutive) inExerciseTail = false
+                if (!consecutive) {
+                    inExerciseTail = false
+                    tailPages = 0
+                }
                 currentTextbook = block.bookId
                 lastTextbookPage = block.page
-                val startsChapter = block.text.lineSequence().map(String::trim).filter(String::isNotEmpty)
-                    .take(4).any { chapterBoundaryLine.containsMatchIn(it) }
-                if (startsChapter) inExerciseTail = false
-                if (inExerciseTail) {
-                    droppedExercise = true
-                    continue
+                if (isChapterOpeningBlock(block.text)) {
+                    inExerciseTail = false
+                    tailPages = 0
                 }
                 val stripped = stripExerciseText(block.text)
+                if (inExerciseTail) {
+                    val stillExercise = stripped != block.text || looksLikeExerciseBlock(block.text)
+                    if (stillExercise || tailPages < 6) {
+                        val hasNoExercise = !stillExercise && block.text.lines().none { numberedItemLine.containsMatchIn(it.trim()) } &&
+                            !subPartMarker.containsMatchIn(block.text) && block.text.count { it == '?' || it == '？' } < 3 &&
+                            block.text.length >= 500
+                        if (tailPages >= 1 && hasNoExercise) {
+                            inExerciseTail = false
+                            tailPages = 0
+                        } else {
+                            tailPages++
+                            droppedExercise = true
+                            continue
+                        }
+                    } else {
+                        inExerciseTail = false
+                        tailPages = 0
+                    }
+                }
                 if (stripped != block.text) {
                     inExerciseTail = true
+                    tailPages = 1
                     if (stripped.isBlank()) {
                         droppedExercise = true
                         continue
@@ -522,7 +583,7 @@ object ExamPointDrillGate {
         byBook: Map<String, List<CourseMaterialTextBlock>>,
         textbookIds: Set<String>,
         sourceTexts: List<String>,
-        topicTitle: String = "",
+        @Suppress("UNUSED_PARAMETER") topicTitle: String = "",
     ): String? {
         if (draft.stem.isBlank() || draft.options.size != 4) return "malformed"
         if (draft.options.map { it.letter } != letters) return "malformed"
@@ -530,7 +591,6 @@ object ExamPointDrillGate {
         if (draft.options.any { it.text.isBlank() || it.reason.isBlank() }) return "malformed"
         if (tocQuestionStemRegex.containsMatchIn(draft.stem)) return "toc_question"
         if (!CourseQualityGates.auditZeroOverlap(listOf(draft.stem), sourceTexts).passed) return "recall_stem"
-        if (topicTitle.isNotBlank() && topicTitle != "这个考点" && !isOnTopic(draft, topicTitle)) return "off_topic"
         for (opt in draft.options) {
             val verified = verifiedSupport(opt.citation, byPage, byBook, textbookIds) ?: return "source_mismatch"
             if (!isSubstantiveQuote(verified.quote)) return "source_mismatch"
@@ -573,43 +633,6 @@ object ExamPointDrillGate {
         }
         val words = enWordRegex.findAll(trimmed.lowercase()).count()
         return words >= 4 || (trimmed.length >= 24 && words >= 3)
-    }
-
-    private fun isOnTopic(draft: ChoiceDraft, topicTitle: String): Boolean {
-        val aliases = parentheticalAliasRegex.findAll(topicTitle).map { it.groupValues[1].lowercase() }.toList()
-        val strippedTitle = parentheticalAliasRegex.replace(topicTitle, " ").trim()
-        val correctOpt = draft.options.firstOrNull { it.correct }
-        val focusText = buildString {
-            append(draft.stem).append(' ')
-            for (opt in draft.options) append(opt.text).append(' ')
-            if (correctOpt != null) {
-                append(correctOpt.reason).append(' ')
-                append(correctOpt.citation?.str("quote").orEmpty())
-            }
-        }.lowercase()
-        for (alias in aliases) {
-            if (Regex("""(?<![a-z0-9])${Regex.escape(alias)}(?![a-z0-9])""").containsMatchIn(focusText)) return true
-        }
-        if (cjkRegex.containsMatchIn(strippedTitle)) {
-            val zhTerms = Regex("""[\u4E00-\u9FFF]{2,}""").findAll(strippedTitle).map { it.value }.toList()
-            if (zhTerms.isEmpty()) return true
-            if (zhTerms.any { it in focusText }) return true
-            val chars = strippedTitle.filter { it in '\u4E00'..'\u9FFF' }.toSet()
-            return chars.count { it in focusText } * 2 >= chars.size
-        }
-        val allWords = enWordRegex.findAll(strippedTitle.lowercase()).map { it.value }.filter { it.length >= 3 }.toList()
-        val distinctive = allWords.filter { it.length >= 4 && it !in topicGenericWords }.distinct()
-            .ifEmpty { allWords.distinct() }
-        if (distinctive.isEmpty()) return true
-        val hits = distinctive.count { tok ->
-            val stem = if (tok.length >= 6 && tok.endsWith("s")) tok.dropLast(1) else tok
-            stem in focusText
-        }
-        val required = when {
-            distinctive.size <= 2 -> 1
-            else -> 2
-        }
-        return hits >= required
     }
 
     private fun normalizeForCompare(text: String): String =
@@ -890,7 +913,7 @@ class ExamPointDrillPipeline(
     ): BatchTransportReply = checker.generateSection(
         systemPrompt = """
             你看不到标准答案，也不要猜测出题人的意图。只根据材料独立作答。
-            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）；同时判断这道题是否真正考查当前考点 topicTitle 本身（而不是同页无关概念、目录定位题或章末习题），若偏题则设 onTopic 为 false；若与本组前面某道题重复考查同一个定义，设 duplicate 为 true。
+            每道单选给出 letter，并在 support 里抄一处逐字支持该选项的原句（bookId、page、quote）；同时按语义判断这道题是否真正考查当前考点 topicTitle 本身（中英文对应同一概念、或考查该实验/模型/假说的具体结果与机制，均属于在考点上，不要按英文字面词硬卡；只有当题目考的是同页无关概念、别的定义、目录定位或章末习题时，才设 onTopic 为 false）；若与本组前面某道题重复考查同一个定义，设 duplicate 为 true。
             绝不能把章末习题、判断题待判陈述（True/False/Unclear）或分析题题设当作教材结论出处。
             有教材时 support 必须来自 CORE_TEXTBOOK。同一句两边都有时，bookId 填教材。
             论述提纲的每个要点按顺序给出：有原句支撑则 supported 为 true 并附 support，否则 supported 为 false。

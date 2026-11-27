@@ -578,7 +578,8 @@ internal object CourseExamPoints {
     fun build(db: Connection, courseId: String, materials: List<CourseMaterialEntry>, excluded: List<CourseTopicLinkPlan>): List<CourseTopicPlan> {
         val teaching = materials.filter { it.role in teachingRoles && (it.userLocked || !CourseClientGates.isPastExamMaterial(it.title, it.sourceFilename)) }
             .sortedBy { it.role.authorityRank }
-        if (teaching.size < 2 && teaching.none { it.role == CourseMaterialRole.CORE_TEXTBOOK }) return emptyList()
+        val standaloneTextbook = materials.size == 1 && teaching.singleOrNull()?.role == CourseMaterialRole.CORE_TEXTBOOK
+        if (teaching.size < 2 && !standaloneTextbook) return emptyList()
         val pages = mutableListOf<ExamTeachingPage>()
         val chapterStartsByBook = mutableMapOf<String, Set<Int>>()
         val chapterRangesByBook = mutableMapOf<String, List<IntRange>>()

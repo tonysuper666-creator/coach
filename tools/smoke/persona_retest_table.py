@@ -159,6 +159,22 @@ def render(run, baseline=None):
     return "\n".join(lines) + "\n"
 
 
+def clear_open_session(db_path):
+    """Drop the restored-reader row on a home copy. Returns rows removed. Never prints the book id."""
+    connection = sqlite3.connect(db_path)
+    try:
+        found = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_open_session'"
+        ).fetchone()
+        if found is None:
+            return 0
+        removed = connection.execute("DELETE FROM book_open_session").rowcount
+        connection.commit()
+        return int(removed)
+    finally:
+        connection.close()
+
+
 def set_exam_offset(db_path, days_from_today, today=None):
     """Point one course exam_date at today + days. Returns dates only, never titles."""
     today = today or date.today()
@@ -185,8 +201,12 @@ def main():
     parser.add_argument("--baseline", default="")
     parser.add_argument("--set-exam", default="", help="library.sqlite path; prints dates only")
     parser.add_argument("--days", type=int, default=0)
+    parser.add_argument("--clear-open-session", default="", help="library.sqlite path; deletes the restored screen row")
     parser.add_argument("--out", default="", help="write the table as UTF-8 instead of printing it")
     args = parser.parse_args()
+    if args.clear_open_session:
+        clear_open_session(args.clear_open_session)
+        return
     if args.set_exam:
         print(json.dumps(set_exam_offset(args.set_exam, args.days), ensure_ascii=False))
         return

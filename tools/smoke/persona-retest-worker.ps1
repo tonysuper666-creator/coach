@@ -335,11 +335,26 @@ function Set-ExamDay([string]$db, [int]$days) {
     if (-not $text -or $text -eq 'null') { return $null }
     return ($text | ConvertFrom-Json)
 }
-function Copy-P1Home([string]$dest) {
-    $src = 'D:\agent\personas\P1\home-r2'
+function Copy-PersonaHome([string]$id, [string]$dest) {
+    $src = Join-Path 'D:\agent\personas' ($id + '\home-r2')
+    if (-not (Test-Path -LiteralPath $src)) { throw 'copy-failed' }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     & robocopy $src $dest /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw 'copy-failed' }
+}
+function Clear-OpenSessions([string]$personaHome) {
+    $py = Join-Path $Repo 'tools\smoke\persona_retest_table.py'
+    $files = @(Get-ChildItem -LiteralPath $personaHome -Recurse -Filter 'library.sqlite' -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        & python $py --clear-open-session $file.FullName | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'clear-session-failed' }
+    }
+}
+function New-PersonaHome([string]$id) {
+    $dest = Join-Path $OutDir ('homes\' + $id)
+    Copy-PersonaHome $id $dest
+    Clear-OpenSessions $dest
+    return $dest
 }
 function Count-Needle($lines, [string]$needle) {
     $flat = $needle -replace '\s', ''
@@ -354,8 +369,7 @@ function Count-Needle($lines, [string]$needle) {
     return $count
 }
 function Invoke-P1($p) {
-    $personaHome = Join-Path $OutDir 'homes\P1'
-    Copy-P1Home $personaHome
+    $personaHome = New-PersonaHome 'P1'
     $db = Join-Path $personaHome 'Coach\books\library.sqlite'
     if (-not (Test-Path -LiteralPath $db)) { Fail-Step $p '打开'; Set-Check 'countdown' '卡住' '没有课程或没有考试日'; return }
     $first = Set-ExamDay $db 14
@@ -477,26 +491,45 @@ function Invoke-ReadAsk($p, [string]$personaHome, [string]$question, [switch]$Ex
     Add-Count $p.ask $code
     if ($code -eq 'ok') { Pass-Step $p '提问' } else { Fail-Step $p '提问' }
 }
+function Test-Shelf($lines) {
+    return ((Test-Has $lines '我的库') -or (Test-Has $lines '今天'))
+}
 function Leave-Reader {
-    for ($i = 0; $i -lt 3; $i++) {
+    # Narrow windows draw the reader back control as "←" only. Esc closes the companion and stays in the book.
+    for ($i = 0; $i -lt 8; $i++) {
+        if (-not (Test-AppAlive)) { return $false }
         $lines = @(Get-Lines ("leave-{0}" -f $i))
-        if ((Test-Has $lines '我的库') -or (Test-Has $lines '今天')) { return $true }
-        if (Test-Has $lines '返回书架') { Click-Needle $lines '返回书架' | Out-Null; Start-Sleep -Milliseconds 800; continue }
-        if ((Test-Has $lines '伴读') -or (Test-Has $lines '目录')) { Send-Keys '{ESC}'; Start-Sleep -Milliseconds 800; continue }
-        return $false
+        if (Test-Shelf $lines) { return $true }
+        if (Test-Has $lines '返回书架') { Click-Needle $lines '返回书架' | Out-Null; Start-Sleep -Milliseconds 900; continue }
+        $inReader = (Test-Has $lines '目录') -or (Test-Has $lines '伴读') -or (Test-Has $lines '收起')
+        if (-not $inReader) { return $false }
+        $blob = Get-Blob $lines
+        if (($blob -match '正在排版') -and ($i -lt 4)) { Start-Sleep -Seconds 2; continue }
+        $moved = $false
+        if (Click-Needle $lines '←') { $moved = $true }
+        if (-not $moved) {
+            $toc = Find-Top $lines '目录'
+            if ($toc) {
+                $x = [Math]::Max(16, [int]$toc.X1 - 40)
+                Click-At $x $toc.Y | Out-Null
+                $moved = $true
+            }
+        }
+        if (-not $moved) { return $false }
+        Start-Sleep -Milliseconds 900
     }
-    return $false
+    return (Test-Shelf @(Get-Lines 'leave-end'))
 }
 function Invoke-P4($p) {
-    $personaHome = 'D:\agent\personas\P4\home-r2'
+    $personaHome = New-PersonaHome 'P4'
     if (-not (Open-Session $p $personaHome)) { Set-Check 'cite' '未测' '—'; return }
-    Leave-Reader | Out-Null
+    if (-not (Leave-Reader)) { Fail-Step $p '进库'; Set-Check 'cite' '卡住' '没离开阅读页'; return }
     $lines = Find-Scrolled 'p4-lib' '我的库' 6
-    if (-not $lines -or -not (Click-Needle $lines '我的库')) { Fail-Step $p '进库'; Set-Check 'cite' '卡住' '库里没有对比'; return }
+    if (-not $lines -or -not (Click-Needle $lines '我的库')) { Fail-Step $p '进库'; Set-Check 'cite' '卡住' '没看到我的库'; return }
     Start-Sleep -Seconds 1
     Pass-Step $p '进库'
     $chip = Find-Scrolled 'p4-chip' '对比' 2
-    if (-not $chip -or -not (Click-Needle $chip '对比')) { Fail-Step $p '点对比'; Set-Check 'cite' '卡住' '库里没有对比'; return }
+    if (-not $chip -or -not (Click-Needle $chip '对比')) { Fail-Step $p '点对比'; Set-Check 'cite' '卡住' '没看到对比'; return }
     Start-Sleep -Seconds 1
     $listed = @(Get-Lines 'p4-list')
     $blob = Get-Blob $listed
@@ -521,7 +554,7 @@ function Invoke-P4($p) {
     }
 }
 function Invoke-P5($p) {
-    $personaHome = 'D:\agent\personas\P5\home-r2'
+    $personaHome = New-PersonaHome 'P5'
     if (-not (Open-Session $p $personaHome)) { return }
     $script:DeclinedIncident = $false
     $pidToKill = $script:PersonaPid
@@ -573,8 +606,8 @@ try {
         try {
             switch ($id) {
                 'P1' { Invoke-P1 $persona }
-                'P2' { Invoke-ReadAsk $persona 'D:\agent\personas\P2\home-r2' $AskP2 -Explain }
-                'P3' { Invoke-ReadAsk $persona 'D:\agent\personas\P3\home-r2' $AskP3 }
+                'P2' { Invoke-ReadAsk $persona (New-PersonaHome 'P2') $AskP2 -Explain }
+                'P3' { Invoke-ReadAsk $persona (New-PersonaHome 'P3') $AskP3 }
                 'P4' { Invoke-P4 $persona }
                 'P5' { Invoke-P5 $persona }
             }
@@ -585,7 +618,9 @@ try {
 } finally { Stop-App }
 $passed = $true
 foreach ($persona in $script:PersonaRows.ToArray()) { if ([int]$persona.steps_done -ne [int]$persona.steps_total) { $passed = $false } }
+$checkOwner = @{ countdown = 'P1'; dateshift = 'P1'; mock = 'P1'; cite = 'P4'; offtopic = 'P1' }
 foreach ($key in @($script:Checks.Keys)) {
+    if ($wanted -notcontains $checkOwner[$key]) { continue }
     $status = [string]$script:Checks[$key].status
     if ($status -ne '通过' -and $status -ne '进了书，高亮见截图') { $passed = $false }
 }

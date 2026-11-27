@@ -121,6 +121,30 @@ class ExamDateTests(unittest.TestCase):
             self.assertEqual(rows["c1"], "2026-12-11")
             self.assertIsNone(rows["b1"])
 
+    def test_clear_open_session_drops_reader_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "library.sqlite"
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE book_open_session (slot INTEGER PRIMARY KEY, book TEXT, screen TEXT)")
+            connection.execute("INSERT INTO book_open_session VALUES (1, 'secret-id', 'READER')")
+            connection.commit()
+            connection.close()
+            self.assertEqual(table.clear_open_session(path), 1)
+            connection = sqlite3.connect(path)
+            left = connection.execute("SELECT book, screen FROM book_open_session").fetchall()
+            connection.close()
+            self.assertEqual(left, [])
+            self.assertEqual(table.clear_open_session(path), 0)
+
+    def test_clear_open_session_missing_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "library.sqlite"
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE collections (id TEXT)")
+            connection.commit()
+            connection.close()
+            self.assertEqual(table.clear_open_session(path), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,9 +26,13 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.apache.pdfbox.cos.COSDictionary
+import org.apache.pdfbox.cos.COSName
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.PDResources
+import org.apache.pdfbox.pdmodel.common.PDStream
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitDestination
@@ -895,5 +899,93 @@ class UnifiedBookPipelineTest {
             assertEquals(200,shelf.statusCode())
             assertTrue(shelf.body().contains(shelfId))
         }
+    }
+
+    @Test
+    fun openingAReadyBookRecordedBeforeBadPagesBackfillsSkippedPagesWithoutReupload() = runBlocking {
+        Harness(UnifiedBookConfig(enabled = true, autoProcess = true)).use { h ->
+            val alice = h.exchangeSable(TOK_ALPHA_1)
+            val pdf = damagedPagePdfBytes(damagedIndex = 3)
+            val sha = sha256Hex(pdf)
+            val upload = h.upload(alice, pdf, format = "pdf", title = "Torn Synthetic", declaredSha = sha)
+            assertEquals(200, upload.statusCode(), upload.body())
+            val shelf = parse(upload).str("shelfBookId")
+            var ready = false
+            repeat(100) {
+                val state = parse(h.request("/v1/books/$shelf/status", credential = alice))["job"]!!.jsonObject.str("state")
+                if (state == "ready") {
+                    ready = true
+                    return@repeat
+                }
+                delay(50)
+            }
+            assertTrue(ready, "processing did not finish")
+            assertEquals(1, h.unified.processCount(sha))
+            val current = h.request("/v1/books/$shelf/artifact", credential = alice)
+            assertEquals(200, current.statusCode(), current.body())
+            assertEquals(1, parse(current)["job"]!!.jsonObject["processCount"]!!.jsonPrimitive.int)
+            assertTrue(parse(current)["artifact"]!!.jsonObject["skippedPages"]!!.jsonArray.isNotEmpty())
+
+            Files.writeString(
+                h.unified.artifactFilePath(sha),
+                """{"schema":2,"sha256":"$sha","parserVersion":"v2-skeleton","format":"pdf","pageCount":4,"source":"PDF_OUTLINE"}""",
+            )
+            val opened = h.request("/v1/books/$shelf/artifact", credential = alice)
+            assertEquals(200, opened.statusCode(), opened.body())
+            val body = parse(opened)
+            val artifact = body["artifact"]!!.jsonObject
+            assertEquals(3, artifact["schema"]!!.jsonPrimitive.int)
+            assertEquals(listOf(4), artifact["skippedPages"]!!.jsonArray.map { it.jsonPrimitive.int })
+            assertEquals(2, body["job"]!!.jsonObject["processCount"]!!.jsonPrimitive.int)
+            assertEquals(2, h.unified.processCount(sha))
+
+            val again = h.request("/v1/books/$shelf/artifact", credential = alice)
+            assertEquals(200, again.statusCode(), again.body())
+            assertEquals(2, parse(again)["job"]!!.jsonObject["processCount"]!!.jsonPrimitive.int)
+            assertEquals(listOf(4), parse(again)["artifact"]!!.jsonObject["skippedPages"]!!.jsonArray.map { it.jsonPrimitive.int })
+        }
+    }
+
+    private fun damagedPagePdfBytes(damagedIndex: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        PDDocument().use { pdf ->
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            repeat(4) { index ->
+                val page = PDPage()
+                pdf.addPage(page)
+                if (index == 0) {
+                    val outline = PDDocumentOutline()
+                    pdf.documentCatalog.documentOutline = outline
+                    val dest = PDPageFitDestination().apply { this.page = page }
+                    outline.addLast(PDOutlineItem().apply { title = "1 Body"; destination = dest })
+                }
+                if (index == damagedIndex) return@repeat
+                PDPageContentStream(pdf, page).use { stream ->
+                    stream.beginText()
+                    stream.setFont(font, 12f)
+                    stream.newLineAtOffset(72f, 700f)
+                    stream.showText("GOOD-PAGE-${index + 1}")
+                    stream.endText()
+                }
+            }
+            val broken = COSDictionary().apply {
+                setItem(COSName.TYPE, COSName.FONT)
+                setItem(COSName.SUBTYPE, COSName.TYPE0)
+                setItem(COSName.BASE_FONT, COSName.getPDFName("BrokenPage"))
+            }
+            val fonts = COSDictionary()
+            fonts.setItem(COSName.getPDFName("F1"), broken)
+            val resources = PDResources()
+            resources.cosObject.setItem(COSName.FONT, fonts)
+            val torn = pdf.getPage(damagedIndex)
+            torn.resources = resources
+            val contents = PDStream(pdf)
+            contents.createOutputStream().use { stream ->
+                stream.write("BT /F1 12 Tf 72 700 Td (GOOD-PAGE-${damagedIndex + 1}) Tj ET\n".toByteArray(Charsets.US_ASCII))
+            }
+            torn.setContents(contents)
+            pdf.save(out)
+        }
+        return out.toByteArray()
     }
 }

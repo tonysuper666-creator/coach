@@ -27,6 +27,8 @@ internal fun exportObsidianVault(
 ): ObsidianExportOutcome {
     if (!Files.isDirectory(directory)) return ObsidianExportOutcome.Refused("这个文件夹不存在")
     if (directoryInsideGit(directory)) return ObsidianExportOutcome.Refused("请选 Git 仓库以外的文件夹")
+    val records = records.map { it.copy(bookTitle = visibleBookTitle(it.bookTitle)) }
+    val books = books.map { it.copy(title = visibleBookTitle(it.title)) }
     val ignoreCase = filesystemIgnoresCase(directory)
     val ids = libraryRecordIds
     val exportable = records.filter {

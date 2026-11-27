@@ -446,6 +446,42 @@ class ConceptSayingsTest {
         put("stance", stance)
     }
 
+    @Test fun anchorMismatchNamesTheConceptButDoesNotOpenABoard() {
+        val root = Files.createTempDirectory("coach-sayings-mismatch-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val sentence = "Alpha theory says private signals raise the premium."
+            val bookA = library.importBook(write(root, "book-a.md", chapter(sentence)))
+            val conceptId = "concept-mismatch"
+            val chapterA = BookChapterResolver.chapters(bookA).first()
+            library.upsertCollection(MaterialCollectionRecord("list-mismatch", CollectionKind.BOOKLIST, "synthetic mismatch"))
+            library.saveAlignedConcepts(
+                "list-mismatch",
+                listOf(ConceptEntityRecord(conceptId, "list-mismatch", "premium signal")),
+                listOf(mention(bookA, conceptId, "m-a", chapterA.tocNodeId, sentence, "甲书抬高保费。")),
+                emptyList(),
+            )
+            DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+                db.prepareStatement("UPDATE pages SET text=? WHERE book=?").use { sql ->
+                    sql.setString(1, "This page no longer contains the saved sentence.")
+                    sql.setString(2, bookA.id)
+                    check(sql.executeUpdate() >= 1)
+                }
+            }
+            val names = library.conceptNamesForBook(bookA.id)
+            assertEquals(conceptId, ConceptSayingLogic.matchConcept("premium signal", names))
+            assertNull(library.conceptSayings(conceptId, bookA.id))
+            assertNull(library.conceptSayingsLookup(conceptId, bookA.id).board)
+            assertTrue(library.conceptSayingsLookup(conceptId, bookA.id).anchorMismatch)
+            assertEquals("这个概念在书里对不上原句，没法看别的书怎么说。", ConceptSayingLogic.ANCHOR_MISMATCH)
+            val missing = library.conceptSayingsLookup("missing-concept", bookA.id)
+            assertNull(missing.board)
+            assertFalse(missing.anchorMismatch)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private fun write(dir: Path, name: String, text: String): Path =
         dir.resolve(name).also { Files.writeString(it, text) }
 

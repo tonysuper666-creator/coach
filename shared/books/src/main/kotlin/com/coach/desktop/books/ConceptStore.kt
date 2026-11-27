@@ -611,7 +611,9 @@ internal object ConceptStore {
         fun bookTitle(bookId: String): String = bookTitleCache.getOrPut(bookId) {
             db.prepareStatement("SELECT title FROM books WHERE id=?").use { q ->
                 q.setString(1, bookId)
-                q.executeQuery().use { r -> if (r.next()) r.getString(1) else "相关书籍" }
+                q.executeQuery().use { r ->
+                    if (r.next()) visibleBookTitle(r.getString(1).orEmpty()).ifBlank { "相关书籍" } else "相关书籍"
+                }
             }
         }
 
@@ -768,10 +770,10 @@ internal object ConceptStore {
      * 其他书必须有置信度达标、未驳回的边，而且那一章已读、目录节点非空。
      * 同一输入散列已经留过核对结果就直接用，不再请求。
      */
-    fun loadSayingsBoard(db: Connection, conceptId: String, anchorBookId: String): ConceptSayingsBoard? {
+    fun loadSayingsBoard(db: Connection, conceptId: String, anchorBookId: String): SayingsLookup {
         if (!BookSchemaMigration.tableExists(db, "concept_entities") ||
             !BookSchemaMigration.tableExists(db, "concept_mentions")
-        ) return null
+        ) return SayingsLookup(null, false)
         ensureSayingsTable(db)
         data class EntityRow(val name: String, val muted: Boolean)
         val entity = db.prepareStatement(
@@ -781,8 +783,8 @@ internal object ConceptStore {
             s.executeQuery().use { r ->
                 if (!r.next()) null else EntityRow(r.getString(1).orEmpty().trim(), r.getInt(2) != 0)
             }
-        } ?: return null
-        if (entity.muted || entity.name.isEmpty()) return null
+        } ?: return SayingsLookup(null, false)
+        if (entity.muted || entity.name.isEmpty()) return SayingsLookup(null, false)
 
         data class RawMention(
             val mentionId: String,
@@ -832,7 +834,10 @@ internal object ConceptStore {
             row.copy(offsetUtf16 = verified.offsetUtf16, quoteAnchor = verified.quoteAnchor)
         }
         val anchorMentions = mentions.filter { it.bookId == anchorBookId }
-        if (anchorMentions.isEmpty()) return null
+        if (anchorMentions.isEmpty()) {
+            val hadRaw = rawMentions.any { it.bookId == anchorBookId }
+            return SayingsLookup(null, hadRaw)
+        }
 
         data class LinkRow(val fromId: String, val toId: String, val relation: ConceptRelationType)
         val links = if (!BookSchemaMigration.tableExists(db, "concept_links")) emptyList() else {
@@ -870,7 +875,7 @@ internal object ConceptStore {
             db.prepareStatement("SELECT title FROM books WHERE id=?").use { q ->
                 q.setString(1, bookId)
                 q.executeQuery().use { r ->
-                    if (r.next()) r.getString(1).orEmpty().ifBlank { "未命名书籍" } else "未命名书籍"
+                    if (r.next()) visibleBookTitle(r.getString(1).orEmpty()).ifBlank { "未命名书籍" } else "未命名书籍"
                 }
             }
         }
@@ -918,7 +923,7 @@ internal object ConceptStore {
                             StoredSaying(
                                 bookId = r.getString(1),
                                 mentionId = r.getString(2),
-                                bookTitle = r.getString(3).orEmpty(),
+                                bookTitle = visibleBookTitle(r.getString(3).orEmpty()),
                                 statement = r.getString(4).orEmpty(),
                                 stance = SayingStance.fromWire(r.getString(5)),
                                 page = r.getInt(6),
@@ -964,14 +969,17 @@ internal object ConceptStore {
                 )
             }
         }
-        return ConceptSayingsBoard(
-            conceptId = conceptId,
-            conceptName = entity.name,
-            anchorBookId = anchorBookId,
-            inputHash = hash,
-            columns = ConceptSayingLogic.columnsFrom(anchorBookId, rows),
-            pending = pending,
-            candidates = candidates,
+        return SayingsLookup(
+            ConceptSayingsBoard(
+                conceptId = conceptId,
+                conceptName = entity.name,
+                anchorBookId = anchorBookId,
+                inputHash = hash,
+                columns = ConceptSayingLogic.columnsFrom(anchorBookId, rows),
+                pending = pending,
+                candidates = candidates,
+            ),
+            anchorMismatch = false,
         )
     }
 

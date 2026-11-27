@@ -836,7 +836,7 @@ private fun CloudShelfBookCard(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                book.title,
+                visibleBookTitle(book.title),
                 style = MaterialTheme.typography.titleMedium,
                 color = colors.fgPrimary,
                 maxLines = 1,

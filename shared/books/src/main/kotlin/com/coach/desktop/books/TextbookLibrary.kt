@@ -123,7 +123,7 @@ internal class TextbookLibrary(
                         val indexStateCol = rows.getString(8)?.takeIf { it.isNotEmpty() } ?: "READY"
                         add(
                             BookSummary(
-                                rows.getString(1), rows.getString(2),
+                                rows.getString(1), visibleBookTitle(rows.getString(2) ?: ""),
                                 rows.getInt(3), rows.getInt(4),
                                 rows.getInt(5), rows.getInt(6) == 1,
                                 rows.getInt(7),
@@ -249,7 +249,7 @@ internal class TextbookLibrary(
                         add(BookPage(number, text, p.getInt(3) == 1, illustrations, extra?.textLayout, ocrPending = p.getInt(4) == 1))
                     } } }
                 }
-                val title = row.getString(1)
+                val title = visibleBookTitle(row.getString(1) ?: "")
                 val format = row.getString(2)
                 val storedPage = row.getInt(3)
                 val lessonIdx = row.getInt(4)
@@ -2905,7 +2905,10 @@ internal class TextbookLibrary(
         ConceptStore.conceptNamesForBook(db, bookId)
     }
 
-    @Synchronized fun conceptSayings(conceptId: String, anchorBookId: String): ConceptSayingsBoard? = database().use { db ->
+    @Synchronized fun conceptSayings(conceptId: String, anchorBookId: String): ConceptSayingsBoard? =
+        conceptSayingsLookup(conceptId, anchorBookId).board
+
+    @Synchronized fun conceptSayingsLookup(conceptId: String, anchorBookId: String): SayingsLookup = database().use { db ->
         ConceptStore.loadSayingsBoard(db, conceptId, anchorBookId)
     }
 

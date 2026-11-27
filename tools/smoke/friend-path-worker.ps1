@@ -131,6 +131,89 @@ function Find-Exact($lines, [string]$needle) {
     }
     return $null
 }
+function Get-HomeImportLabel($lines) {
+    if (Find-Exact $lines '放进一本书') { return '放进一本书' }
+    if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库')) { return '导入文件' }
+}
+
+function Find-TasteOption($lines, $submit) {
+    $hint = Find-Text $lines '选一个答案'
+    $lastRow = $null
+    foreach ($line in $lines) {
+        $box = Get-LineBox $line
+        if ($hint -and $box.Y1 -le $hint.Y2) { continue }
+        if ($submit -and $box.Y2 -ge $submit.Y1) { continue }
+        $text = $line.Text.Trim()
+        if ($text -match '^[○◯〇●]\s*\S') { return $box }
+
+        # 小字号下 OCR 会漏掉空心圆。在首题卡里，提交钮正上方最后一行仍在可点的选项内。
+        if ($submit -and $text -match '[\p{L}\p{N}]' -and $box.Y1 -gt 40 -and
+            (-not $lastRow -or $box.Y -gt $lastRow.Y)) { $lastRow = $box }
+    }
+    return $lastRow
+}
+
+function Find-TasteVerdict($lines) {
+    foreach ($line in $lines) {
+        if (($line.Text -replace '\s', '') -match '^(对了|这题选的是另一项)[。.!！]?$') { return (Get-LineBox $line) }
+    }
+}
+
+function Test-TasteExplanation($lines, $verdict, $button) {
+    if (-not $verdict) { return $false }
+    foreach ($line in $lines) {
+        $box = Get-LineBox $line
+        if ($box.Y1 -le $verdict.Y2 -or ($button -and $box.Y2 -ge $button.Y1)) { continue }
+        $text = $line.Text -replace '\s', ''
+        if ($text -match '[\p{L}]' -and $text -notmatch '^(设置|LearningCoach|开始读这本书)$') { return $true }
+    }
+    return $false
+}
+
+function Complete-FirstTaste {
+    $point = Scroll-Point 0.5 0.7
+    $ready = Await-Text 2 'taste-question' @('选一个答案', '看讲解', '再试一次', '再放一次', '先翻开这本书') 240
+    if (-not $ready -or (Has $script:Last @('再试一次', '再放一次', '先翻开这本书'))) {
+        Fail 2 '未进入可作答的首题，见 2-taste-question.png'
+    }
+    $option = $null
+    foreach ($attempt in 1..16) {
+        $lines = Shot 2 "taste-options$attempt"
+        $submit = Find-Exact $lines '看讲解'
+        $option = Find-TasteOption $lines $submit
+        if ($option) { break }
+        Scroll-At $point[0] $point[1] -3
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $option) { Fail 2 '未识别到首题选项，见 2-taste-options*.png' }
+    Click-At ([int](($option.X1 + $option.X2) / 2)) $option.Y
+    foreach ($attempt in 1..16) {
+        Start-Sleep -Milliseconds 500
+        $submit = Find-Exact (Shot 2 "taste-submit$attempt") '看讲解'
+        if ($submit) { break }
+        Scroll-At $point[0] $point[1] -3
+    }
+    if (-not $submit) { Fail 2 '选答后找不到「看讲解」，见 2-taste-submit*.png' }
+    Click-At $submit.X $submit.Y
+    Start-Sleep -Milliseconds 700
+
+    # 提交时视口可能停在题卡底部。先找回判题结果，再沿正文向下找继续钮。
+    $sawExplanation = $false
+    foreach ($attempt in 1..20) {
+        $lines = Shot 2 "taste-explanation$attempt"
+        $verdict = Find-TasteVerdict $lines
+        $button = Find-Exact $lines '开始读这本书'
+        if (Test-TasteExplanation $lines $verdict $button) { $sawExplanation = $true }
+        if ($sawExplanation -and $button) {
+            Click-At $button.X $button.Y
+            return
+        }
+        if ($sawExplanation -or $verdict) { Scroll-At $point[0] $point[1] -2 }
+        else { Scroll-At $point[0] $point[1] 4 }
+        Start-Sleep -Milliseconds 500
+    }
+    Fail 2 '未同时验证判题结果、讲解正文和「开始读这本书」，见 2-taste-explanation*.png'
+}
 # The lowest on-screen occurrence of a label (e.g. the last button on a page).
 function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
 # 光标停在底栏按钮上时 Compose 会浮出「下一页 → PageDown」的 tooltip，它比底栏还高一行；
@@ -497,10 +580,10 @@ function Click-Until([int]$n, [scriptblock]$Find, [scriptblock]$Done, [string]$w
 # 11-21 04:26 L4 点完交锁后 3 ms 就被别路抢走前台，选书框根本没开，Choose-File 只会干等 20 秒判失败。
 # 所以没弹框就按新一帧重新定位再点；框开过以后的失败（路径没填进去、回车没关掉）不重点——
 # 那种情况 Choose-File 自己会关框并报原因，再点一下反而可能点在残留的框上。
-function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]$sec = 40, [int]$tries = 4, [int]$findSec = 15, [int]$openSec = 6) {
+function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]$sec = 40, [int]$tries = 4, [int]$findSec = 15, [int]$openSec = 6, [bool]$exact = $false) {
     $m = $null; $deadline = (Get-Date).AddSeconds($findSec)
     do {
-        $m = Find-Text (Shot $n 'find') $label
+        $lines = Shot $n 'find'; $m = if ($exact) { Find-Exact $lines $label } else { Find-Text $lines $label }
         if (-not $m) { Start-Sleep -Seconds 2 }
     } while (-not $m -and (Get-Date) -lt $deadline)
     if (-not $m) { Fail $n "屏幕上找不到「$label」" }
@@ -509,7 +592,7 @@ function Click-Until-Dialog([int]$n, [string]$label, [scriptblock]$IsOpen, [int]
         if (& $IsOpen) { return }
         if ($try -gt 1) {
             # 上一轮点空了：光标可能被别路挪走，按新一帧重新定位。
-            $m = Find-Text (Shot $n 'dialog-find') $label
+            $lines = Shot $n 'dialog-find'; $m = if ($exact) { Find-Exact $lines $label } else { Find-Text $lines $label }
             if (-not $m) { Fail $n "点了 $($try - 1) 次「$label」，选书框都没出来，按钮也找不到了" }
         }
         Click-At $m.X $m.Y
@@ -1318,29 +1401,26 @@ try {
     while (-not (Find-CoachWindow) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
     if ($script:Win -eq [IntPtr]::Zero) { Fail 1 "客户端窗口 $StartTimeoutSec 秒内没有出现（见 client.err.log）" }
     Set-SmokeMemoryClient $memoryLease $script:AppPid
-    # 2.0（#573 起）首页是单栏：空库时一句「把要读的书或课程材料放进来。」+ 一个主钮「导入文件」
-    # + 三张路线卡（为一门课备考 / 单读一本书 / 读一组书）；库里有书时首屏是焦点卡
-    # （封面、书名、「上次停在第 N / M 页」、「继续」）。1.1.1 的书架行和侧栏都没有了，
-    # 这两种首页都算窗口起来了，认任何一句结构性文字即可。
-    $m = Await-Text 1 'start' @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库') 30
-    if (-not $m) {
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $homeEntry = Get-HomeImportLabel (Shot 1 'start')
+        if (-not $homeEntry) { Start-Sleep -Seconds 2 }
+    } while (-not $homeEntry -and (Get-Date) -lt $deadline)
+    if (-not $homeEntry) {
         # 服务端拒过一次（配对被吊销 / 401）以后客户端会退回登录页：那一帧是「登录 LearningCoach /
         # Sable 账号登录 / 没有 sable 账号？用配对码」，首页的一个锚点都没有。这不是首页认错了，
         # 是这台机器得重新配对——照实报出来，别让人再去调首页的选择器（11-21 19:55 那轮就这样）。
         if ((Find-Text $script:Last '登录') -or (Find-Text $script:Last '配对码')) {
             Fail 1 '客户端停在登录页：窗口里是「登录 LearningCoach / 没有 sable 账号？用配对码」，没有 2.0 首页可认（要先在这台机器上配对）'
         }
-        Fail 1 '窗口出来了，但 30 秒内没读出 2.0 首页（导入文件 / 单读一本书 / 为一门课备考）'
+        Fail 1 '窗口出来了，但 30 秒内没读出首页（放进一本书 / 导入文件 / 单读一本书 / 为一门课备考）'
     }
     if ($launchSw) { Note ("起窗完成：启动后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
     Pass 1 '客户端窗口出现，2.0 首页可见'
 
     # ② 导入一本书
-    # 2.0 首页的入口是主钮「导入文件」（testTag upload-textbook）；原生选书框标题是
-    # 「导入文件 · <可读格式>」，所以按钮和框都认「导入文件」这个前缀。
-    # 只认原生选书框弹出来：四路同时开框时这一下可能在交锁后 3 ms 被别路抢前台吞掉（11-21 04:26 L4），
-    # 框根本没开，Choose-File 干等 20 秒才判失败。没弹框就重定位再点，弹过框以后的失败交给 Choose-File 报。
-    if ($InstalledExe) {
+    $firstOpen = $homeEntry -eq '放进一本书'
+    if ($InstalledExe -and -not $firstOpen) {
         foreach ($attempt in 1..4) {
             $homeFrame = Shot 2 "import-home$attempt"
             Open-Step2ImportMenu $homeFrame $attempt
@@ -1349,9 +1429,10 @@ try {
         }
         if ((Find-AppWindowByTitle '导入文件') -eq [IntPtr]::Zero) { Fail 2 '顶栏导入菜单未打开原生选书对话框（见 2-import-home*.png / 2-import-menu*.png）' }
     } else {
-        Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero }
+        Click-Until-Dialog 2 $homeEntry { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } -exact $firstOpen
     }
     if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
+    if ($firstOpen) { Complete-FirstTaste }
     # 导入通常先打开阅读器。还要回首页验证本地书卡，课程和书单可能把它推到首屏以下。
     $r = Get-Rect; $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
     $hoverY = $winH - 10
@@ -1368,10 +1449,13 @@ try {
         Hover $midX $hoverY; Start-Sleep -Milliseconds 600
         $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
         $c = Get-HudCounter $script:LastPng
-        if ($c) { $readerPage = $c.Text } else { $shelfHit = Find-Step2HomeBook $lines $BookTitle }
+        if ($c) { $readerPage = $c.Text } elseif (-not $firstOpen) { $shelfHit = Find-Step2HomeBook $lines $BookTitle }
         if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }
     }
-    if (-not $readerPage -and -not $shelfHit) { Fail 2 '选了书但 150 秒内既没进阅读器，书架里也没出现这本书' }
+    if (-not $readerPage -and -not $shelfHit) {
+        if ($firstOpen) { Fail 2 '首题讲解后 150 秒内未确认阅读器底栏页码，见 2-imported*.png' }
+        Fail 2 '选了书但 150 秒内既没进阅读器，书架里也没出现这本书'
+    }
     $row = $shelfHit
     if ($readerPage) {
         $homeFrame = $null

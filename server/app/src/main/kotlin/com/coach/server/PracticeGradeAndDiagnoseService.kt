@@ -64,6 +64,8 @@ object PracticeGradeLimits {
     const val TASK_DIAGNOSE: String = "practice_diagnose"
     const val TASK_VARIANT: String = "practice_variant"
     const val TASK_CHAPTER_OPEN: String = "chapter_open_question"
+    const val TASK_COURSE_ESSAY_NOTE: String = "course_essay_note"
+    const val TASK_COURSE_ESSAY_CHECK: String = "course_essay_check"
 }
 
 internal data class PracticeCallPlan(
@@ -80,13 +82,16 @@ internal fun planPracticeCall(
     defaultModel: String,
 ): PracticeCallPlan {
     val chapterOpen = task == PracticeGradeLimits.TASK_CHAPTER_OPEN
-    val useBatch = (backgroundBatch || chapterOpen) && friend == null
+    val courseNote = task == PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE
+    val courseCheck = task == PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK
+    val useBatch = (backgroundBatch || chapterOpen) && friend == null && !courseNote && !courseCheck
     val model = when {
-        chapterOpen -> BridgeClient.HAIKU
+        courseCheck -> BridgeClient.GPT_62_ASTRA
+        chapterOpen || courseNote -> BridgeClient.HAIKU
         friend != null -> BridgeClient.CLAUDE
         else -> defaultModel
     }
-    val targetTask = if (friend != null) "READER_SELECTION" else task
+    val targetTask = if (friend != null && !courseNote && !courseCheck) "READER_SELECTION" else task
     return PracticeCallPlan(useBatch = useBatch, model = model, task = targetTask)
 }
 
@@ -124,6 +129,8 @@ data class PracticeSourcePageInput(
     val text: String,
     val title: String = "",
     val authorityRank: Int = 2,
+    val bookId: String = "",
+    val role: String = "",
 )
 
 data class PracticeNumericKeySpec(
@@ -163,6 +170,7 @@ data class PracticeGradeAndDiagnoseRequest(
     val mcqCorrectOption: String = "",
     val mcqSelectedOption: String = "",
     val retryPointIds: List<String> = emptyList(),
+    val topicTitle: String = "",
 )
 
 data class ServerNumericFactResult(
@@ -203,6 +211,10 @@ data class GradedRubricItemResult(
     val quoteAnchor: String,
     val anchorVerified: Boolean,
     val missCause: String = "",
+    val slotLabel: String = "",
+    val bookId: String = "",
+    val pointKind: String = "",
+    val usage: String = "",
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("cid", cid)
@@ -220,6 +232,10 @@ data class GradedRubricItemResult(
         put("quoteAnchor", quoteAnchor)
         put("anchorVerified", anchorVerified)
         if (missCause.isNotBlank()) put("missCause", missCause)
+        if (slotLabel.isNotBlank()) put("slotLabel", slotLabel)
+        if (bookId.isNotBlank()) put("bookId", bookId)
+        if (pointKind.isNotBlank()) put("pointKind", pointKind)
+        if (usage.isNotBlank()) put("usage", usage)
     }
 }
 
@@ -728,6 +744,9 @@ class PracticeGradeAndDiagnoseService(
         val recordOwnerLedger = friend == null
 
         val mode = request.mode.trim().uppercase().ifBlank { "GRADE_AND_DIAGNOSE" }
+        if (mode == "COURSE_ESSAY") {
+            return gradeCourseEssay(request, effectiveTransport, recordOwnerLedger, started)
+        }
         val gradeRequest = if (mode == "CHAPTER_OPEN" && request.retryPointIds.isNotEmpty()) {
             val want = request.retryPointIds.toSet()
             request.copy(
@@ -987,6 +1006,156 @@ class PracticeGradeAndDiagnoseService(
             unverifiedPositivePassCount = unverifiedPositivePass,
             elapsedMs = elapsedMs,
         )
+    }
+
+    private suspend fun gradeCourseEssay(
+        request: PracticeGradeAndDiagnoseRequest,
+        activeTransport: BatchAiTransport,
+        recordOwnerLedger: Boolean,
+        started: Long,
+    ): PracticeGradeAndDiagnoseResponse {
+        val pages = request.sourcePages.map { page ->
+            CourseEssayFramework.Page(
+                bookId = page.bookId.ifBlank { request.bookId },
+                bookTitle = page.title,
+                role = page.role,
+                page = page.pdfPage,
+                text = page.text,
+                authorityRank = page.authorityRank,
+            )
+        }
+        fun finish(
+            items: List<GradedRubricItemResult>,
+            summary: String,
+            model: String,
+            channel: String,
+        ) = PracticeGradeAndDiagnoseResponse(
+            mode = "COURSE_ESSAY",
+            rubricItems = items,
+            numericFacts = emptyList(),
+            totalAwarded = items.sumOf { it.awardedMarks },
+            maxMarks = items.sumOf { it.maxMarks },
+            summaryMetaLine = summary,
+            diagnosis = null,
+            variant = null,
+            modelUsed = model,
+            routeChannel = channel,
+            elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L),
+        )
+        if (pages.none { it.text.isNotBlank() }) {
+            return finish(emptyList(), "材料页还没读到，这次不能按课程框架批改。", "", "")
+        }
+        val topic = request.topicTitle.ifBlank { request.questionStem }
+        val points = CourseEssayFramework.extract(topic, pages)
+        if (points.isEmpty()) {
+            return finish(emptyList(), "这一考点的材料里没有抽出定义或框架，这次不能按课程框架批改。", "", "")
+        }
+        val local = CourseEssayFramework.judge(points, request.studentAnswer)
+        val asked = local.filter { it.usage == CourseEssayFramework.Usage.USED }
+        val models = mutableListOf<String>()
+        var channel = ""
+        var haikuVotes = emptyMap<String, CourseEssayFramework.Vote>()
+        var gptVotes = emptyMap<String, CourseEssayFramework.Vote>()
+        var retryVotes = emptyMap<String, CourseEssayFramework.Vote>()
+
+        suspend fun ask(
+            task: String,
+            keyPrefix: String,
+            rows: List<CourseEssayFramework.Judgement>,
+            accept: (String) -> Boolean,
+        ): Map<String, CourseEssayFramework.Vote> {
+            if (rows.isEmpty()) return emptyMap()
+            val prompt = CourseEssayFramework.blindUserPrompt(rows, request.studentAnswer)
+            val key = "$keyPrefix-${sha256(prompt.toByteArray(Charsets.UTF_8)).take(16)}"
+            val reply = runCatching {
+                activeTransport.generateSection(
+                    systemPrompt = CourseEssayFramework.CHECK_SYSTEM.trim(),
+                    userPrompt = prompt,
+                    task = task,
+                    batchKey = key,
+                    maxTokens = PracticeGradeLimits.BATCH_MAX_TOKENS,
+                )
+            }.getOrNull() ?: return emptyMap()
+            if (recordOwnerLedger) recordLedger(request, task, key, reply)
+            models += reply.model
+            channel = reply.routeChannel.wireName
+            if (!accept(reply.model)) return emptyMap()
+            return CourseEssayFramework.parseVotes(reply.text)
+        }
+
+        if (asked.isNotEmpty()) {
+            haikuVotes = ask(
+                PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE,
+                "ce-note",
+                asked,
+            ) { it.startsWith("claude-haiku") }
+            gptVotes = ask(
+                PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
+                "ce-check",
+                asked,
+            ) { it.startsWith("gpt-") }
+            val disagreed = asked.filter { row ->
+                val haiku = haikuVotes[row.point.id]
+                val gpt = gptVotes[row.point.id]
+                haiku != null && gpt != null && haiku.correct != gpt.correct
+            }
+            if (disagreed.isNotEmpty()) {
+                retryVotes = ask(
+                    PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
+                    "ce-recheck",
+                    disagreed,
+                ) { it.startsWith("gpt-") }
+            }
+        }
+
+        val items = local.map { row ->
+            val reconciled = CourseEssayFramework.reconcile(
+                row,
+                haikuVotes[row.point.id],
+                gptVotes[row.point.id],
+                retryVotes[row.point.id],
+            )
+            val quote = row.studentQuote
+            val quoteOk = quote.isNotBlank() && request.studentAnswer.contains(quote)
+            val wantFull = row.usage == CourseEssayFramework.Usage.USED && reconciled.correct
+            var verdict = when {
+                row.usage == CourseEssayFramework.Usage.MISSING -> PracticeRubricVerdict.ZERO
+                wantFull -> PracticeRubricVerdict.FULL
+                else -> PracticeRubricVerdict.PARTIAL
+            }
+            val gated = verdict != PracticeRubricVerdict.ZERO && !quoteOk
+            if (gated) verdict = PracticeRubricVerdict.ZERO
+            val awarded = when (verdict) {
+                PracticeRubricVerdict.FULL -> 1.0
+                PracticeRubricVerdict.PARTIAL -> 0.5
+                PracticeRubricVerdict.ZERO -> 0.0
+            }
+            val kindLabel = if (row.point.kind == CourseEssayFramework.Kind.FRAMEWORK) "框架" else "定义"
+            GradedRubricItemResult(
+                cid = row.point.id,
+                verdict = verdict,
+                rawModelVerdict = verdict,
+                awardedMarks = awarded,
+                rawModelAwardedMarks = awarded,
+                maxMarks = 1.0,
+                studentQuote = if (quoteOk) quote else "",
+                studentQuoteVerified = quoteOk,
+                quoteGateZeroed = gated,
+                quoteRepairAttempted = false,
+                feedbackNoteZh = reconciled.gap,
+                pdfPage = row.point.page,
+                quoteAnchor = row.point.quoteAnchor,
+                anchorVerified = true,
+                slotLabel = "$kindLabel · ${row.point.name}",
+                bookId = row.point.bookId,
+                pointKind = row.point.kind.name,
+                usage = row.usage.name,
+            )
+        }
+        val missingFrameworks = items.count { it.pointKind == "FRAMEWORK" && it.usage == "MISSING" }
+        val wrong = items.count { it.usage == "WRONG" }
+        val summary = "按这门课的定义和框架核对 ${items.size} 条。没用到的框架 $missingFrameworks 条，用偏了 $wrong 条。"
+        return finish(items, summary, models.distinct().joinToString("+"), channel)
     }
 
     private suspend fun generateVerifiedVariant(
@@ -1621,6 +1790,8 @@ object PracticeGradeRequestParser {
                 text = text.take(12_000),
                 title = o.s("title").trim().take(120),
                 authorityRank = ((o["authorityRank"] as? JsonPrimitive)?.intOrNull ?: 2).coerceIn(1, 4),
+                bookId = o.s("bookId").trim().take(120),
+                role = o.s("role").trim().take(40),
             )
         }
 
@@ -1652,6 +1823,7 @@ object PracticeGradeRequestParser {
             retryPointIds = (input["retryPointIds"] as? JsonArray).orEmpty().mapNotNull {
                 (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
             }.distinct().take(ChapterOpenGate.MAX_POINTS),
+            topicTitle = input.s("topicTitle").trim().take(200),
         )
     }
 

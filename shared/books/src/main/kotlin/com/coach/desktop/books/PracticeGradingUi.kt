@@ -65,6 +65,10 @@ internal data class PracticeRubricItemGrade(
     val quoteAnchor: String = "",
     val anchorVerified: Boolean = false,
     val missCause: String = "",
+    val slotLabel: String = "",
+    val bookId: String = "",
+    val pointKind: String = "",
+    val usage: String = "",
 )
 
 internal data class PracticeMisconceptionDiagnosis(
@@ -136,6 +140,10 @@ internal object PracticeGradingJson {
                 quoteAnchor = o.s("quoteAnchor"),
                 anchorVerified = (o["anchorVerified"] as? JsonPrimitive)?.booleanOrNull ?: false,
                 missCause = o.s("missCause"),
+                slotLabel = o.s("slotLabel"),
+                bookId = o.s("bookId"),
+                pointKind = o.s("pointKind"),
+                usage = o.s("usage"),
             )
         }
         val diagObj = obj["diagnosis"] as? JsonObject
@@ -201,6 +209,10 @@ internal object PracticeGradingJson {
                             put("quoteAnchor", item.quoteAnchor)
                             put("anchorVerified", item.anchorVerified)
                             if (item.missCause.isNotBlank()) put("missCause", item.missCause)
+                            if (item.slotLabel.isNotBlank()) put("slotLabel", item.slotLabel)
+                            if (item.bookId.isNotBlank()) put("bookId", item.bookId)
+                            if (item.pointKind.isNotBlank()) put("pointKind", item.pointKind)
+                            if (item.usage.isNotBlank()) put("usage", item.usage)
                         },
                     )
                 }
@@ -311,6 +323,9 @@ internal object PracticeGradingJson {
         draftText: String,
         library: TextbookLibrary?,
     ): JsonObject {
+        if (courseContext.weekLabel == CourseExamPoints.LABEL) {
+            return buildExamPointEssayRequest(courseContext, activeBookId, draftText, library)
+        }
         val pack = courseContext.pack
         val stem = pack?.practicePrompt?.stem
             ?: "请围绕「${courseContext.topicTitle}」写出核心论点、适用条件与关键差异对比。"
@@ -379,6 +394,72 @@ internal object PracticeGradingJson {
                         put("pdfPage", pg)
                         put("text", txt)
                         put("authorityRank", rank)
+                    })
+                }
+            })
+        }
+    }
+
+    private fun buildExamPointEssayRequest(
+        courseContext: CourseReaderContext,
+        activeBookId: String,
+        draftText: String,
+        library: TextbookLibrary?,
+    ): JsonObject {
+        val pack = courseContext.pack
+        val stem = pack?.practicePrompt?.stem
+            ?: "请围绕「${courseContext.topicTitle}」写出核心论点、适用条件与关键差异对比。"
+        val teachingRoles = setOf(
+            CourseMaterialRole.CORE_TEXTBOOK,
+            CourseMaterialRole.LECTURE_SLIDES,
+            CourseMaterialRole.HANDOUT,
+        )
+        data class PageSlice(
+            val bookId: String,
+            val title: String,
+            val role: String,
+            val rank: Int,
+            val page: Int,
+            val text: String,
+        )
+        val slices = buildList {
+            if (library != null) {
+                for (src in courseContext.orderedSources) {
+                    if (src.role !in teachingRoles) continue
+                    val opened = runCatching { library.book(src.bookId) }.getOrNull() ?: continue
+                    val startP = src.startPage.coerceAtLeast(1)
+                    val endP = minOf(src.endPage.coerceAtLeast(startP), startP + 2)
+                    for (p in startP..endP) {
+                        if (size >= 12) break
+                        val txt = opened.page(p)?.text?.trim().orEmpty()
+                        if (txt.isBlank()) continue
+                        add(PageSlice(src.bookId, src.bookTitle, src.role.wire, src.authorityRank, p, txt.take(12_000)))
+                    }
+                    if (size >= 12) break
+                }
+            }
+        }
+        val conceptKey = MasteryEngine.conceptKeyFor(activeBookId, courseContext.topicId)
+        return buildJsonObject {
+            put("mode", "COURSE_ESSAY")
+            put("bookId", activeBookId)
+            put("chapterId", courseContext.topicId)
+            put("sectionId", courseContext.topicId)
+            put("conceptKey", conceptKey)
+            put("questionId", pack?.practicePrompt?.promptId ?: "essay-${courseContext.topicId}")
+            put("questionStem", stem)
+            put("studentAnswer", draftText)
+            put("generateVariant", false)
+            put("topicTitle", courseContext.topicTitle)
+            put("sourcePages", buildJsonArray {
+                for (slice in slices) {
+                    add(buildJsonObject {
+                        put("pdfPage", slice.page)
+                        put("text", slice.text)
+                        put("title", slice.title)
+                        put("authorityRank", slice.rank)
+                        put("bookId", slice.bookId)
+                        put("role", slice.role)
                     })
                 }
             })
@@ -454,6 +535,7 @@ internal fun RubricAnnotationSheet(
     response: PracticeGradeDiagnoseResponse,
     onJumpPage: (pdfPage: Int, quoteAnchor: String) -> Unit,
     modifier: Modifier = Modifier,
+    onJumpSource: (bookId: String, pdfPage: Int, quoteAnchor: String) -> Unit = { _, page, quote -> onJumpPage(page, quote) },
 ) {
     val colors = CoachTheme.colors
     val pine = v7Pine()
@@ -521,10 +603,57 @@ internal fun RubricAnnotationSheet(
                         "UNCLEAR_EXPRESSION" -> "表达不清"
                         else -> ""
                     }
+                    val coursePoint = item.usage.isNotBlank()
                     Column(
                         modifier = Modifier.fillMaxWidth().testTag("rubric-item-$idx"),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        if (coursePoint) {
+                            val missingPoint = item.usage == "MISSING"
+                            val usedLabel = if (missingPoint) "没用到" else "用到了"
+                            val rightLabel = when {
+                                missingPoint -> ""
+                                item.usage == "USED" && item.verdict == "FULL" -> "用对了"
+                                else -> "用偏了"
+                            }
+                            val frameworkPoint = item.pointKind == "FRAMEWORK"
+                            val usageTag = if (frameworkPoint) "essay-framework-usage-$idx" else "essay-point-used-$idx"
+                            val rereadTag = if (frameworkPoint) "essay-framework-reread-$idx" else "essay-reread-$idx"
+                            Text(
+                                text = item.slotLabel.ifBlank { "要点" },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fgPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = usedLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = statusColor,
+                                modifier = Modifier.testTag(usageTag),
+                            )
+                            if (rightLabel.isNotBlank()) {
+                                Text(
+                                    text = rightLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = statusColor,
+                                )
+                            }
+                            Text(
+                                text = "差在哪：${item.feedbackNoteZh.ifBlank { "请回看这一页的原句。" }}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.fgPrimary,
+                                modifier = Modifier.testTag("rubric-note-$idx"),
+                            )
+                            if (item.pdfPage > 0) {
+                                RubricPagePill(
+                                    pdfPage = item.pdfPage,
+                                    onClick = { onJumpSource(item.bookId, item.pdfPage, item.quoteAnchor) },
+                                    label = "回书补读 · 第 ${item.pdfPage} 页",
+                                    tag = rereadTag,
+                                )
+                            }
+                            return@Column
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -687,6 +816,7 @@ internal fun RubricPagePill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     label: String = "课本第 $pdfPage 页",
+    tag: String? = null,
 ) {
     val shape = RoundedCornerShape(CoachV7.Radius.s)
     val pine = v7Pine()
@@ -704,7 +834,7 @@ internal fun RubricPagePill(
             .clickable(onClick = onClick)
             .pointerHoverIcon(PointerIcon.Hand)
             .padding(horizontal = 8.dp, vertical = 4.dp)
-            .testTag("rubric-page-pill-$pdfPage"),
+            .testTag(tag ?: "rubric-page-pill-$pdfPage"),
     )
 }
 

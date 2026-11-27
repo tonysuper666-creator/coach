@@ -302,6 +302,14 @@ private fun CourseEssayPractice(
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.fgPrimary,
             )
+            if (courseContext.weekLabel == CourseExamPoints.LABEL) {
+                Text(
+                    "批改只看这门课材料里的定义和框架，每条都能点回原页。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary,
+                    modifier = Modifier.testTag("course-essay-framework-note"),
+                )
+            }
             OutlinedTextField(
                 value = draftText,
                 onValueChange = { updated ->
@@ -428,10 +436,29 @@ private fun CourseEssayPractice(
                         ),
                     )
                 }
+                val jumpToSource: (String, Int, String) -> Unit = { bookId, pg, quote ->
+                    val matched = when {
+                        bookId.isNotBlank() -> courseContext.orderedSources.firstOrNull { it.bookId == bookId }
+                        else -> courseContext.orderedSources.firstOrNull { pg in it.startPage..it.endPage }
+                            ?: courseContext.orderedSources.firstOrNull()
+                    }
+                    onJumpCitation(
+                        CourseCitationRef(
+                            bookId = bookId.ifBlank { matched?.bookId ?: activeBookId },
+                            bookTitle = matched?.bookTitle ?: courseContext.topicTitle,
+                            role = matched?.role ?: CourseMaterialRole.CORE_TEXTBOOK,
+                            page = pg,
+                            startUtf16 = 0,
+                            endUtf16 = quote.length,
+                            quote = quote,
+                        ),
+                    )
+                }
                 RubricAnnotationSheet(
                     studentDraft = draftText,
                     response = resp,
                     onJumpPage = jumpToPage,
+                    onJumpSource = jumpToSource,
                 )
                 val missedPoints = resp.rubricItems.count { it.verdict == "ZERO" && it.missCause.isNotBlank() }
                 if (missedPoints > 0) {

@@ -129,6 +129,12 @@ internal object LiteratureTextNorm {
     }
 }
 
+/** Shelf, reader, library, and export show the characters the title meant, not the HTML escapes. */
+internal fun visibleBookTitle(raw: String): String {
+    if (raw.isBlank() || '&' !in raw) return raw
+    return LiteratureTextNorm.decodeHtmlEntities(raw)
+}
+
 internal object LiteratureMetadata {
     private val junkTitle = Regex(
         """(?i)^(?:untitled(?:\s+document)?|document\d*|book\d*|slide\d*|microsoft word.*|powerpoint.*|acrobat.*|indesign.*|latex|tex|dvips|scan\d*|page\s*\d+|doi[:/\s].*|\d+|none|null|nil|n/?a|tbd|todo|draft|sample|test|placeholder|no\s+title|(?:some|your|my|the|default|sample|test|dummy|temp|placeholder|insert|enter|add|unknown|generic|example|book|article|chapter|document|paper)[\s._\-]*title)$""",

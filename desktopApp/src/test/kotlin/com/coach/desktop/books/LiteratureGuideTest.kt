@@ -95,6 +95,125 @@ class LiteratureGuideTest {
         assertTrue(LiteraturePassages.bodySentence("The archive recorded different observations clearly."))
     }
 
+    @Test fun sharedCandidateFilterDropsEndnotesFooterNotesBannerAndHalfSentences() {
+        fun body(n: Int): BookPage {
+            val text = "The archive recorded distinct field observation number $n across the whole season."
+            return BookPage(n, text, guideRegions = listOf(GuideRegion(text)))
+        }
+        val hunterBody = listOf(
+            "The repository kept a public record and later writers returned to that record.",
+            "Visitors described the cabinets in enough detail to reconstruct the early arrangement.",
+            "Minutes from the weekly meeting still name the keeper who opened the doors.",
+            "",
+            "57",
+            "Later writers judged the rooms by a standard that did not yet exist for this collection.",
+        ).joinToString("\n")
+        val hunterNote = "57\nLater writers judged the rooms by a standard that did not yet exist for this collection."
+        val hunter = Textbook(
+            "hunter-note",
+            "Note Shape",
+            "pdf",
+            (1..20).map(::body) + BookPage(
+                21,
+                hunterBody,
+                guideRegions = listOf(GuideRegion(hunterBody), GuideRegion(hunterNote)),
+            ),
+        )
+        val hunterExcerpts = LiteraturePassages.extractCandidates(hunter)
+        assertTrue(hunterExcerpts.any { it.anchor.pdfPage == 21 && "public record" in it.anchor.quoteAnchor })
+        assertTrue(hunterExcerpts.none { "did not yet exist" in it.anchor.quoteAnchor })
+
+        val fontes = Textbook(
+            "fontes-notes",
+            "Endnote Shape",
+            "pdf",
+            (1..15).map(::body) + (16..20).map { n ->
+                val notes = """
+                    $n. The cataloguer copied a title from an earlier list and added a short remark about it.
+                    The note continues as a full sentence after the marker and must stay out of the pool.
+                    ${n + 40}. Another end note repeats a bibliographic aside without stating the paper claim.
+                    ${n + 41}. A third numbered remark sits in the endnote region and looks like a body sentence.
+                    ${n + 42}. A fourth numbered remark also looks like an ordinary sentence about the collection.
+                """.trimIndent()
+                BookPage(n, notes, guideRegions = listOf(GuideRegion(notes)))
+            },
+        )
+        val fontesExcerpts = LiteraturePassages.extractCandidates(fontes)
+        assertTrue(fontesExcerpts.any { it.anchor.pdfPage < 16 })
+        assertTrue(fontesExcerpts.none { it.anchor.pdfPage >= 16 })
+        assertTrue(fontesExcerpts.none { "endnote region" in it.anchor.quoteAnchor })
+
+        val heading = """
+            The register still held a public sentence before the notes heading on this page.
+            Notes
+            57. Later writers judged the rooms by a standard that did not yet exist for this collection.
+        """.trimIndent()
+        val headedQuotes = LiteraturePassages.extractCandidates(
+            Textbook(
+                "notes-heading",
+                "Heading Shape",
+                "pdf",
+                listOf(body(1), BookPage(2, heading, guideRegions = listOf(GuideRegion(heading)))),
+            ),
+        ).map { it.anchor.quoteAnchor }
+        assertTrue(headedQuotes.any { "before the notes heading" in it })
+        assertTrue(headedQuotes.none { "did not yet exist" in it })
+
+        val page1 = "The study places the public repository in a longer argument that runs from the work of"
+        val page2 = """
+            Downloaded from the public archive on 3 June 2006.
+
+            Niles Carter to the recorded century as a whole. The society kept a public repository for visiting scholars during that decade.
+
+            The argument stops halfway through the public catalog and then
+
+            Niles Carter to the recorded century as a whole. Later writers compared the rooms with a standard written down in the register.
+
+            Visitors left the description unfinished just before the name and
+
+            Ada Quentin to the recorded century as a whole. Shade reduced evaporation in this sample because the keepers closed the south windows.
+        """.trimIndent()
+        val odnbQuotes = LiteraturePassages.extractCandidates(
+            Textbook(
+                "odnb-halves",
+                "Half Shape",
+                "pdf",
+                listOf(
+                    BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                    BookPage(2, page2, guideRegions = listOf(GuideRegion(page2))),
+                ),
+            ),
+        ).map { it.anchor.quoteAnchor }
+        assertEquals(3, odnbQuotes.size)
+        assertTrue(odnbQuotes.none { "as a whole" in it || "Downloaded from" in it })
+        assertTrue(odnbQuotes.any { "visiting scholars" in it })
+        assertTrue(odnbQuotes.any { "written down in the register" in it })
+        assertTrue(odnbQuotes.any { "south windows" in it })
+
+        val halvesOnly = """
+            Downloaded from the public archive on 3 June 2006.
+
+            Niles Carter to the recorded century as a whole.
+
+            The argument stops halfway through the public catalog and then
+
+            Ada Quentin to the recorded century as a whole.
+        """.trimIndent()
+        assertTrue(
+            LiteraturePassages.extractCandidates(
+                Textbook(
+                    "halves-only",
+                    "Halves Only",
+                    "pdf",
+                    listOf(
+                        BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                        BookPage(2, halvesOnly, guideRegions = listOf(GuideRegion(halvesOnly))),
+                    ),
+                ),
+            ).isEmpty(),
+        )
+    }
+
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {
         val smallPages = (1..2).map { n ->
             val lines = (1..10).joinToString("\n") { i ->

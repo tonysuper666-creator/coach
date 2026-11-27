@@ -954,12 +954,13 @@ internal fun TextbookReader(
             return@LaunchedEffect
         }
         val loaded = withContext(Dispatchers.IO) {
-            val board = library.conceptSayings(id, book.id)
+            val lookup = library.conceptSayingsLookup(id, book.id)
             val aiOn = library.isReadingAiExplainEnabled()
-            val hold = board?.let { library.sayingHoldUntil(id, it.inputHash) }
-            Triple(board, aiOn, hold)
+            val hold = lookup.board?.let { library.sayingHoldUntil(id, it.inputHash) }
+            Triple(lookup, aiOn, hold)
         }
-        val board = loaded.first
+        val lookup = loaded.first
+        val board = lookup.board
         // 与书单对齐同一条：界面开关或本机「伴读讲解与提问」任一关闭，正文都不发到远端。
         val remoteAllowed = aiEnabled && loaded.second
         val persistedHold = loaded.third
@@ -1000,7 +1001,7 @@ internal fun TextbookReader(
         } else {
             sayingGates.remove(id)
             checkingSayings = false
-            sayingsNotice = null
+            sayingsNotice = if (lookup.anchorMismatch) ConceptSayingLogic.ANCHOR_MISMATCH else null
         }
     }
     val practiceDraftNodeId = remember(book.id, currentChapterGroup?.chapterId) {

@@ -1,5 +1,9 @@
 package com.coach.desktop.books
 
+import org.junit.Assume.assumeTrue
+import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -365,6 +369,129 @@ class ReadingMethodTest {
         assertEquals(ReadingMethod.BEFORE, choice.method)
         assertTrue(choice.reason.contains("处章末练习"))
         assertFalse(choice.reason.contains("看不出"))
+    }
+
+    @Test
+    fun gbkWallOfTextExposesNumberedChapters() {
+        val sentence = "他沿着河边走了很久，看见几棵老树和一座石桥，却没有停下来说话。"
+        val body = sentence.repeat(6)
+        val raw = "开场白写在这里，先把规矩说完。第一章$body。第二章$body。第三章$body。"
+        val decoded = BookText.decode(raw.toByteArray(Charset.forName("GB18030")))
+        val pages = BookText.chapters(decoded)
+        val structure = BookStructurePlanner.plan("gbk-wall", "样书", "txt", pages)
+        val chapterNodes = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
+        assertTrue(chapterNodes.size >= 3, "chapters=${chapterNodes.map { it.title }}")
+        val book = Textbook(id = "gbk-wall", title = "样书", format = "txt", pages = pages, structure = structure)
+        val signals = ReadingMethodSignalsReader.fromBook(book)
+        val choice = ReadingMethodSelector.choose(signals)
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertTrue(signals.chapterCount >= 2)
+        assertTrue(signals.numberedChapters * 2 >= signals.chapterCount)
+        assertEquals(
+            "全书 ${signals.chapterCount} 章，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。",
+            choice.reason,
+        )
+        assertTrue(choice.reason.any { it.isDigit() })
+        assertFalse(choice.reason.startsWith("这本看不出"))
+    }
+
+    @Test
+    fun lineStartChaptersAreNotRewritten() {
+        val text = "第一章\n河边有一座石桥。\n第二章\n桥下的水很清。\n第三章\n他在桥上站了一会儿。"
+        val pages = BookText.chapters(text)
+        assertEquals(3, pages.size)
+        assertTrue(pages[0].text.startsWith("第一章"))
+        assertTrue(pages[1].text.startsWith("第二章"))
+        assertFalse(pages[0].text.startsWith("\n"))
+    }
+
+    @Test
+    fun oneInlineChapterStaysInTheParagraph() {
+        val pages = BookText.chapters("先把话说完。第二章才开始讲后面的事。")
+        assertEquals(1, pages.size)
+        assertFalse(pages[0].text.contains("\n第二章"))
+    }
+
+    @Test
+    fun scannedPdfReasonCitesPagesInsteadOfTheGenericSentence() {
+        val book = Textbook(
+            id = "scan",
+            title = "扫描",
+            format = "pdf",
+            pages = (1..24).map { BookPage(it, "") },
+            structure = BookStructure(
+                pageRoles = emptyMap(),
+                sections = emptyList(),
+                source = HeadingSource.FALLBACK_LENGTH.name,
+                tocNodes = emptyList(),
+            ),
+        )
+        val signals = ReadingMethodSignalsReader.fromBook(book)
+        assertTrue(signals.thinText)
+        assertEquals(0, signals.chapterCount)
+        val choice = ReadingMethodSelector.choose(signals)
+        assertEquals(ReadingMethod.DURING, choice.method)
+        assertEquals(
+            "这是扫描版，共 24 页，正文还没认出。读到一节就停一下，用自己的话说刚刚读到的意思。",
+            choice.reason,
+        )
+        assertFalse(choice.reason.contains("看不出"))
+    }
+
+    @Test
+    fun tenLocalBooksCiteStructureInsteadOfTheGenericSentence() {
+        val root = Path.of("D:/agent/materials")
+        assumeTrue("local materials are not on this machine", Files.isDirectory(root))
+        val expected = linkedMapOf(
+            "Health-Economics-620p.pdf" to ReadingMethod.BEFORE,
+            "Wealth-of-Nations-Smith.epub" to ReadingMethod.DURING,
+            "Nahan-LuXun.epub" to ReadingMethod.DURING,
+            "Principle-of-Population-Malthus.epub" to ReadingMethod.DURING,
+            "Principles-of-Political-Economy-Ricardo.epub" to ReadingMethod.DURING,
+            "Nahan-LuXun-utf8.txt" to ReadingMethod.DURING,
+            "P5-Nahan-GBK.txt" to ReadingMethod.DURING,
+            "ECNM10119-Week1-Lecture-Slides.pdf" to ReadingMethod.DURING,
+            "P5-scanned-Nahan-24p.pdf" to ReadingMethod.DURING,
+            "Outline-of-Science-Vol1-illustrated.epub" to ReadingMethod.DURING,
+        )
+        val found = HashMap<String, Path>()
+        Files.walk(root).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.toString() in expected }.forEach { path ->
+                found.putIfAbsent(path.fileName.toString(), path)
+            }
+        }
+        assertEquals(expected.keys, found.keys)
+        val libraryRoot = Files.createTempDirectory("coach-reading-method-")
+        try {
+            val library = TextbookLibrary(libraryRoot.resolve("library"))
+            var hits = 0
+            for ((name, method) in expected) {
+                val book = library.importBook(found.getValue(name))
+                val signals = ReadingMethodSignalsReader.fromBook(
+                    book,
+                    sourceName = library.sourceFilename(book.id) ?: name,
+                )
+                val choice = ReadingMethodSelector.choose(signals)
+                println(
+                    "$name method=${choice.method} chapters=${signals.chapterCount} numbered=${signals.numberedChapters} " +
+                        "pages=${signals.pageCount} exercises=${signals.exerciseSections} formulas=${signals.formulaMarks} " +
+                        "thin=${signals.thinText} reason=${choice.reason}",
+                )
+                if (choice.method == method) hits++
+                if (name == "P5-Nahan-GBK.txt") {
+                    assertTrue(signals.chapterCount >= 2, "GBK chapters=${signals.chapterCount} reason=${choice.reason}")
+                    assertTrue(choice.reason.any { it.isDigit() }, choice.reason)
+                    assertFalse(choice.reason.startsWith("这本看不出"), choice.reason)
+                }
+                if (name == "P5-scanned-Nahan-24p.pdf") {
+                    assertTrue(choice.reason.any { it.isDigit() }, choice.reason)
+                    assertFalse(choice.reason.contains("看不出"), choice.reason)
+                }
+            }
+            assertTrue(hits >= 9, "matched $hits of ${expected.size}")
+        } finally {
+            libraryRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test

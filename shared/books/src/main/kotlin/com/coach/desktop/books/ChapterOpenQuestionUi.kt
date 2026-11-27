@@ -46,6 +46,7 @@ internal fun ChapterOpenQuestionCard(
     onDraftChange: (ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     onOpenLogin: () -> Unit,
+    onPointsGraded: (ChapterOpenQuestion, ChapterOpenAttempt) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -137,6 +138,7 @@ internal fun ChapterOpenQuestionCard(
                     onDraftChange = onDraftChange,
                     onOpenAnchor = onOpenAnchor,
                     onOpenLogin = onOpenLogin,
+                    onPointsGraded = onPointsGraded,
                 )
             }
         }
@@ -155,6 +157,7 @@ private fun ChapterOpenAnswerBody(
     onDraftChange: (ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
     onOpenLogin: () -> Unit,
+    onPointsGraded: (ChapterOpenQuestion, ChapterOpenAttempt) -> Unit,
 ) {
     val colors = CoachTheme.colors
     val scope = rememberCoroutineScope()
@@ -225,6 +228,7 @@ private fun ChapterOpenAnswerBody(
                                     answer = draft.openAnswerDraft,
                                     items = items,
                                 )
+                                onPointsGraded(question, next.last())
                                 onDraftChange(
                                     draft.copy(
                                         openAttemptsJson = ChapterOpenJson.encodeAttempts(next),

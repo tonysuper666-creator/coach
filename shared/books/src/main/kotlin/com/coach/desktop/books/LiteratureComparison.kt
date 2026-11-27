@@ -258,7 +258,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             }
             return if (rule == "ok") source else null
         }
-        val rows = books.map { book ->
+        val rows = reconcileRelations(books.map { book ->
             val meta = paperMetas.getValue(book.id)
             val raw = byBook[book.id]
             ComparisonRow(
@@ -272,7 +272,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                     .map { cellFrom(it, book.id, ::cite) },
                 relations = relationsFrom(raw?.get("relations") as? JsonArray, book.id, ::cite),
             )
-        }
+        })
         val (outline, outlineNotice) = outlineFrom(body["outline"] as? JsonArray, ::cite)
         val table = LiteratureComparison(rows, outline)
         val audit = table.audit()
@@ -323,6 +323,33 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
         val selected = packed()
         require(selected.isNotEmpty()) { "这些 PDF 里没有可用的正文句子，所以没有出表。" }
         return selected
+    }
+
+    /** Support against refute (either direction) is not shown as two verified cells. */
+    private fun reconcileRelations(rows: List<ComparisonRow>): List<ComparisonRow> {
+        val kindAt = HashMap<Pair<String, String>, ComparisonRelationKind>()
+        rows.forEach { row ->
+            row.relations.forEach { rel ->
+                val kind = rel.kind ?: return@forEach
+                if (rel.cell.pending) return@forEach
+                kindAt[row.bookId to rel.otherBookId] = kind
+            }
+        }
+        fun conflicts(from: String, to: String): Boolean {
+            val forward = kindAt[from to to] ?: return false
+            val back = kindAt[to to from] ?: return false
+            return forward != back &&
+                (forward == ComparisonRelationKind.REFUTE || back == ComparisonRelationKind.REFUTE)
+        }
+        return rows.map { row ->
+            row.copy(relations = row.relations.map { rel ->
+                if (rel.kind != null && !rel.cell.pending && conflicts(row.bookId, rel.otherBookId)) {
+                    rel.copy(kind = null, cell = pendingCell())
+                } else {
+                    rel
+                }
+            })
+        }
     }
 
     private fun cellFrom(

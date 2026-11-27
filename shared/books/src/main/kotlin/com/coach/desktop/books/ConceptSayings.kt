@@ -130,10 +130,17 @@ internal data class ConceptSayingsBoard(
     }
 }
 
+/** 概念名对得上，但当前这本书里的原句已经对不上时，[anchorMismatch] 为真。 */
+internal data class SayingsLookup(
+    val board: ConceptSayingsBoard?,
+    val anchorMismatch: Boolean,
+)
+
 internal object ConceptSayingLogic {
     const val ONLY_THIS_BOOK = ConceptSayingsBoard.ONLY_THIS_BOOK
     const val RETRY_LATER = "稍后再试"
     const val NO_MATCH = "这几本书里还对不上这个说法。"
+    const val ANCHOR_MISMATCH = "这个概念在书里对不上原句，没法看别的书怎么说。"
     const val RETRY_HOLD_MS = 10 * 60_000L
 
     fun inputHash(conceptId: String, candidates: List<SayingCandidate>): String {

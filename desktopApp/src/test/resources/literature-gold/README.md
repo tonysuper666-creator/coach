@@ -8,6 +8,7 @@ These are page excerpts from the public test library. The three PDFs retain the 
 | bloom | Both columns of source page 3, including the methods and context paragraphs, Figure 2 caption, controlled strategy and both footer notes. | Same four authors, [How Teachers Can Use Large Language Models and Bloom's Taxonomy to Create Educational Quizzes](https://arxiv.org/abs/2401.05914v2) |
 | double-spaced | Source page 2, complete abstract and footer. | Nasser Rezzoug, Antun Skuric, Vincent Padois and David Daney, [Simulation Study of the Upper-limb Wrench Feasible Set with Glenohumeral Joint Constraints](https://arxiv.org/abs/2309.07487v1) |
 | liberty | Two paragraphs of the introduction and notes 6–7, with the original XHTML markup. The three discontiguous samples occupy separate spine members. | John Stuart Mill, *On Liberty*, introduction by W. L. Courtney, [Project Gutenberg 34901](https://www.gutenberg.org/ebooks/34901) |
+| pollock | Entire source PDF pages 48 and 49 (printed 3 and 4). Original scans with a frozen invisible 300 dpi Tesseract 5.5.2 English text layer. | F. Pollock and F. W. Maitland, *The History of English Law before the Time of Edward I*, volume I (1895), public domain. [University of California copy, Google / Internet Archive](https://archive.org/details/historyenglishl03maitgoog) |
 | shape | Two synthetic pages with an indented small-type quotation, repeated body sentence, and hanging footnote in smaller type. Only the second page has a drawn separator. | Original test material |
 
 The three papers and their annotated excerpts are distributed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The Mill text is public domain in the US. [Project Gutenberg terms](https://www.gutenberg.org/policy/license.html).
@@ -15,6 +16,8 @@ The three papers and their annotated excerpts are distributed under [CC BY 4.0](
 Run `:desktopApp:test --tests '*LiteratureGoldTest'` through the repository's heavy runner. Recall counts whole body sentences at the labeled page. Unexpected candidates, including note fragments, fail the check. The citation check uses the page text as its OCR response to isolate candidate selection and anchor consistency.
 
 On #696 at `b7f9a746` the unmodified product recovered 75 of 79 body sentences (94.94%). Eleven candidates leaked from notes (nine EPUB and two PDF). One additional candidate was a truncated body sentence.
+
+The Pollock labels follow the printed sentence boundaries, using the words actually present in the OCR layer, including recognition errors. Both pages were checked against the facsimile. The body denominator includes every complete single-page sentence. The opening and closing cross-page fragments cannot be single-page anchors. Marginal summaries and running matter are labeled separately from the footnotes. The frozen layer lets all CI hosts exercise searchable scans without installing an OCR engine.
 
 ## Private PDF acceptance
 

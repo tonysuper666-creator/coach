@@ -101,7 +101,10 @@ internal class TextbookLibrary(
         database().use(::ensurePageProblems)
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
-        createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
+        createStatement().use { sql ->
+            sql.execute("PRAGMA busy_timeout=5000")
+            sql.execute("PRAGMA foreign_keys=ON")
+        }
     }
 
     private fun catalog(db: Connection): List<BookSummary> =

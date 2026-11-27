@@ -131,7 +131,11 @@ internal object LearningJournal {
         val kind = "'${table.kind}'"
         fun payload(prefix: String, fields: List<String> = columns): String =
             "json_object(" + fields.joinToString(",") { "'$it',$prefix.$it" } + ")"
-        fun visible(prefix: String) = if (table.kind == "exam_attempt") "$prefix.owner='learner'" else "1"
+        fun visible(prefix: String) = when (table.kind) {
+            "exam_attempt" -> "$prefix.owner='learner'"
+            "topic_source" -> "$prefix.topic_id IS NOT NULL"
+            else -> "1"
+        }
         val maps = "learning_sync_events"
         fun event(prefix: String) = if (table.event) {
             "(SELECT record_id FROM $maps WHERE kind=$kind AND local_id=$prefix.id)"

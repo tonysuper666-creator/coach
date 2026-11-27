@@ -179,12 +179,17 @@ class CourseVisionService(
         Files.createDirectories(directory)
         database().use { db ->
             db.createStatement().use { sql ->
+                // The old table was keyed by page digest alone and served one account's transcript to another.
+                // Its rows have no owner, so they are dropped and rebuilt per account.
+                sql.execute("DROP TABLE IF EXISTS vision_cache")
                 sql.execute(
-                    """CREATE TABLE IF NOT EXISTS vision_cache(
-                        page_sha256 TEXT PRIMARY KEY,
+                    """CREATE TABLE IF NOT EXISTS vision_cache_scoped(
+                        scope TEXT NOT NULL,
+                        page_sha256 TEXT NOT NULL,
                         text TEXT NOT NULL,
                         model TEXT NOT NULL,
-                        updated_at INTEGER NOT NULL
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY(scope, page_sha256)
                     )""",
                 )
             }
@@ -195,27 +200,32 @@ class CourseVisionService(
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
     }
 
-    fun lookupCached(pageSha256: String): Pair<String, String>? = database().use { db ->
-        db.prepareStatement("SELECT text, model FROM vision_cache WHERE page_sha256=?").use { sql ->
-            sql.setString(1, pageSha256)
+    /** Cache rows belong to one account: the owner, or one friend (by hashed id). */
+    internal fun cacheScope(friend: String?): String = friend?.let { "friend:${friendId(it)}" } ?: "owner"
+
+    fun lookupCached(pageSha256: String, friend: String? = null): Pair<String, String>? = database().use { db ->
+        db.prepareStatement("SELECT text, model FROM vision_cache_scoped WHERE scope=? AND page_sha256=?").use { sql ->
+            sql.setString(1, cacheScope(friend))
+            sql.setString(2, pageSha256)
             sql.executeQuery().use { rows ->
                 if (rows.next()) rows.getString(1) to rows.getString(2) else null
             }
         }
     }
 
-    private fun storeCached(pageSha256: String, text: String, model: String) {
+    private fun storeCached(pageSha256: String, text: String, model: String, friend: String?) {
         if (text.isBlank()) return
         database().use { db ->
             db.prepareStatement(
-                """INSERT INTO vision_cache(page_sha256, text, model, updated_at)
-                   VALUES(?,?,?,?)
-                   ON CONFLICT(page_sha256) DO UPDATE SET text=excluded.text, model=excluded.model, updated_at=excluded.updated_at""",
+                """INSERT INTO vision_cache_scoped(scope, page_sha256, text, model, updated_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(scope, page_sha256) DO UPDATE SET text=excluded.text, model=excluded.model, updated_at=excluded.updated_at""",
             ).use { sql ->
-                sql.setString(1, pageSha256)
-                sql.setString(2, text)
-                sql.setString(3, model)
-                sql.setLong(4, System.currentTimeMillis())
+                sql.setString(1, cacheScope(friend))
+                sql.setString(2, pageSha256)
+                sql.setString(3, text)
+                sql.setString(4, model)
+                sql.setLong(5, System.currentTimeMillis())
                 sql.executeUpdate()
             }
         }
@@ -266,7 +276,7 @@ class CourseVisionService(
             val pngB64 = (obj["pngBase64"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             require(sha.isNotBlank()) { "缺少页面摘要（pageSha256）。" }
 
-            val hit = lookupCached(sha)
+            val hit = lookupCached(sha, friend)
             if (hit != null) {
                 cacheHits++
                 completedPages += pageNum
@@ -288,7 +298,7 @@ class CourseVisionService(
             } catch (e: MockError) {
                 throw enrichBatchFailure(pageNum, completedPages, e)
             }
-            storeCached(sha, reply.text, reply.model)
+            storeCached(sha, reply.text, reply.model, friend)
             completedPages += pageNum
             billedCalls++
             if (friend == null) {

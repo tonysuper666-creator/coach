@@ -1314,7 +1314,7 @@ class StudyModePackService(
             }
         }
 
-        ledger?.record(
+        if (req.friend == null) ledger?.record(
             TokenLedgerEntry(
                 bookId = req.bookId,
                 chapterId = "ch-${req.chapterNum}",
@@ -1346,7 +1346,7 @@ class StudyModePackService(
             repairOnlyWhenZeroValid = true,
         )
         mathRepairReply?.let { r ->
-            ledger?.record(
+            if (req.friend == null) ledger?.record(
                 TokenLedgerEntry(
                     bookId = req.bookId,
                     chapterId = "ch-${req.chapterNum}",
@@ -1373,7 +1373,7 @@ class StudyModePackService(
             repairOnlyWhenZeroValid = true,
         )
         anchorRepairReply?.let { r ->
-            ledger?.record(
+            if (req.friend == null) ledger?.record(
                 TokenLedgerEntry(
                     bookId = req.bookId,
                     chapterId = "ch-${req.chapterNum}",
@@ -1562,7 +1562,7 @@ CRITICAL RULES:
                 )
                 totalIn.addAndGet(reply.inputTokens)
                 totalOut.addAndGet(reply.outputTokens)
-                ledger?.record(
+                if (req.friend == null) ledger?.record(
                     TokenLedgerEntry(
                         bookId = req.bookId,
                         chapterId = "book-map-chunk-$chunkIdx",
@@ -1651,7 +1651,7 @@ Limits: max 4 thematicClusters, max 8 dependencyEdges, max 8 chapters in fastSki
         )
         totalIn.addAndGet(graphReply.inputTokens)
         totalOut.addAndGet(graphReply.outputTokens)
-        ledger?.record(
+        if (req.friend == null) ledger?.record(
             TokenLedgerEntry(
                 bookId = req.bookId,
                 chapterId = "book-map-graph",

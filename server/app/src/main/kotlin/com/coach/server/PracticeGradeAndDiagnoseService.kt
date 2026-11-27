@@ -89,15 +89,22 @@ internal fun planPracticeCall(
     val courseNote = task == PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE
     val courseCheck = task == PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK
     val useBatch = backgroundBatch && !chapterOpen && friend == null && !courseNote && !courseCheck
+    // The friend channel admits only READER_SELECTION on Claude models (subscription_bridge.build_req), so a friend's
+    // second essay vote comes from Sonnet instead of GPT; it stays independent of the Haiku note vote.
     val model = when {
+        courseCheck && friend != null -> BridgeClient.CLAUDE
         courseCheck -> BridgeClient.GPT_62_ASTRA
         chapterOpen || courseNote -> BridgeClient.HAIKU
         friend != null -> BridgeClient.CLAUDE
         else -> defaultModel
     }
-    val targetTask = if (friend != null && !courseNote && !courseCheck) "READER_SELECTION" else task
+    val targetTask = if (friend != null) "READER_SELECTION" else task
     return PracticeCallPlan(useBatch = useBatch, model = model, task = targetTask)
 }
+
+/** The second essay vote must come from a different model than the Haiku note: GPT for the owner, Sonnet for friends. */
+internal fun courseEssayCheckModel(servedBy: String, friend: Boolean): Boolean =
+    if (friend) servedBy.startsWith("claude-") && !servedBy.startsWith("claude-haiku") else servedBy.startsWith("gpt-")
 
 enum class PracticeRubricVerdict {
     FULL,
@@ -1097,7 +1104,7 @@ class PracticeGradeAndDiagnoseService(
                 PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
                 "ce-check",
                 asked,
-            ) { it.startsWith("gpt-") }
+            ) { courseEssayCheckModel(it, friend = !recordOwnerLedger) }
             val disagreed = asked.filter { row ->
                 val haiku = haikuVotes[row.point.id]
                 val gpt = gptVotes[row.point.id]
@@ -1108,7 +1115,7 @@ class PracticeGradeAndDiagnoseService(
                     PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
                     "ce-recheck",
                     disagreed,
-                ) { it.startsWith("gpt-") }
+                ) { courseEssayCheckModel(it, friend = !recordOwnerLedger) }
             }
         }
 

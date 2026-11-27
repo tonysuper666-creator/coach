@@ -25,19 +25,49 @@ class PublicApiTableTest {
     private val literal = Regex(""""((?:[^"\\\n]|\\.)*)"""")
     private val endpointStart = Regex("""(?:^|(?<=[/}]))(v1/|api/books/|learning-sync/|offline-pack)""")
 
-    /** `"$base/v1/books/${id.encode()}/status?x=1"` becomes `/v1/books/{x}/status`. */
+    private fun normalize(text: String) = text
+        .replace(Regex("""\$\{[^}]*}"""), "{x}")
+        .replace(Regex("""\$[A-Za-z_][A-Za-z0-9_]*"""), "{x}")
+        .substringBefore('?')
+
+    /**
+     * Endpoint paths in Kotlin source lines. Three shapes count as a server call:
+     * - a literal that starts with a base-URL template: `"$base/…"`, `"${identity.serverUrl.trimEnd('/')}/…"`;
+     * - a literal appended to a base URL: `baseUrl.trimEnd('/') + "/…"`;
+     * - a literal with a known API prefix anywhere (`"v1/library/…"` passed to a helper).
+     * `"$base/v1/books/${id.encode()}/status?x=1"` becomes `/v1/books/{x}/status`.
+     */
+    internal fun endpointsIn(lines: Sequence<String>): Set<String> {
+        val found = sortedSetOf<String>()
+        for (line in lines) for (match in literal.findAll(line)) {
+            val raw = match.groupValues[1]
+            val base = baseTemplate.find(raw)
+            val baseExpr = base?.let { it.groupValues[1].ifEmpty { it.groupValues[2] } }
+            val before = line.substring(0, match.range.first)
+            val path = when {
+                base != null && isBaseUrl(baseExpr!!) -> "/" + normalize(base.groupValues[3])
+                raw.startsWith("/") && appended.containsMatchIn(before) -> normalize(raw)
+                else -> endpointStart.find(normalize(raw))?.let { "/" + normalize(raw).substring(it.range.first) }
+            } ?: continue
+            // `"$base/$path"` is a helper forwarding a literal that is scanned where it is written.
+            val fixed = path.split('/').any { it.isNotEmpty() && it != "{x}" }
+            if (fixed && !path.contains(' ')) found += path
+        }
+        return found
+    }
+    private val baseTemplate = Regex("""^\$(?:\{([^}]*)}|([A-Za-z_][A-Za-z0-9_]*))/(.*)$""")
+    /** `identity.serverUrl.trimEnd('/')` and `baseUrl` name a server; `document.encodeURLPathPart()` does not. */
+    private fun isBaseUrl(expression: String) =
+        expression.replace(Regex("""\.\w+\([^)]*\)"""), "").substringAfterLast('.').contains(Regex("(?i)^(base|.*url)$"))
+    private val appended = Regex("""(?i)(base|url)[^"]*\+\s*$""")
+
     private fun clientPaths(): Map<String, Set<String>> {
         val found = sortedMapOf<String, MutableSet<String>>()
         for (root in clientRoots.map(repo::resolve).filter { it.isDirectory() }) {
             Files.walk(root).use { files ->
                 files.filter { it.extension == "kt" && !testDirs.containsMatchIn(repo.relativize(it).invariantSeparatorsPathString) }
                     .forEach { file ->
-                        for (line in file.readLines()) for (match in literal.findAll(line)) {
-                            val text = match.groupValues[1]
-                                .replace(Regex("""\$\{[^}]*}"""), "{x}")
-                                .replace(Regex("""\$[A-Za-z_][A-Za-z0-9_]*"""), "{x}")
-                            val start = endpointStart.find(text) ?: continue
-                            val path = "/" + text.substring(start.range.first).substringBefore('?')
+                        for (path in endpointsIn(file.readLines().asSequence())) {
                             found.getOrPut(path) { sortedSetOf() } += repo.relativize(file).invariantSeparatorsPathString
                         }
                     }
@@ -45,6 +75,8 @@ class PublicApiTableTest {
         }
         return found
     }
+
+    private fun unregistered(paths: Collection<String>) = paths.filter { path -> PublicApiTable.routes.none { covers(it.template, path) } }
 
     private fun covers(template: String, clientPath: String): Boolean {
         val want = template.split('/')
@@ -66,7 +98,7 @@ class PublicApiTableTest {
         for (known in listOf("/v1/library/practice/grade-and-diagnose", "/v1/library/course/mock/generate", "/v1/ws", "/v1/courses/{x}/events")) {
             assertTrue(known in paths, "scan missed $known")
         }
-        val missing = paths.filterKeys { path -> PublicApiTable.routes.none { covers(it.template, path) } }
+        val missing = paths.filterKeys { it in unregistered(paths.keys) }
         assertTrue(missing.isEmpty(), "Register these client endpoints in PublicApiTable (SIGNED_IN or OWNER):\n" +
             missing.entries.joinToString("\n") { (path, files) -> "  $path  <- ${files.joinToString()}" })
         val owner = paths.keys.filter { path -> PublicApiTable.routes.first { covers(it.template, path) }.access == ApiAccess.OWNER }
@@ -85,5 +117,20 @@ class PublicApiTableTest {
             val clash = owner.filter { it.matches(method, sample) }
             assertEquals(emptyList(), clash.map { it.template }, "open path ${row.template} also matches owner rows")
         }
+    }
+
+    @Test fun aNewUnregisteredClientCallFailsEvenUnderANewPrefix() {
+        val synthetic = sequenceOf(
+            "val a = http.get(\"\$base/v2/brand-new/\${id.encodeURLPathPart()}\")",
+            "val b = client.post(\"\${identity.serverUrl.trimEnd('/')}/fresh/thing?x=1\")",
+            "private val url = baseUrl.trimEnd('/') + \"/other/new\"",
+            "postCourseEndpoint(\"v1/library/not-yet-registered\", input)",
+            "val known = http.get(\"\$base/v1/books\")",
+            "val file = Path.of(\"\$dir/notes.md\")",
+            "val label = \"layout=shuffled-v1\"",
+        )
+        val found = endpointsIn(synthetic)
+        assertEquals(setOf("/v2/brand-new/{x}", "/fresh/thing", "/other/new", "/v1/library/not-yet-registered", "/v1/books"), found)
+        assertEquals(listOf("/fresh/thing", "/other/new", "/v1/library/not-yet-registered", "/v2/brand-new/{x}"), unregistered(found).sorted())
     }
 }

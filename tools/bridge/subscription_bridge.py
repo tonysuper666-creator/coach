@@ -50,7 +50,7 @@ from api_route import (
     route as api_model, vendor as api_vendor,
 )
 from api_budget import Denied
-from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_TASKS
+from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_TASKS, FRIEND_BATCH_LABELS
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
@@ -1408,7 +1408,7 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
                       and not body.get("tools") and not spec_data.images
                       and re.fullmatch(r"[a-f0-9]{64}", headers.get("x-coach-batch-key", ""))
                       and headers.get("x-coach-format-attempt", "0") == "0"):
-        message = "文献导读需要 Haiku Batch" if headers.get("x-coach-task") == GUIDE_TASK else "文献对比需要 Haiku Batch"
+        message = f"{FRIEND_BATCH_LABELS[headers.get('x-coach-task')]}需要 Haiku Batch"
         raise BridgeError(400, message, reason="unsupported_batch_task")
     if friend_batch:
         fallback_enabled = False

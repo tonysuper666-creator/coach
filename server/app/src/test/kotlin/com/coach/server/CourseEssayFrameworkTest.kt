@@ -230,6 +230,18 @@ class CourseEssayFrameworkTest {
     }
 
     @Test
+    fun friendEssayGetsFullMarksWhenHaikuAndSonnetVotesAgree() = runBlocking {
+        val ids = ids()
+        val script = script(modelFor = { task ->
+            if (task == PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE) "claude-haiku-5-5" else "claude-sonnet-5-5"
+        }) { _, _, _ -> votes(ids.grossman to true, ids.supply to true) }
+        val response = PracticeGradeAndDiagnoseService(script).process(request(bothFrameworks()), friend = "甲", device = "friend-pc")
+        val grossman = response.rubricItems.first { it.cid == ids.grossman }
+        assertEquals(PracticeRubricVerdict.FULL, grossman.verdict)
+        assertEquals(1.0, grossman.awardedMarks)
+    }
+
+    @Test
     fun wrongModelFamilyIsNotAccepted() = runBlocking {
         val ids = ids()
         val script = script(modelFor = { "claude-sonnet-5-5" }) { _, _, _ -> votes(ids.grossman to true, ids.supply to true) }
@@ -292,7 +304,8 @@ class CourseEssayFrameworkTest {
         )
         assertFalse(friendNote.useBatch)
         assertEquals(BridgeClient.HAIKU, friendNote.model)
-        assertEquals(PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE, friendNote.task)
+        // The friend channel only admits READER_SELECTION on Claude models (TON-1943).
+        assertEquals("READER_SELECTION", friendNote.task)
 
         val check = planPracticeCall(
             PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
@@ -301,8 +314,16 @@ class CourseEssayFrameworkTest {
             defaultModel = PracticeGradeLimits.PINNED_GRADE_MODEL,
         )
         assertFalse(check.useBatch)
-        assertEquals(BridgeClient.GPT_62_ASTRA, check.model)
-        assertEquals(PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK, check.task)
+        assertEquals(BridgeClient.CLAUDE, check.model)
+        assertEquals("READER_SELECTION", check.task)
+        val ownerCheck = planPracticeCall(
+            PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
+            friend = null,
+            backgroundBatch = true,
+            defaultModel = PracticeGradeLimits.PINNED_GRADE_MODEL,
+        )
+        assertEquals(BridgeClient.GPT_62_ASTRA, ownerCheck.model)
+        assertEquals(PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK, ownerCheck.task)
 
         val chapter = planPracticeCall(
             PracticeGradeLimits.TASK_CHAPTER_OPEN,

@@ -1,8 +1,12 @@
 """Conservative credit reservations. Billing authority remains the provider, not this ledger.
 
-The owner authorized 95% of the configured monthly API grants. This ledger records
-Coach usage, not the shared account's remaining grant or provider billing period.
-All amounts on disk are integer microdollars, never prompt/response contents.
+The free monthly API grants may be used in full (TON-740, 2026-11-27): usage inside the
+grant is recorded, never throttled. The only stop is the grant itself running out —
+Coach's share of it in the allocation plan (the grant minus other writers' shares).
+Every call is reserved at its upper-bound price before it is sent and settled from the
+provider's usage receipt, so the ledger never trails the provider's charges.
+This ledger records Coach usage, not the shared account's remaining grant or provider
+billing period. All amounts on disk are integer microdollars, never prompt/response contents.
 """
 from __future__ import annotations
 
@@ -29,6 +33,10 @@ class Denied(Exception):
     """A content-free reason safe for diagnostics."""
 
 
+# The one spend refusal: Coach's share of this month's free grant is used up.
+FREE_GRANT_EXHAUSTED = "free_grant_exhausted"
+
+
 def require(condition):
     # Safety checks must remain enabled under python -O.
     if not condition:
@@ -40,7 +48,8 @@ def micros(value) -> int:
 
 
 def grant_limit_micros(provider):
-    return micros(MONTHLY_GRANTS[provider]) * 95 // 100
+    """The whole free monthly grant. Spending past it would cost real money."""
+    return micros(MONTHLY_GRANTS[provider])
 
 
 def settled_total(data, provider):
@@ -93,7 +102,7 @@ class CreditLedger:
                 identity = (writer["host"], writer["state"])
                 require(identity not in limits)
                 limits[identity] = (share, baseline)
-            require(others + sum(share for share, _ in limits.values()) <= grant * 95 // 100)
+            require(others + sum(share for share, _ in limits.values()) <= grant)
             share, baseline = limits[socket.gethostname(), str(self.state.resolve())]
             require((self.state / "api-credit-ledger.json").is_file())
             first_month = datetime.fromtimestamp(start, timezone.utc).strftime("%Y-%m")
@@ -188,7 +197,9 @@ class CreditLedger:
         for month, summary in data["months"].items():
             atomic_json(self.state / f"api-spend-{month}.json", summary)
 
-    def friend_limits(self, friend):
+    def friend_paused(self, friend) -> bool:
+        """The owner's manual switch (`paused: true`), not a quota. Daily figures in the
+        config (`daily_calls`, `daily_tokens`) are only read by reports, never enforced."""
         path = Path(os.environ.get("COACH_FRIEND_CONFIG", str(Path.home() / "Coach/config/friends.json")))
         try:
             data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -196,12 +207,7 @@ class CreditLedger:
             require(isinstance(defaults, dict) and isinstance(friends, dict))
             override = friends.get(friend, {})
             require(isinstance(override, dict))
-            if data.get("paused", False) or override.get("paused", False):
-                raise Denied("monthly_quota")
-            settings = defaults | override
-            limits = {key: settings[key] for key in ("daily_calls", "daily_tokens") if key in settings}
-            require(all(type(v) is int and v >= 0 for v in limits.values()))
-            return limits
+            return bool(data.get("paused", False) or override.get("paused", False))
         except (OSError, ValueError, TypeError, AttributeError):
             raise Denied("friend_config_unreadable") from None
 
@@ -261,24 +267,19 @@ class CreditLedger:
                              "reserved_microusd": pending,
                              "cause": "pending_reservations" if maximum <= before_holds else "insufficient_allocation"})
                 atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
-                raise Denied("credit_limit_95_percent")
+                raise Denied(FREE_GRANT_EXHAUSTED)
             token = secrets.token_hex(16)
             if friend is not None:
                 if (provider != "anthropic" or not re.fullmatch(r"[a-f0-9]{64}", friend) or
                         not isinstance(device, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device) or
                         type(tokens) is not int or tokens <= 0):
                     raise Denied("invalid_friend_reservation")
-                limits = self.friend_limits(friend)
+                if self.friend_paused(friend):
+                    raise Denied("friends_paused")
                 day = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
                 usage = data.setdefault("friends", {}).setdefault(friend, {}).setdefault(day,
                     {"calls": 0, "input_tokens": 0, "output_tokens": 0, "spent_microusd": 0, "reserved": {}, "devices": {}})
-                call_limit = limits.get("daily_calls")
-                token_limit = limits.get("daily_tokens")
-                if call_limit is not None and usage["calls"] + len(usage["reserved"]) + 1 > call_limit:
-                    raise Denied("daily_quota")
-                if token_limit is not None and (usage["input_tokens"] + usage["output_tokens"] +
-                        sum(p["tokens"] for p in usage["reserved"].values()) + tokens > token_limit):
-                    raise Denied("daily_quota")
+                # Per-person usage is recorded (calls, tokens, cost, per device), never capped.
                 usage["reserved"][token] = {"tokens": tokens, "device": device, "microusd": maximum}
             cycle["reserved"][token] = maximum
             summary["reserved_microusd"] += maximum

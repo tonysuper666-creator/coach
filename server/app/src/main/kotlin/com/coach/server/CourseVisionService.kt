@@ -113,29 +113,14 @@ class BridgeCourseVisionTransport(
         return when {
             reason == "missing_key" ->
                 MockError(HttpStatusCode.ServiceUnavailable, "视觉识别密钥尚未配置，暂时无法识别手写或扫描板书。")
-            reason in setOf("credit_limit_95_percent", "monthly_quota") ->
+            freeGrantExhausted(reason) ->
                 if (attemptedUpstream) {
                     MockError(
                         HttpStatusCode.BadGateway,
-                        "视觉识别主用服务失败（可能已产生预留），且备用额度已达到保护上限，未能切换备用服务。",
+                        "视觉识别主用服务失败（可能已产生预留），且$FREE_GRANT_EXHAUSTED_MESSAGE，未能切换备用服务。",
                     )
                 } else {
-                    MockError(
-                        HttpStatusCode.TooManyRequests,
-                        "视觉识别赠额已达到保护上限，本次请求未发送，请确认额度后再试。",
-                    )
-                }
-            reason == "daily_quota" ->
-                if (attemptedUpstream) {
-                    MockError(
-                        HttpStatusCode.BadGateway,
-                        "视觉识别主用服务失败（可能已产生预留），且今日额度已用完，未能切换备用服务。",
-                    )
-                } else {
-                    MockError(
-                        HttpStatusCode.TooManyRequests,
-                        "今日视觉识别额度已用完，本次请求未发送，请明天再试。",
-                    )
+                    MockError(HttpStatusCode.TooManyRequests, "$FREE_GRANT_EXHAUSTED_MESSAGE，本次请求未发送。")
                 }
             reason == "grant_allocation_unavailable" ->
                 if (attemptedUpstream) {

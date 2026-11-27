@@ -57,12 +57,6 @@ fun Application.practiceGradeRoutes(
                         if (!allowed) {
                             throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法提交批改。")
                         }
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
                     }
 
                     val bodyBytes = call.receiveChannel().readRemaining(2L * 1024 * 1024 + 1).readByteArray()

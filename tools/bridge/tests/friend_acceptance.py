@@ -67,6 +67,12 @@ def main():
             COACH_BRIDGE_HOME=str(root / "bridge"), BRIDGE_PORT=str(bridge_port), BRIDGE_USER_ONLY="0",
             COACH_BRIDGE_URL=f"http://127.0.0.1:{bridge_port}", COACH_TRAFFIC="test", COACH_PORT=str(private),
             COACH_PUBLIC_PORT=str(public), COACH_TAIL_HOST="", JAVA_OPTS=f"-Duser.home={root / 'home'}")
+        # One synthetic Coach share of the whole free grant (TON-740), installed beside the ledger.
+        sys.path.insert(0, str(BRIDGE))
+        sys.path.insert(0, str(BRIDGE / "tests"))
+        from grant_fixture import fund
+        (root / "api-state").mkdir(mode=0o700)
+        fund(root / "api-state")
         processes = []
         log = (root / "acceptance.log").open("w")
         try:
@@ -129,25 +135,41 @@ def main():
             status, body = request("/v1/public/status", credentials=b)
             usage = json.loads(body)
             assert status == 200 and usage["calls"] == 2 and not {"callsRemaining", "tokensRemaining"} & usage.keys()
+            # TON-740: a configured daily figure is recorded, never refused.
             (root / "friends.json").write_text(json.dumps({"friends": {b_id: {"daily_calls": 2}}}))
             status, body = request("/v1/library/explain", "POST", b, payload)
-            assert status == 429 and json.loads(body) == {"error": "讲解服务暂时连不上，读书照常。", "code": "daily_quota"}
+            assert status == 200 and "自写样例说明" in json.loads(body)["text"], "A daily figure must not refuse"
             ledger = json.loads((root / "api-state/api-credit-ledger.json").read_text())
             daily = next(iter(ledger["friends"][b_id].values()))
-            assert (daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (2, 200, 40, 0)
+            assert (daily["calls"], daily["input_tokens"], daily["output_tokens"], len(daily["reserved"])) == (3, 300, 60, 0)
             assert daily["spent_microusd"] > 0 and daily["devices"][b["deviceId"]]["spent_microusd"] == daily["spent_microusd"]
-            assert daily["devices"][b["deviceId"]]["calls"] == 2
+            assert daily["devices"][b["deviceId"]]["calls"] == 3
             status, body = request("/v1/public/status", credentials=b)
             assert status == 200 and json.loads(body)["callsRemaining"] == 0
             devices = json.loads(command("devices"))
-            assert any(d["deviceId"] == b["deviceId"] and d["today"]["calls"] == 2 for d in devices)
+            assert any(d["deviceId"] == b["deviceId"] and d["today"]["calls"] == 3 for d in devices)
+            # The only refusal: Coach's free-grant share runs out. Shrink it to what is already spent.
+            api_state = root / "api-state"
+            spent = json.loads((api_state / "api-credit-ledger.json").read_text())["cycles"]
+            spent = sum(c["spent"] for k, c in spent.items() if k.startswith("anthropic:"))
+            plan_path = api_state / "grant-allocation-anthropic.json"
+            plan = json.loads(plan_path.read_text())
+            plan["ledgers"][0]["limit_microusd"] = spent + 1
+            plan_path.write_text(json.dumps(plan))
+            (api_state / "grant-window-anthropic.json").write_text(json.dumps(
+                {"digest": hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest(), "end_utc": plan["end_utc"]}))
+            status, body = request("/v1/library/explain", "POST", b, payload)
+            assert status == 429 and json.loads(body) == {"code": "free_grant_exhausted", "error": "这个月的免费额度用完了"}, (status, body)
+            after = next(iter(json.loads((api_state / "api-credit-ledger.json").read_text())["friends"][b_id].values()))
+            assert (after["calls"], len(after["reserved"])) == (3, 0), "A refused call must not be recorded as spent"
             # The owner's SQL call ledger remains empty.
             db = next((root / "data").glob("*.sqlite"))
             with sqlite3.connect(db) as connection:
                 assert connection.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 0
             print("FRIEND_ACCEPTANCE PASS: real isolated listeners + actual bridge + offline Anthropic SSE")
             print("pair A/B=friend; own sample explanation=200; 20 forbidden paths=empty404; revoke A=401/B=200")
-            print("B default=2 successful calls with no remainder; explicit limit=429; ledger calls=2 input=200 output=40 cost recorded; owner AI calls=0")
+            print("B default=2 successful calls; a configured daily figure is recorded not refused (3 calls, input=300 output=60, cost recorded); "
+                  "Coach free-grant share used up=429 「这个月的免费额度用完了」; owner AI calls=0")
             print("production=untouched; provider network=0; subscription CLI=0")
         finally:
             # Every process is a directly owned child; never terminate by executable name.

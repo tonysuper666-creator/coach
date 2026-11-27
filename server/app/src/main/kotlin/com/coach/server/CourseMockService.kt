@@ -130,9 +130,7 @@ class SonnetBridgeMockPlannerTransport(
         when (result) {
             is BridgeResult.Failure -> {
                 if (friend != null) {
-                    val reason = result.terminal?.reason
-                    val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
-                    throw FriendServiceError(quotaCode ?: "unavailable")
+                    throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 }
                 throw IllegalStateException("course_mock_plan_failed:${result.reason}")
             }

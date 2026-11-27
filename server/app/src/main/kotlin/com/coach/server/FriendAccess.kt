@@ -17,12 +17,23 @@ internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 // Which endpoints a signed-in friend may call lives in PublicApiTable.kt (friendPath/publicApiGate).
 
+/** The one spend refusal (TON-740): Coach's share of this month's free API grant is used up.
+ * Usage inside the grant is only recorded; per-person and per-task limits no longer refuse. */
+internal const val FREE_GRANT_EXHAUSTED = "free_grant_exhausted"
+internal const val FREE_GRANT_EXHAUSTED_MESSAGE = "这个月的免费额度用完了"
+
+/** Bridge terminal reasons meaning the free grant ran out (`credit_limit_95_percent` is the pre-TON-740 name). */
+internal fun freeGrantExhausted(reason: String?): Boolean = reason == FREE_GRANT_EXHAUSTED || reason == "credit_limit_95_percent"
+
+/** What a friend is told for a failed model call: only the exhausted free grant is named. */
+internal fun friendFailureCode(reason: String?): String = if (freeGrantExhausted(reason)) FREE_GRANT_EXHAUSTED else "unavailable"
+
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
 internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {
-    val status get() = if (code in setOf("daily_quota", "monthly_quota")) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
+    val status get() = if (code == FREE_GRANT_EXHAUSTED) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
     val body get() = buildJsonObject {
         put("code", code)
-        put("error", "讲解服务暂时连不上，读书照常。")
+        put("error", if (code == FREE_GRANT_EXHAUSTED) FREE_GRANT_EXHAUSTED_MESSAGE else "讲解服务暂时连不上，读书照常。")
         retryAfterSec?.takeIf { it > 0 }?.let { put("retryAfterSec", it) }
     }
 }

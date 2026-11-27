@@ -187,14 +187,6 @@ fun Application.booklistAlignmentRoutes(
                 val friend = call.attributes.getOrNull(observedFriend)
                 val device = call.attributes[observedDevice]
                 try {
-                    if (friend != null && friends != null) {
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
-                    }
                     val channel = call.receiveChannel()
                     val bytes = ByteArray(262_145)
                     var size = 0
@@ -230,14 +222,6 @@ fun Application.booklistAlignmentRoutes(
                 val friend = call.attributes.getOrNull(observedFriend)
                 val device = call.attributes[observedDevice]
                 try {
-                    if (friend != null && friends != null) {
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
-                    }
                     val channel = call.receiveChannel()
                     val bytes = ByteArray(262_145)
                     var size = 0

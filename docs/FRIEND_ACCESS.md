@@ -50,21 +50,21 @@ app revoke-friend '朋友甲'
 {"paused": false}
 ```
 
-默认没有个人每日次数或 token 上限。管理员仍可在 `defaults` 或 `friends.<friendId>` 显式设置 `daily_calls`、`daily_tokens` 中的任意一项，个人设置优先。旧配置里显式设置的值继续生效，删掉相应键即可恢复缺省行为。
+没有个人每日次数或 token 上限（TON-740，2026-11-27：赠额内的使用只记账，不限制）。配置里留着的 `daily_calls`、`daily_tokens` 只供报表参考，不再拒绝任何调用。
 
 每次实际 API 请求均按人记录调用次数、输入与输出 token、费用，包括格式修复重试。UTC 00:00 换日，账本同时保留设备明细。调用前在同一份原子账本中预留 token 与费用；收到完整用量才结算，取消、超时或用量不明时保留预留。重启和换月都会保留未决费用，核实实际账单后才能处理。
 
-朋友讲解和格式修复固定走 Anthropic Haiku API。同一账本上的朋友与 owner API 调用共用赠额保护。`paused: true` 可立即阻止新的朋友 API 调用，owner API 和已经在途请求不受其控制；如需中止某朋友在途响应，吊销该朋友，其响应交付前会再次校验鉴权。
+朋友讲解和格式修复固定走 Anthropic Haiku API。同一账本上的朋友与 owner API 调用共用 Coach 的那份免费额度。`paused: true` 是手动开关，可立即阻止新的朋友 API 调用（返回 503 unavailable），owner API 和已经在途请求不受其控制；如需中止某朋友在途响应，吊销该朋友，其响应交付前会再次校验鉴权。
 
 价格沿用 `model_routes.json`，本实现没有重新核实供应商报价。该配置的输入 $0.10/百万、输出 $0.50/百万，因此 100 万输入加输出 token **不是固定 $0.15**；按配置全部为输出时为 $0.50。实际计费按输入/输出分别记入微美元整数。
 
-显式限额或赠额保护拒绝调用时返回 HTTP 429，API 或费用状态不可用时返回 503。客户端显示讲解服务暂不可用，`code` 供程序判断。
+唯一的花费拒绝是 Coach 这份免费额度用完：返回 HTTP 429，`code` 为 `free_grant_exhausted`，`error` 为「这个月的免费额度用完了」，客户端照原话显示。API 或费用状态不可用时返回 503，客户端显示讲解服务暂不可用。
 
 ## 赠额保护监控的部署与停用
 
-`tools/bridge/friend_spend_watch.py` 在文件锁下核对本月已结费用、未决预留和拒绝记录，写入 TON-740 的 `coach.api-spend`。保护线为赠额的 95%，即 Anthropic $190、OpenAI $475。触线时记为 `warn`，相同状态保留起始时间。记录仅含状态、时间和费用摘要。
+`tools/bridge/friend_spend_watch.py` 在文件锁下核对本月已结费用、未决预留和拒绝记录，写入 TON-740 的 `coach.api-spend`。线是整份免费额度，即 Anthropic $200、OpenAI $500；Coach 能用的是其中扣掉分配计划里 `other_writers_microusd` 的那份。触线时记为 `warn`，相同状态保留起始时间。记录仅含状态、时间和费用摘要。
 
-触线时默认在 TON-1691 登记一次待决定事项，由主会话交李政决定是否另行授权自费。已有待答事项时保留它，下次检查再尝试。赠额保护持续生效，自费需要另行授权。
+触线时默认在 TON-1691 登记一次待决定事项，由主会话交李政决定是否另行授权自费。已有待答事项时保留它，下次检查再尝试。免费额度用完就停，自费需要另行授权。
 
 用 plistlib 渲染 `tools/bridge/com.tony.coach-api-spend.plist.in` 的占位值，避免路径 XML 转义问题：Python 必须指向生产桥 venv，脚本放在持久部署目录并带上 `api_budget.py` 和 `model_routes.json`，state 与生产桥相同，log 目录预建且私有（目录 0700、文件 0600，plist 的 `Umask` 设为 077）。不得直接 bootstrap 未渲染的模板。
 

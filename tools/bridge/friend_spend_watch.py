@@ -54,8 +54,8 @@ def publish_grant_decisions(state, inbox, issue=DECISION_ISSUE, run=subprocess.r
                 if json.loads(existing).get("grant_period") != period:
                     break  # Keep the new event pending until the other question clears.
             else:
-                question = {"q": "Coach 的赠额分配已触线，是否保持停发？",
-                            "why": f"{period.split('-')[0]} 的本端份额已用满或不足以预留下一次请求。",
+                question = {"q": "这个月的免费额度用完了，是否保持停发？",
+                            "why": f"{period.split('-')[0]} 的 Coach 免费额度已用满或不足以预留下一次请求。",
                             "options": ["保持赠额保护", "另行决定自费预算"], "recommend": 0,
                             "grant_period": period}
                 run([cli, "issue", "metadata", "set", issue, "--key", "ask", "--type", "string",
@@ -79,7 +79,7 @@ def snapshot(ledger, now):
         pending = sum(sum(c["reserved"].values()) for key, c in data["cycles"].items() if key.startswith(provider + ":"))
         reached = used + pending >= limit or (ledger.state / f"credit-guard-{month}-{provider}.json").is_file()
         warning |= reached
-        detail = f"{provider} 本月已用 ${used / 1_000_000:.2f}，预留 ${pending / 1_000_000:.2f}，赠额保护线 ${limit / 1_000_000:.2f}"
+        detail = f"{provider} 本月已用 ${used / 1_000_000:.2f}，预留 ${pending / 1_000_000:.2f}，免费额度 ${limit / 1_000_000:.2f}"
         rows.append(detail + ("（已触线）" if reached else ""))
     return {"status": "warn" if warning else "ok", "since": now.isoformat(), "detail": "；".join(rows)}
 
@@ -114,7 +114,7 @@ def publish(state, issue=DECISION_ISSUE, panel_support=False, run=subprocess.run
         current = run([cli, "issue", "metadata", "list", issue, "--output", "json"],
                       check=True, capture_output=True, text=True)
         metadata = json.loads(current.stdout)
-        require_ask = "Coach 调用已触及赠额 95% 保护线，是否另行授权自费？"
+        require_ask = "这个月的免费额度用完了，是否另行授权自费？"
         existing = metadata.get("ask")
         if existing:
             try:

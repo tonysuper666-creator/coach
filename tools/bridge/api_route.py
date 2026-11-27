@@ -16,7 +16,7 @@ import time
 
 import httpx
 
-from api_budget import CreditLedger, Denied
+from api_budget import CreditLedger, Denied, FREE_GRANT_EXHAUSTED
 
 CONFIG = json.loads(Path(__file__).with_name("model_routes.json").read_text())
 ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "https://api.openai.com/v1/responses"}
@@ -38,11 +38,10 @@ NON_FALLBACK_DENIALS = frozenset({
     "unsupported_image", "unsupported_context_price", "unsupported_output_limit", "invalid_reservation",
 })
 OCR_GUARD_DENIALS = frozenset({
-    "credit_limit_95_percent",
+    FREE_GRANT_EXHAUSTED,
     "grant_allocation_unavailable",
     "ledger_unreadable",
-    "monthly_quota",
-    "daily_quota",
+    "friends_paused",
     "friend_config_unreadable",
 })
 

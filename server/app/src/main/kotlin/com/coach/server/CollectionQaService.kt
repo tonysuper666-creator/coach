@@ -300,19 +300,18 @@ class HaikuStreamingCollectionQaTransport(
             val reason = failure?.terminal?.reason
             val retryAfterSec = failure?.terminal?.retryAfterSec?.takeIf { it > 0 }
             if (friend != null) {
-                val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
-                if (quotaCode != null) throw FriendServiceError(quotaCode)
+                if (freeGrantExhausted(reason)) throw FriendServiceError(FREE_GRANT_EXHAUSTED)
                 if (retryAfterSec != null) {
                     throw CollectionQaRateLimitError(retryAfterSec, "当前提问较集中，请约 ${retryAfterSec} 秒后重试。")
                 }
                 throw FriendServiceError("unavailable")
             }
-            val isQuota = reason in setOf("daily_quota", "monthly_quota", "credit_limit_95_percent")
+            val isQuota = freeGrantExhausted(reason)
             val isRateLimited = reason in setOf("api_http_429", "rate_limited") ||
                 failure?.reason?.contains("http_429") == true ||
                 failure?.reason?.contains("api_http_429") == true
             when {
-                isQuota -> throw MockError(HttpStatusCode.TooManyRequests, "当前问答额度已用尽，请稍后再试。")
+                isQuota -> throw MockError(HttpStatusCode.TooManyRequests, FREE_GRANT_EXHAUSTED_MESSAGE)
                 isRateLimited -> throw CollectionQaRateLimitError(
                     retryAfterSec,
                     retryAfterSec?.let { "当前提问较集中，请约 ${it} 秒后重试。" } ?: "当前提问较集中，请几秒后重试。",
@@ -692,12 +691,6 @@ fun Application.collectionQaRoutes(
                     if (friend != null && friends != null) {
                         val allowed = actor.execute { authorize(device, bearer) && friendName(device) == friend }
                         if (!allowed) throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法发起跨材料问答。")
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
                     }
                     val channel = call.receiveChannel()
                     val maxBytes = 512 * 1024

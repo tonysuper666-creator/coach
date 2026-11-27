@@ -1961,12 +1961,6 @@ fun Application.studyModeRoutes(
                     if (friend != null && friends != null) {
                         val allowed = actor.execute { authorize(device, bearer) && friendName(device) == friend }
                         if (!allowed) throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法使用学法生成。")
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
                     }
 
                     val maxBytes = 6 * 1024 * 1024
@@ -2064,12 +2058,6 @@ fun Application.studyModeRoutes(
                     if (friend != null && friends != null) {
                         val allowed = actor.execute { authorize(device, bearer) && friendName(device) == friend }
                         if (!allowed) throw MockError(HttpStatusCode.Conflict, "设备授权已失效。")
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
                     }
 
                     val maxBytes = 18 * 1024 * 1024

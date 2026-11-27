@@ -66,8 +66,8 @@ class ReliabilityCountsTest {
             }
             assertTrue(stored.contains(deviceKey("device-a")))
             assertEquals("unknown", sanitizeVersion(secret))
-            assertEquals("quota", reliabilityCodeForFriend("daily_quota"))
-            assertEquals("quota", reliabilityCodeForFriend("monthly_quota"))
+            assertEquals("quota", reliabilityCodeForFriend("free_grant_exhausted"))
+            assertEquals("other", reliabilityCodeForFriend("daily_quota"))
             assertEquals("other", reliabilityCodeForFriend("unavailable"))
             assertEquals("timeout", classifyReaderText("讲解正文迟迟未开始，已停止等待。可继续阅读或手动重试。"))
             assertEquals("refusal", classifyReaderText("依据不足，无法确认。"))

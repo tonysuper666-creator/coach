@@ -49,7 +49,7 @@ from api_route import (
     parse_image_part, validate_images,
     route as api_model, vendor as api_vendor,
 )
-from api_budget import Denied
+from api_budget import Denied, FREE_GRANT_EXHAUSTED
 from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_LABELS, friend_batch_task
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
@@ -1492,7 +1492,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
             pre_submit_reasons = (
                 "batch_submit_unavailable",
                 "missing_key",
-                "credit_limit_95_percent",
+                FREE_GRANT_EXHAUSTED,
                 "grant_allocation_unavailable",
             )
             primary = api_model(req.task, model, req.format_attempt) or model
@@ -1585,7 +1585,8 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "api_ledger_io"
             retry_after_sec = error.retry_after_sec if isinstance(error, ApiFailure) else None
             if req.friend_id:
-                code = "monthly_quota" if reason in ("credit_limit_95_percent", "monthly_quota") else "daily_quota" if reason == "daily_quota" else "unavailable"
+                # Only the exhausted free grant is a refusal worth naming; usage is never capped.
+                code = FREE_GRANT_EXHAUSTED if reason == FREE_GRANT_EXHAUSTED else "unavailable"
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}
                 return

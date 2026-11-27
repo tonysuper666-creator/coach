@@ -28,8 +28,16 @@ internal object IncidentLog {
         offer = active.beginSession()
         if (shutdownHook.compareAndSet(false, true)) {
             Runtime.getRuntime().addShutdownHook(Thread({
-                if (!suppressCleanExit) runCatching { active.markClean() }
+                if (!suppressCleanExit) runCatching { current().markClean() }
             }, "incident-clean-exit"))
+        }
+    }
+
+    internal fun resetForTest() {
+        synchronized(storeLock) {
+            store = null
+            offer = null
+            suppressCleanExit = false
         }
     }
 

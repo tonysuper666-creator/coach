@@ -46,8 +46,12 @@ internal fun IncidentExitPrompt(
     Surface(modifier.testTag("incident-exit-prompt"), color = colors.surface1, shadowElevation = 2.dp) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("上次异常退出，要把记录发给开发者吗？", color = colors.fgPrimary)
-                TextButton({ preview = true }, Modifier.testTag("incident-view")) { Text("查看") }
+                Text(
+                    "上次异常退出，要把记录发给开发者吗？",
+                    color = colors.fgPrimary,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                TextButton({ preview = true }, Modifier.testTag("incident-view")) { Text("查看", maxLines = 1, softWrap = false) }
                 TextButton(
                     {
                         if (sending) return@TextButton
@@ -73,7 +77,7 @@ internal fun IncidentExitPrompt(
                     },
                     Modifier.testTag("incident-send"),
                     enabled = !sending,
-                ) { Text(if (sending) "正在发送" else "发送") }
+                ) { Text(if (sending) "正在发送" else "发送", maxLines = 1, softWrap = false) }
                 TextButton(
                     {
                         IncidentLog.decline(offer)
@@ -81,7 +85,7 @@ internal fun IncidentExitPrompt(
                     },
                     Modifier.testTag("incident-decline"),
                     enabled = !sending,
-                ) { Text("不发") }
+                ) { Text("不发", maxLines = 1, softWrap = false) }
             }
             notice?.let { Text(it, color = colors.fgSecondary, modifier = Modifier.testTag("incident-notice")) }
         }

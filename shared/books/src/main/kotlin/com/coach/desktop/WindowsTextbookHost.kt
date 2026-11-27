@@ -171,6 +171,18 @@ internal fun WindowsTextbookHost(
         ui.screen == BookScreen.COURSE_MOCK ||
         ui.screen == BookScreen.BOOKLIST ||
         ui.screen == BookScreen.REVIEWS || ui.screen == BookScreen.REVIEWING
+    val incidentPromptHost = LocalIncidentPromptHost.current
+    DisposableEffect(incidentPromptHost) {
+        incidentPromptHost?.onHostMounted(true)
+        onDispose { incidentPromptHost?.onHostMounted(false) }
+    }
+    val homeIncidentBanner: (@Composable () -> Unit)? = if (!deskPage && incidentPromptHost != null) {
+        {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                incidentPromptHost.prompt()
+            }
+        }
+    } else null
     val systemDark = isSystemInDarkTheme()
     val dark = remember { bookWorkspaceThemeOverride() }
     val preferences = remember(controller.library) { ReadingSettings(controller.library.directory) }
@@ -305,6 +317,7 @@ internal fun WindowsTextbookHost(
                                         onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
                                         onSettings = { settings = true },
                                     )
+                                    homeIncidentBanner?.invoke()
                                     Box(Modifier.weight(1f).fillMaxWidth()) { workspaceContent() }
                                 }
                                 Spacer(Modifier.height(hostTabletop.gapDp.dp).fillMaxWidth().testTag("book-host-tabletop-hinge"))
@@ -336,6 +349,7 @@ internal fun WindowsTextbookHost(
                                         onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
                                         onSettings = { settings = true },
                                     )
+                                    homeIncidentBanner?.invoke()
                                 }
                                 Box(Modifier.weight(1f).fillMaxWidth()) { workspaceContent() }
                             }

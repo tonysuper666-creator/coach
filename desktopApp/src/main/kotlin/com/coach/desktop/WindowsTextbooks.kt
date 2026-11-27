@@ -129,6 +129,21 @@ internal fun WindowsTextbookGate(
     }
 
     val paired = identity
+    var hostManagesPrompt by remember { mutableStateOf(false) }
+    val currentPaired by rememberUpdatedState(paired)
+    val currentDarkTheme by rememberUpdatedState(darkTheme)
+    val promptHost = remember {
+        IncidentPromptHost(
+            onHostMounted = { hostManagesPrompt = it },
+            prompt = {
+                IncidentExitPrompt(
+                    identity = currentPaired,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    darkTheme = currentDarkTheme,
+                )
+            },
+        )
+    }
     Box(Modifier.fillMaxSize()) {
     if (paired != null) {
         val onRelogin: (String?) -> Unit = remember(pairing, paired, sable) {
@@ -141,7 +156,10 @@ internal fun WindowsTextbookGate(
                 }
             }
         }
-        CompositionLocalProvider(LocalBookRelogin provides onRelogin) {
+        CompositionLocalProvider(
+            LocalBookRelogin provides onRelogin,
+            LocalIncidentPromptHost provides promptHost,
+        ) {
             key(paired.credentials.deviceId, paired.credentials.token) {
                 RememberDesktopLedgerRecovery(settings, paired)
                 content(paired)
@@ -184,7 +202,9 @@ internal fun WindowsTextbookGate(
             }
         }
     }
-    IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme)
+    if (paired == null || !hostManagesPrompt) {
+        IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme)
+    }
     }
 }
 

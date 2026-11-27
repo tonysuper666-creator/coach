@@ -63,9 +63,9 @@
         "other": 0,
         "quota": 0,
         "refusal": 0,
-        "timeout": 1
+        "timeout": 0
       },
-      "stuck": "提问",
+      "stuck": "提问前离线",
       "name": "睡前",
       "explain": {
         "source": 0,

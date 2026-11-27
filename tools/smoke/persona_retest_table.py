@@ -159,6 +159,20 @@ def render(run, baseline=None):
     return "\n".join(lines) + "\n"
 
 
+def ask_state(db_path, question):
+    """Return only the latest matching turn's sequence and state, never its text."""
+    db = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        row = db.execute(
+            "SELECT id, answer_status FROM book_ask_turns "
+            "WHERE action_kind='ask' AND question_text=? ORDER BY id DESC LIMIT 1",
+            (question,),
+        ).fetchone()
+        return {"id": row[0], "status": row[1]} if row else {"id": 0, "status": "absent"}
+    finally:
+        db.close()
+
+
 def clear_open_session(db_path):
     """Drop the restored-reader row on a home copy. Returns rows removed. Never prints the book id."""
     connection = sqlite3.connect(db_path)
@@ -202,8 +216,13 @@ def main():
     parser.add_argument("--set-exam", default="", help="library.sqlite path; prints dates only")
     parser.add_argument("--days", type=int, default=0)
     parser.add_argument("--clear-open-session", default="", help="library.sqlite path; deletes the restored screen row")
+    parser.add_argument("--ask-state", default="", help="report the latest matching question's sequence and state")
+    parser.add_argument("--question", default="")
     parser.add_argument("--out", default="", help="write the table as UTF-8 instead of printing it")
     args = parser.parse_args()
+    if args.ask_state:
+        print(json.dumps(ask_state(args.ask_state, args.question)))
+        return
     if args.clear_open_session:
         clear_open_session(args.clear_open_session)
         return

@@ -316,16 +316,19 @@ function Send-Ask([string]$text) {
     Click-Needle $lines '提问' | Out-Null
     Start-Sleep -Milliseconds 600
     $lines = @(Get-Lines 'ask-field')
+    if (((Get-Blob $lines) -replace '\s', '') -match '需要联网才能提问|提问需要联网') { return 'offline' }
     $send = Find-Text $lines '发送'
     if (-not $send) { return $false }
     Click-At ([Math]::Max(20, $send.X - 120)) $send.Y | Out-Null
     Start-Sleep -Milliseconds 200
+    Send-Keys '^a'
     Type-Unicode $text
     Start-Sleep -Milliseconds 400
     $lines = @(Get-Lines 'ask-typed')
     $head = $text.Substring(0, [Math]::Min(4, $text.Length))
     if (-not (Test-Has $lines $head)) { return $false }
-    return (Click-Needle $lines '发送')
+    if (Click-Needle $lines '发送') { return 'sent' }
+    return $false
 }
 function Set-ExamDay([string]$db, [int]$days) {
     $py = Join-Path $Repo 'tools\smoke\persona_retest_table.py'
@@ -471,7 +474,43 @@ function Invoke-P1($p) {
     elseif ($blob -match '这一点答到了') { Fail-Step $p '跑题'; Set-Check 'offtopic' '卡住' '判成了答到' }
     else { Fail-Step $p '跑题'; Set-Check 'offtopic' '卡住' '开放题没出来' }
 }
+function Test-PackagedAskServer([string]$personaHome) {
+    $config = Join-Path (Split-Path -Parent $Exe) 'app\LearningCoach.cfg'
+    $savedFile = Join-Path $personaHome 'Coach\client\pairing\server-url'
+    if (!(Test-Path -LiteralPath $config) -or !(Test-Path -LiteralPath $savedFile)) { return $false }
+    $option = 'java-options=-Dcoach.friendUrl='
+    $setting = [IO.File]::ReadAllLines($config) | Where-Object { $_.StartsWith($option) } | Select-Object -Last 1
+    if (!$setting) { return $false }
+    $saved = $expected = $null
+    return ([uri]::TryCreate([IO.File]::ReadAllText($savedFile).Trim(), [UriKind]::Absolute, [ref]$saved) -and
+        [uri]::TryCreate($setting.Substring($option.Length).Trim(), [UriKind]::Absolute, [ref]$expected) -and
+        $expected.Scheme -in @('http', 'https') -and $saved -eq $expected)
+}
+function Get-AskTurn([string]$database, [string]$question) {
+    $turn = & python (Join-Path $PSScriptRoot 'persona_retest_table.py') --ask-state $database --question $question
+    if ($LASTEXITCODE -ne 0) { throw '读取本次提问记录失败' }
+    return ($turn | ConvertFrom-Json)
+}
+function Wait-Ask([string]$database, [string]$question, $before) {
+    $deadline = (Get-Date).AddSeconds(50)
+    do {
+        if (!(Test-AppAlive)) { return 'dead' }
+        $lines = Get-Blob (Get-Lines 'ask-wait')
+        $turn = Get-AskTurn $database $question
+        $newTurn = $turn.id -gt $before.id
+        if ($newTurn -and $turn.status -eq 'complete') { return 'ok' }
+        if (($lines -replace '\s', '') -match '需要联网才能提问|提问需要联网') { return 'offline' }
+        $failure = Get-FailCode $lines
+        if ($newTurn -and $failure) { return $failure }
+        if ($newTurn -and $turn.status -eq 'failed') { return 'other' }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Seconds 3
+    } while ($true)
+    if ($newTurn) { return 'timeout' }
+    return 'unsent'
+}
 function Invoke-ReadAsk($p, [string]$personaHome, [string]$question, [switch]$Explain) {
+    if (!(Test-PackagedAskServer $personaHome)) { Fail-Step $p '画像未配对本版服务'; return }
     if (-not (Open-Session $p $personaHome)) { return }
     if (-not (Open-Book)) { Fail-Step $p '进书'; return }
     Pass-Step $p '进书'
@@ -485,8 +524,14 @@ function Invoke-ReadAsk($p, [string]$personaHome, [string]$question, [switch]$Ex
         if ($code -eq 'ok') { Pass-Step $p '讲解' } else { Fail-Step $p '讲解' }
     }
     if (Mark-Dead $p) { return }
-    if (-not (Send-Ask $question)) { Fail-Step $p '提问'; return }
-    $code = Wait-Ai 'ask-wait' 50
+    $database = Join-Path $personaHome 'Coach\books\library.sqlite'
+    $before = Get-AskTurn $database $question
+    $submission = Send-Ask $question
+    if ($submission -eq 'offline') { Fail-Step $p '提问前离线'; return }
+    if ($submission -ne 'sent') { Fail-Step $p '提问'; return }
+    $code = Wait-Ask $database $question $before
+    if ($code -eq 'offline') { Fail-Step $p '提问时离线'; return }
+    if ($code -eq 'unsent') { Fail-Step $p '未出现本次提问记录'; return }
     if ($code -eq 'dead') { Mark-Dead $p; return }
     Add-Count $p.ask $code
     if ($code -eq 'ok') { Pass-Step $p '提问' } else { Fail-Step $p '提问' }

@@ -1,0 +1,8 @@
+{
+  "comment": "TON-1943: exact Bridge requests the server sends for a friend's study features. FriendBridgeContractTest (Kotlin) checks the server still sends these; friend_study_contract.py checks subscription_bridge.build_req admits them.",
+  "requests": [
+    {"name": "concept_sayings", "task": "concept_sayings", "model": "claude-haiku-5-5", "stream": false, "background": true, "batch_key": true, "format_attempt": "0"},
+    {"name": "course_essay_note", "task": "READER_SELECTION", "model": "claude-haiku-5-5", "stream": false, "background": false, "batch_key": false, "format_attempt": "0"},
+    {"name": "course_essay_check", "task": "READER_SELECTION", "model": "claude-sonnet-5-5", "stream": false, "background": false, "batch_key": false, "format_attempt": "0"}
+  ]
+}

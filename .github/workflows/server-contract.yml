@@ -1,0 +1,35 @@
+name: Server contract tests
+
+# TON-1943: every client endpoint must be registered as open to signed-in accounts or owner only,
+# and the friend requests the server sends must match what the Bridge admits. Offline, no secrets.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Endpoint registration and friend Bridge contract
+        run: >
+          ./gradlew :server:app:test
+          --tests com.coach.server.PublicApiTableTest
+          --tests com.coach.server.FriendBridgeContractTest
+          --tests com.coach.server.FriendAccessTest
+          --console=plain --max-workers=2

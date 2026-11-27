@@ -2642,6 +2642,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             val failedCount = AtomicInteger(0)
             val inFlightCount = AtomicInteger(0)
             val lastError = AtomicReference<String?>(null)
+            // Set once the server says this feature only runs on the owner's computer; remaining points are skipped.
+            val ownerOnly = AtomicReference<String?>(null)
 
             fun publishProgress(running: Boolean) {
                 val done = completedCount.get()
@@ -2669,7 +2671,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                                 val pointPages = point.sources.map { it.bookId }.distinct()
                                     .associateWith { pagesByBook[it].orEmpty() }
                                 val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pointPages)
+                                if (ownerOnly.get() != null) return@withPermit
                                 val reply = explainer.examPointDrill(request)
+                                if (reply.code == "owner_only") {
+                                    ownerOnly.compareAndSet(null, reply.error ?: "考点出题只在自己的电脑上做。")
+                                    return@withPermit
+                                }
                                 val body = reply.body
                                 if (body == null) {
                                     lastError.set(reply.error ?: "出题没有返回")
@@ -2728,7 +2735,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         inFlight = 0,
                         running = false,
                     ),
-                    courseNotice = if (err == null) summary else "$summary。有 ${failedCount.get()} 个考点未返回，再次点击可继续补出。",
+                    courseNotice = ownerOnly.get()
+                        ?: if (err == null) summary else "$summary。有 ${failedCount.get()} 个考点未返回，再次点击可继续补出。",
                 )
             }
         } catch (cancelled: CancellationException) {

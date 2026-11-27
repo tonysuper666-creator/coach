@@ -665,4 +665,48 @@ class StudyModePackServiceTest {
         assertFalse(keysBilingual[0] == keysAltered[0], "Batch chunk jobKey must vary by chapter text digest")
         assertFalse(keysBilingual[1] == keysAltered[1], "Batch graph jobKey must vary by chapter text digest")
     }
+
+    @Test
+    fun friendBookMapLeavesTheOwnersAiCallTableUntouched() = runBlocking(Dispatchers.IO) {
+        val dir = java.nio.file.Files.createTempDirectory("coach-friend-book-map-")
+        try {
+            val friends = mutableListOf<String?>()
+            val noopStream = object : StudyModeStreamTransport {
+                override fun streamGenerate(systemPrompt: String, userPrompt: String, maxTokens: Int, friend: String?, device: String?,
+                    onDelta: (String, Long) -> Unit): StudyModeTransportReply = error("not used")
+            }
+            val batchTransport = object : StudyModeBatchTransport {
+                override fun complete(task: String, jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int,
+                    useBatchApi: Boolean, friend: String?, device: String?): StudyModeTransportReply {
+                    friends += friend
+                    val text = if ("Synthesize a whole-book" in systemPrompt) {
+                        """{"thematicClusters":[],"dependencyEdges":[],"fastSkimOrder40Min":[],"masterGlossary":[]}"""
+                    } else {
+                        """{"chapters":[{"chapterNum":8,"chapterTitle":"RAND","chapterRole":"CORE","oneLiner":"Ch8","estimatedMinutes":15,"readingDepth":"CORE_SKIM","coreClaims":[],"sections":[{"sectionTitle":"8.1 Design","summary":"Design","skipUnlessExam":false}]}]}"""
+                    }
+                    return StudyModeTransportReply(text = text, routeChannel = CompanionRouteChannel.HAIKU_REALTIME, model = BridgeClient.HAIKU,
+                        inputTokens = 100, outputTokens = 80, firstTokenMs = 10L, elapsedMs = 20L)
+                }
+            }
+            val ledger = BookTokenLedger(dir.resolve("ledger"))
+            val service = StudyModePackService(noopStream, batchTransport, ledger)
+            val req = BookMapBatchRequest(
+                bookId = "friend-book",
+                bookTitle = "Health Economics",
+                detailLevel = ServerDetailLevel.BRIEF,
+                explainLang = ServerExplainLang.BILINGUAL,
+                chapters = listOf(BookMapChapterInput(8, "RAND", samplePages, listOf(StudySectionInput("8.1", "8.1 Design", 141, 145)))),
+                bypassCache = true,
+                friend = "甲",
+                device = "friend-pc",
+            )
+            service.generateBookMapBatch(req)
+            assertTrue(friends.isNotEmpty() && friends.all { it == "甲" })
+            assertTrue(ledger.entriesForBook("friend-book").isEmpty(), "friend book map reached the owner's AI-call table")
+            service.generateBookMapBatch(req.copy(friend = null, device = "owner-dev"))
+            assertTrue(ledger.entriesForBook("friend-book").isNotEmpty(), "owner book map must still be recorded")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 }

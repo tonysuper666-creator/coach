@@ -333,6 +333,8 @@ internal data class CourseServerCallResult(
     val body: JsonObject?,
     val error: String?,
     val trouble: ExplainTrouble? = null,
+    /** Server error code, e.g. `owner_only` when this feature only runs on the owner's own computer. */
+    val code: String? = null,
 )
 
 internal object CourseEssayWordCounter {

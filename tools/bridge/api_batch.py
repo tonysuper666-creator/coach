@@ -21,8 +21,17 @@ from api_route import ApiFailure, cost, route, vendor
 
 GUIDE_TASK = "literature_guide"
 COMPARISON_TASK = "literature_comparison"
-FRIEND_BATCH_TASKS = frozenset({GUIDE_TASK, COMPARISON_TASK})
-TASKS = frozenset({*FRIEND_BATCH_TASKS, "concept_sayings", "gen_mcq", "repair_mcq_sources", "blind_review",
+SAYINGS_TASK = "concept_sayings"
+# Friends may submit these as Haiku Batch jobs; each result is namespaced and reserved against the friend's own grant.
+FRIEND_BATCH_TASKS = frozenset({GUIDE_TASK, COMPARISON_TASK, SAYINGS_TASK})
+FRIEND_BATCH_LABELS = {GUIDE_TASK: "文献导读", COMPARISON_TASK: "文献对比", SAYINGS_TASK: "各书说法"}
+
+
+def friend_batch_task(task, friend):
+    """Literature tasks are Batch-only for every caller; concept sayings only for friends, so owner jobs keep their old keys."""
+    return task in FRIEND_BATCH_TASKS and (friend is not None or task != SAYINGS_TASK)
+
+TASKS = frozenset({*FRIEND_BATCH_TASKS, "gen_mcq", "repair_mcq_sources", "blind_review",
                    "gen_constructed", "repair_constructed_sources", "review_constructed",
                    "BOOK_SECTION_BATCH", "BOOK_EXERCISE_HINTS", "BOOK_MATH_VERIFY", "BOOK_MATH_REPAIR",
                    "practice_grade", "practice_diagnose", "practice_variant", "course_mock_item",
@@ -134,7 +143,7 @@ class BatchRouter:
                     self.failed(path, state, "batch_submit_unavailable")
                     raise ApiFailure("batch_submit_unavailable") from None
                 except (ApiFailure, Denied, ValueError, KeyError, TypeError) as error:
-                    if task in FRIEND_BATCH_TASKS and isinstance(error, Denied) and "reservation" not in state:
+                    if friend_batch_task(task, friend) and isinstance(error, Denied) and "reservation" not in state:
                         # No upstream submission. A later poll may proceed after the grant resets.
                         path.unlink()
                         raise

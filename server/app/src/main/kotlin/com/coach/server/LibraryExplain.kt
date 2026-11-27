@@ -387,7 +387,7 @@ fun Application.libraryExplainRoutes(
         } }
         get("/v1/library/companion/ledger") {
             if (call.attributes.getOrNull(observedFriend) != null) {
-                return@get call.respondText(json("error" to "无权读取全站账本。").toString(), ContentType.Application.Json, HttpStatusCode.Forbidden)
+                return@get call.respondText(json("code" to "owner_only", "error" to "无权读取全站账本。").toString(), ContentType.Application.Json, HttpStatusCode.Forbidden)
             }
             val ledger = tokenLedger
                 ?: return@get call.respondText(json("error" to "账本尚未初始化。").toString(), ContentType.Application.Json, HttpStatusCode.ServiceUnavailable)

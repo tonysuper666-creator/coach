@@ -15,35 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
-private val friendStudyModeRegex = Regex("""/api/books/[^/]+/modes/[^/]+""")
-private val friendBookMapBatchRegex = Regex("""/api/books/[^/]+/book-map/batch""")
-private val unifiedBookStatusRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/status""")
-private val unifiedBookOriginalRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/original""")
-private val unifiedBookArtifactRegex = Regex("""/v1/books/sb_[0-9a-f]{24}/artifact""")
-private val unifiedBookItemRegex = Regex("""/v1/books/sb_[0-9a-f]{24}""")
-
-internal fun friendPath(call: ApplicationCall): Boolean {
-    val method = call.request.httpMethod
-    val path = call.request.path()
-    if (path.contains("..") || path.contains('%')) return false
-    if (path in setOf("/learning-sync/profile", "/learning-sync/changes", "/learning-sync/record", "/learning-sync/push", "/learning-sync/snapshot", "/learning-sync/chunk")) {
-        return call.application.attributes.getOrNull(learningSyncActive) == true &&
-            (if (path.endsWith("/push")) method == HttpMethod.Post else method == HttpMethod.Get)
-    }
-    return when (method to path) {
-        HttpMethod.Post to "/v1/public/sable", HttpMethod.Post to "/v1/pair", HttpMethod.Get to "/v1/public/status",
-        HttpMethod.Post to "/v1/library/explain", HttpMethod.Post to "/v1/library/explain/cancel",
-        HttpMethod.Post to "/v1/library/companion/chapter",
-        HttpMethod.Post to "/v1/library/collection/ask",
-        HttpMethod.Post to "/v1/books/upload",
-        HttpMethod.Get to "/v1/books",
-        HttpMethod.Post to "/v1/incidents",
-        HttpMethod.Delete to "/v1/account" -> true
-        else -> (method == HttpMethod.Post && (friendStudyModeRegex.matches(path) || friendBookMapBatchRegex.matches(path))) ||
-            (method == HttpMethod.Get && (unifiedBookStatusRegex.matches(path) || unifiedBookOriginalRegex.matches(path) || unifiedBookArtifactRegex.matches(path))) ||
-            (method == HttpMethod.Delete && unifiedBookItemRegex.matches(path))
-    }
-}
+// Which endpoints a signed-in friend may call lives in PublicApiTable.kt (friendPath/publicApiGate).
 
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
 internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {
@@ -63,6 +35,9 @@ class FriendAccess(private val directory: Path,
     internal var sable: SableSessions? = sableSessions
     private val stores = ConcurrentHashMap<String, ImportedBookSources>()
     internal fun imports(name: String) = stores.computeIfAbsent(friendId(name)) { ImportedBookSources(directory.resolve(it).resolve("imports")) }
+    private val outsideErasers = java.util.concurrent.CopyOnWriteArrayList<(String) -> Unit>()
+    /** Per-account rows kept outside [directory] (the shared course OCR cache) are erased with the account; a failure keeps the deletion pending for retry. */
+    internal fun eraseOnAccountDeletion(eraser: (friendName: String) -> Unit) { outsideErasers += eraser }
     @Synchronized internal fun deleteAccountData(name: String) {
         val id = friendId(name)
         fun hasOverride(file: Path): Boolean {
@@ -84,6 +59,7 @@ class FriendAccess(private val directory: Path,
                 if (process.isAlive) process.destroyForcibly().waitFor()
             }
         }
+        outsideErasers.forEach { it(name) }
         stores.remove(id)
         val root = directory.resolve(id)
         if (Files.exists(root) && (!root.toFile().deleteRecursively() || Files.exists(root))) {

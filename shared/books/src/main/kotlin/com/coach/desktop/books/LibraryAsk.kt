@@ -52,6 +52,7 @@ internal object LibraryAsk {
     const val VAGUE = "把要问的概念写具体一点，例如机会成本。"
     const val NETWORK = "整理成一段话需要联网。下面是对得上的原句，点一下就回到那一句。"
     const val MAX_CLAIMS = 4
+    private const val BULLETS = "•·●◦▪‣"
 
     private val enToken = Regex("""[A-Za-z][A-Za-z'-]{3,}""")
     private val zhToken = Regex("""[\u4e00-\u9fff]{2,8}""")
@@ -194,7 +195,7 @@ internal object LibraryAsk {
                     endUtf16 = hit.end,
                     quote = hit.quote,
                     source = LibraryAskSource.PAGE,
-                    score = 100 + need.size * 5 - hit.quote.length / 80,
+                    score = 100 + need.size * 5 + hit.rank,
                 )
             }
         }
@@ -338,8 +339,12 @@ internal object LibraryAsk {
         }.getOrDefault(emptyList()).take(40)
     }
 
-    private data class SentenceSlice(val start: Int, val end: Int, val quote: String)
+    private data class SentenceSlice(val start: Int, val end: Int, val quote: String, val rank: Int)
 
+    /**
+     * 一页里可能同时有目录行、标题和学习目标。那些行往往更短，不能因为短就当答案。
+     * 先丢掉不像正文的行，再优先留带定义信号的完整句，其次才是长度适中的句子。
+     */
     private fun bestSentence(text: String, need: List<String>): SentenceSlice? {
         var best: SentenceSlice? = null
         var start = 0
@@ -352,8 +357,10 @@ internal object LibraryAsk {
             if (right - left < 12 || right - left > 360) return
             val quote = text.substring(left, right)
             if (!containsAll(quote, need)) return
-            val candidate = SentenceSlice(left, right, quote)
-            if (best == null || candidate.quote.length < best!!.quote.length) best = candidate
+            val rank = proseRank(quote) ?: return
+            val candidate = SentenceSlice(left, right, quote, rank)
+            val current = best
+            if (current == null || candidate.rank > current.rank) best = candidate
         }
         for (i in text.indices) {
             val ch = text[i]
@@ -365,6 +372,39 @@ internal object LibraryAsk {
         }
         consider(start, text.length)
         return best
+    }
+
+    /** 不像正文则返回 null。定义句高于普通完整句，长度只用来在同类里靠近适中的一句。 */
+    private fun proseRank(quote: String): Int? {
+        val line = quote.trim()
+        val head = line.firstOrNull { !it.isWhitespace() } ?: return null
+        if (head in BULLETS) return null
+        if (endsWithPageNumber(line)) return null
+        val end = line.last()
+        if (end != '.' && end != '!' && end != '?' && end != '。' && end != '！' && end != '？') return null
+        if (wordCount(line) < 8) return null
+        val signal = when {
+            "defined as" in line.lowercase() || "refers to" in line.lowercase() ||
+                "是指" in line || "指的是" in line || "定义为" in line -> 3
+            Regex("""\bis\b""").containsMatchIn(line.lowercase()) || "是" in line || "指" in line -> 2
+            else -> 1
+        }
+        val distance = kotlin.math.abs(line.length - 160)
+        return signal * 100 - distance
+    }
+
+    private fun endsWithPageNumber(line: String): Boolean {
+        if (Regex("""(?:\.{2,}|[ \t]{2,})\d{1,4}\s*[.。!！]?$""").containsMatchIn(line)) return true
+        val core = line.trimEnd('.', '。', '!', '！', '?', '？')
+        val last = core.substringAfterLast(' ').substringAfterLast('\t')
+        if (!last.matches(Regex("""\d{1,4}"""))) return false
+        return core.split(Regex("""\s+""")).size <= 14
+    }
+
+    private fun wordCount(line: String): Int {
+        val latin = Regex("""[A-Za-z0-9]+(?:'[A-Za-z]+)?""").findAll(line).count()
+        val cjk = Regex("""[\u4e00-\u9fff]""").findAll(line).count()
+        return latin + cjk / 2
     }
 
     private fun containsAll(haystack: String, terms: List<String>): Boolean =

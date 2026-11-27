@@ -77,6 +77,47 @@ class LibraryAskTest {
         }
     }
 
+    @Test fun definitionBeatsContentsTitleAndFragment() {
+        val root = Files.createTempDirectory("library-ask-definition-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+            val definition = "A velvet spindle is defined as the shaft that turns inside a toy mill and carries the thread."
+            val page = listOf(
+                "Velvet spindle  14",
+                "Velvet Spindle",
+                "• Explain how a velvet spindle works in the toy mill today.",
+                "velvet spindle.",
+                "A velvet spindle shows up all over the workshop and the yard.",
+                definition,
+            ).joinToString("\n")
+            DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+                db.prepareStatement("INSERT INTO books(id,title,format,touched,reading_page) VALUES(?,?, 'md', 1, 1)").use { sql ->
+                    sql.setString(1, "mill")
+                    sql.setString(2, "Open Mill")
+                    sql.executeUpdate()
+                }
+                db.prepareStatement("INSERT INTO pages(book,page,text) VALUES(?,?,?)").use { sql ->
+                    sql.setString(1, "mill")
+                    sql.setInt(2, 14)
+                    sql.setString(3, page)
+                    sql.executeUpdate()
+                    sql.setInt(2, 3)
+                    sql.setString(3, "Pewter cistern  3\nPewter Cistern\npewter cistern.")
+                    sql.executeUpdate()
+                }
+            }
+            val answer = ask(library, "velvet spindle")
+            assertEquals(LibraryAskKind.FOUND, answer.kind)
+            assertEquals(1, answer.claims.size)
+            val hit = answer.claims.single()
+            assertEquals(definition, hit.quote)
+            assertEquals(definition, pageText(library, hit.bookId, hit.page).substring(hit.startUtf16, hit.endUtf16))
+            assertEquals(LibraryAskKind.MISSING, ask(library, "pewter cistern").kind)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun notesJoinWhenTheTableExistsAndDeletedAnnotationsStayOut() {
         val root = Files.createTempDirectory("library-ask-notes-")
         try {

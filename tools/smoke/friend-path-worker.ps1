@@ -133,7 +133,7 @@ function Find-Exact($lines, [string]$needle) {
 }
 function Get-HomeImportLabel($lines) {
     if (Find-Exact $lines '放进一本书') { return '放进一本书' }
-    if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库')) { return '导入文件' }
+    if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库', '云端书架')) { return '导入文件' }
 }
 
 function Find-TasteOption($lines, $submit) {

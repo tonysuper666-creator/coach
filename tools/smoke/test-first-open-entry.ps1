@@ -74,7 +74,7 @@ function Shot($step,$tag) {
     $script:Last = @(switch ($script:view) {
         home {
             if ($route -eq 'first' -or ($route -eq 'syncShelf' -and -not $script:synced)) { Row '放进一本书，马上做第一道题。' 60; Row '放 进 一 本 书' 200 }
-            elseif ($route -in @('installedShelf', 'syncShelf')) { Row 'LearningCoach' 50; Row '设置' 50 700; Row '我的库' 120 }
+            elseif ($route -in @('installedShelf', 'syncShelf')) { Row 'LearningCoach' 50; Row '设置' 50 700; Row 'PDF·云端书架·点击下载阅读' 120 }
             elseif ($route -eq 'existing') { Row '上次停在第 2 页' 60; Row '导入文件' 200 }
             elseif ($route -eq '1.1.1') { Row '书架' 60; Row '上传教材' 200 }
             else { Row '为一门课备考' 60; Row '导入文件' 200 }

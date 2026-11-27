@@ -269,6 +269,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                         }
                     }
                     if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
+                    if (result is BridgeResult.Failure) result.rejectIfFreeGrantExhausted()
                     if (friend != null && result is BridgeResult.Failure) {
                         diagnostics?.bridgeFailureStage = result.stage
                         throw FriendServiceError(friendFailureCode(result.terminal?.reason), result.terminal?.retryAfterSec)

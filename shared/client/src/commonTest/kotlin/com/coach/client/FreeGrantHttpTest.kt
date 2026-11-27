@@ -39,6 +39,22 @@ class FreeGrantHttpTest {
     }
 
     @Test
+    fun exhaustedFreeGrantInsideAStudyModeStreamIsNamedToo() = runBlocking {
+        val sse = "event: meta\ndata: {\"stage\":\"started\"}\n\n" +
+            "event: error\ndata: {\"code\":\"free_grant_exhausted\",\"error\":\"这个月的免费额度用完了\"}\n\n"
+        val client = CourseHttp("http://127.0.0.1:1", "dev-1", "tok-1", "library", {
+            MockEngine { respond(sse, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Text.EventStream.toString())) }
+        })
+        val reply = client.streamStudyModePack("bk-1", "EXAM_FOCUS", buildJsonObject { })
+        assertEquals("这个月的免费额度用完了", reply.error)
+        assertEquals("free_grant_exhausted", reply.code)
+        assertFalse(reply.retryable)
+        // Book map and every other course endpoint share the same mapping.
+        assertEquals("这个月的免费额度用完了",
+            client("""{"code":"free_grant_exhausted","error":"这个月的免费额度用完了"}""").fetchBookMapBatch("bk-1", buildJsonObject { }).error)
+    }
+
+    @Test
     fun otherRateLimitsKeepTheGenericRetryGuidance() = runBlocking {
         val reply = client("""{"code":"unavailable","error":"讲解服务暂时连不上，读书照常。"}""").explainLibrary(buildJsonObject { })
         assertEquals("讲解服务暂时不可用，请稍后再试。", reply.error)

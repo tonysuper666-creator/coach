@@ -645,6 +645,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 var currentEvent = ""
                 var finalPack: JsonObject? = null
                 var streamError: String? = null
+                var streamCode: String? = null
                 while (!ch.isClosedForRead) {
                     val line = ch.readUTF8Line() ?: break
                     val trimmed = line.trimEnd()
@@ -666,7 +667,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                                     onProgress(chars, null, delta)
                                 }
                                 "pack" -> finalPack = obj
-                                "error" -> streamError = obj.s("error").ifBlank { "生成失败" }
+                                "error" -> {
+                                    streamError = obj.s("error").ifBlank { "生成失败" }
+                                    streamCode = obj.s("code").ifBlank { null }
+                                }
                             }
                         }
                         trimmed.isEmpty() -> currentEvent = ""
@@ -674,6 +678,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 }
                 when {
                     finalPack != null -> MockReply(finalPack, null, statusCode = status)
+                    // TON-740: a stream that started and then hit the exhausted free grant says so plainly.
+                    streamCode == FREE_GRANT_EXHAUSTED_CODE ->
+                        MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = 429, code = FREE_GRANT_EXHAUSTED_CODE)
                     streamError != null -> MockReply(null, streamError, statusCode = status)
                     else -> MockReply(null, "未收到完整学法内容，请重试。", statusCode = status)
                 }
@@ -714,8 +721,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
-                code == FREE_GRANT_EXHAUSTED_CODE || (status == 429 && parsed?.s("error") == FREE_GRANT_EXHAUSTED_TEXT) ->
-                    MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = status, code = FREE_GRANT_EXHAUSTED_CODE)
+                code == FREE_GRANT_EXHAUSTED_CODE || (status == 429 && parsed?.s("error")?.startsWith(FREE_GRANT_EXHAUSTED_TEXT) == true) ->
+                    MockReply(null, parsed?.s("error")?.takeIf { it.startsWith(FREE_GRANT_EXHAUSTED_TEXT) } ?: FREE_GRANT_EXHAUSTED_TEXT,
+                        retryable = false, statusCode = status, code = FREE_GRANT_EXHAUSTED_CODE)
                 path == "v1/library/collection/ask" && (status == 429 || status in 500..599) ->
                     MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status,
                         code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))

@@ -29,7 +29,7 @@ class JournalService(private val actor: LedgerActor, private val bridge: BridgeC
         val summary = (result as? BridgeResult.Success)?.takeIf { it.terminal.complete }?.text?.let {
             runCatching { LedgerJson.parseToJsonElement(it).jsonObject.str("summary").takeIf(String::isNotBlank) }.getOrNull()
         }
-        return actor.execute {
+        val summarized = actor.execute {
             tutorTransaction {
                 for (attempt in calls) {
                     val call = attempt.call
@@ -44,5 +44,8 @@ class JournalService(private val actor: LedgerActor, private val bridge: BridgeC
                 }
             }
         }
+        // The calls are recorded first; the exhausted free grant then reaches the route as its own 429.
+        if (summarized == null) (result as? BridgeResult.Failure)?.rejectIfFreeGrantExhausted()
+        return summarized
     }
 }

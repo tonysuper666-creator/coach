@@ -80,7 +80,7 @@ class BooklistSemanticAligner(
                         }.toString()
                         val batchKey = "booklist-align-${sha256("$collectionTitle|$batchIdx|$userPayload".toByteArray(Charsets.UTF_8)).take(16)}"
 
-                        val reply = runCatching {
+                        val reply = modelCatching {
                             active.generateSection(
                                 systemPrompt = systemPrompt,
                                 userPrompt = userPayload,

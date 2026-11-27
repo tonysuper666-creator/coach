@@ -168,6 +168,8 @@ fun Application.practiceGradeRoutes(
                     call.respondText(body.toString(), ContentType.Application.Json)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: FriendServiceError) {
+                    call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
                 } catch (e: MockError) {
                     call.respondText(
                         buildJsonObject { put("error", e.message ?: "出题请求无效。") }.toString(),

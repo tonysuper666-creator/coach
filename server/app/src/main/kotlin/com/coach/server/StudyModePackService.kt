@@ -267,7 +267,10 @@ class HaikuStudyModeStreamTransport(
         )
         val elapsedMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
         return when (result) {
-            is BridgeResult.Failure -> throw IllegalStateException("学法流式生成失败：${result.reason}")
+            is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
+                throw IllegalStateException("学法流式生成失败：${result.reason}")
+            }
             is BridgeResult.Success -> {
                 val finalText = result.text.ifBlank { buffer.toString() }
                 StudyModeTransportReply(
@@ -319,7 +322,10 @@ class HaikuStudyModeBatchTransport(
                 val result = client.chat(request)
                 val elapsedMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
                 return when (result) {
-                    is BridgeResult.Failure -> throw IllegalStateException("全书地图批处理失败：${result.reason}")
+                    is BridgeResult.Failure -> {
+                        result.rejectIfFreeGrantExhausted()
+                        throw IllegalStateException("全书地图批处理失败：${result.reason}")
+                    }
                     is BridgeResult.Success -> StudyModeTransportReply(
                         text = result.text,
                         routeChannel = if (batchEligible) CompanionRouteChannel.HAIKU_BATCH else CompanionRouteChannel.HAIKU_REALTIME,
@@ -629,7 +635,7 @@ internal object StudyModeAnchorGate {
         var repairReply: StudyModeTransportReply? = null
         val repairsById = mutableMapOf<String, Pair<Int, String>>()
         if (firstPassFailures.isNotEmpty() && repairTransport != null && (!repairOnlyWhenZeroValid || initialValidCount == 0)) {
-            repairReply = runCatching {
+            repairReply = modelCatching {
                 runTargetedRepair(
                     failures = firstPassFailures.take(8),
                     pages = pages,
@@ -941,7 +947,7 @@ Return STRICT JSON: {"items":[{"id":"...","obj":{...exact same keys corrected...
                     append("SOURCE [p.").append(pg).append("]: ").append(pageMap[pg].orEmpty().take(1800)).append('\n')
                 }
             }
-            repairReply = runCatching {
+            repairReply = modelCatching {
                 repairTransport.complete(
                     task = "STUDY_MODE_MATH_REPAIR",
                     jobKey = StudyModeJsonHelpers.sha256Hex("mathfix:$bookId:$chapterNum:${idsToRepair.joinToString(",")}"),
@@ -1992,6 +1998,12 @@ fun Application.studyModeRoutes(
                                 }
                             } catch (e: CancellationException) {
                                 throw e
+                            } catch (e: FriendServiceError) {
+                                // The stream has started: the refusal travels as the error event, with its code and sentence.
+                                if (friend != null) withContext(Dispatchers.IO) {
+                                    runCatching { friends?.record(friend, device, requestId, e.code, diagnostics = diagnostics) }
+                                }
+                                sink.emit("error", e.body)
                             } catch (e: Exception) {
                                 sink.emit("error", buildJsonObject { put("error", e.message ?: "学法生成失败") })
                             }

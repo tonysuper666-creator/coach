@@ -49,7 +49,7 @@ from api_route import (
     parse_image_part, validate_images,
     route as api_model, vendor as api_vendor,
 )
-from api_budget import Denied, FREE_GRANT_EXHAUSTED
+from api_budget import Denied, FREE_GRANT_EXHAUSTED, RESERVATIONS_BUSY
 from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS, GUIDE_TASK, FRIEND_BATCH_LABELS, friend_batch_task
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
@@ -1493,6 +1493,7 @@ async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome
                 "batch_submit_unavailable",
                 "missing_key",
                 FREE_GRANT_EXHAUSTED,
+                RESERVATIONS_BUSY,
                 "grant_allocation_unavailable",
             )
             primary = api_model(req.task, model, req.format_attempt) or model
@@ -1583,9 +1584,10 @@ async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
             # These exceptions contain fixed codes only; upstream messages and keys
             # never enter the diagnostics. Retain ambiguous credit reservations.
             reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "api_ledger_io"
-            retry_after_sec = error.retry_after_sec if isinstance(error, ApiFailure) else None
+            retry_after_sec = error.retry_after_sec if isinstance(error, ApiFailure) else (5 if reason == RESERVATIONS_BUSY else None)
             if req.friend_id:
                 # Only the exhausted free grant is a refusal worth naming; usage is never capped.
+                # Holds that outlasted the queue wait are a busy moment ("unavailable", retry shortly).
                 code = FREE_GRANT_EXHAUSTED if reason == FREE_GRANT_EXHAUSTED else "unavailable"
                 req.transport = "api"
                 yield {"kind": "end", "outcome": Outcome("failed", code, "error", req.served_by or model, started=sent, retry_after_sec=retry_after_sec)}

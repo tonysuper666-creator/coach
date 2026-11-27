@@ -61,7 +61,17 @@ Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
 the whole configured monthly API grant, including all unresolved reservations
 (TON-740: usage inside the free grant is recorded, never throttled). The nominal
 Anthropic $200 and OpenAI $500 grants allow $200 and $500 respectively; Coach's own
-share is the grant minus `other_writers_microusd`.
+share is the grant minus `other_writers_microusd`. A request is refused as
+`free_grant_exhausted` only when settled spend plus its own upper-bound price passes
+that share. When other calls' temporary holds fill the rest, the request queues
+(`BRIDGE_RESERVATION_WAIT_SEC`, default 30 s) and then answers `reservations_busy`
+(a retryable 503 for friends), never "used up".
+
+Prices in `model_routes.json` are the providers' standard list prices, checked on
+2026-11-27 (sources in `price_notes`); GPT-6.2 input is priced at its cache-write
+rate because automatic cache writes cannot be told apart in the usage receipt.
+`tools/bridge/tests/test_price_floor.py` fails if a routed model has no price or a
+price below its list floor.
 The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.

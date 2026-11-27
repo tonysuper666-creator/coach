@@ -129,6 +129,7 @@ class SonnetBridgeMockPlannerTransport(
         val elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
         when (result) {
             is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
                 if (friend != null) {
                     throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 }

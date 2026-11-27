@@ -1,5 +1,6 @@
 package com.coach.server
 
+import com.coach.ai.BridgeResult
 import com.coach.domain.*
 import com.coach.store.sha256
 import io.ktor.http.*
@@ -27,6 +28,25 @@ internal fun freeGrantExhausted(reason: String?): Boolean = reason == FREE_GRANT
 
 /** What a friend is told for a failed model call: only the exhausted free grant is named. */
 internal fun friendFailureCode(reason: String?): String = if (freeGrantExhausted(reason)) FREE_GRANT_EXHAUSTED else "unavailable"
+
+/** Every model call site runs this on a failed bridge result, owner or friend, so the exhausted free grant
+ * always reaches the reader as the same 429 sentence instead of a generic 502 or a degraded result. */
+internal fun BridgeResult.Failure.rejectIfFreeGrantExhausted() {
+    if (freeGrantExhausted(terminal?.reason)) throw FriendServiceError(FREE_GRANT_EXHAUSTED)
+}
+
+/** `runCatching` for optional model calls (repairs, extra batches): other failures still degrade quietly,
+ * the exhausted free grant never does. */
+internal inline fun <T> modelCatching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (e: FriendServiceError) {
+    if (e.code == FREE_GRANT_EXHAUSTED) throw e
+    Result.failure(e)
+} catch (e: kotlinx.coroutines.CancellationException) {
+    throw e
+} catch (e: Throwable) {
+    Result.failure(e)
+}
 
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
 internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {

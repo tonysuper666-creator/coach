@@ -54,7 +54,10 @@ class LiteratureComparisonService(private val bridge: BridgeClient) {
                                 }
                             }
                     }
-                    is BridgeResult.Failure -> error("文献对比批处理未完成，请稍后重试。")
+                    is BridgeResult.Failure -> {
+                        result.rejectIfFreeGrantExhausted()
+                        error("文献对比批处理未完成，请稍后重试。")
+                    }
                 }
             } catch (pending: BatchPending) {
                 buildJsonObject {

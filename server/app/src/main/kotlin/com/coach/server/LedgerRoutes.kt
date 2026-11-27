@@ -357,7 +357,8 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
         post("/v1/courses/{course}/journal/{day}/summary") {
             val day = call.parameters["day"]?.toLongOrNull() ?: return@post call.respond(HttpStatusCode.BadRequest)
             val service = chat ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
-            val result = service.journals.summarize(call.parameters["course"]!!,day)
+            val result = try { service.journals.summarize(call.parameters["course"]!!,day) }
+                catch (e: FriendServiceError) { return@post call.respondText(e.body.toString(), ContentType.Application.Json, e.status) }
             if (result == null) call.respond(HttpStatusCode.BadGateway)
             else {
                 pushes.emit(call.parameters["course"]!!)

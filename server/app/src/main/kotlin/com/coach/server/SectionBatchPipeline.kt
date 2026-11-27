@@ -775,6 +775,8 @@ class RoutedBatchAiTransport(
         if (primary != null) {
             try {
                 return primary.generateSection(systemPrompt, userPrompt, task, batchKey, maxTokens)
+            } catch (e: FriendServiceError) {
+                throw e
             } catch (e: Throwable) {
                 primaryError = e
             }
@@ -1009,7 +1011,10 @@ class HaikuRealtimeBridgeTransport(
                 ttftMs = result.call.ttftMs ?: elapsedMs,
                 elapsedMs = result.call.durMs.coerceAtLeast(1L),
             )
-            is BridgeResult.Failure -> throw IllegalStateException("haiku_realtime_failed:${result.reason}")
+            is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
+                throw IllegalStateException("haiku_realtime_failed:${result.reason}")
+            }
         }
     }
 }

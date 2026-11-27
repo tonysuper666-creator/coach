@@ -15,7 +15,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, atomic_json, micros
-from grant_fixture import fund
+from grant_fixture import fund, use_up
 from api_route import ApiRouter, ApiFailure, CONFIG, cost, image_token_bound, route, vendor
 import httpx
 import subscription_bridge as bridge
@@ -95,23 +95,32 @@ class LedgerTests(unittest.TestCase):
     def test_whole_free_grant_then_refuse(self):
         # TON-740: the free grant may be used in full; the only refusal is the grant running out.
         for provider, limit in (("anthropic", 200), ("openai", 500)):
-            self.ledger.reserve(provider, KEY, micros(limit))
+            use_up(self.ledger, provider, micros(limit))
             with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
                 self.ledger.reserve(provider, KEY, 1)
 
-    def test_guard_receipt_distinguishes_pending_from_accounted_usage(self):
+    def test_holds_alone_are_busy_never_exhausted(self):
+        # Settled 0 with the share fully held by in-flight calls: wait, never "used up".
+        hold = self.ledger.reserve("anthropic", KEY, micros(200))
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
+            self.ledger.reserve("anthropic", KEY, 1)
+        self.assertEqual([], sorted(p.name for p in self.root.glob("*-guard-*.json")))
+        self.ledger.settle("anthropic", hold, 0, rejected=True)
+        self.ledger.reserve("anthropic", KEY, 1)
+
+    def test_guard_receipt_only_when_settled_spend_plus_request_passes_the_grant(self):
         limit = micros(200)
         hold = self.ledger.reserve("anthropic", KEY, limit)
         receipt = self.root / "credit-guard-2026-11-anthropic.json"
-        for reason, pending in (("pending_reservations", limit), ("insufficient_allocation", 0)):
-            with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
-                self.ledger.reserve("anthropic", KEY, 1)
-            record = json.loads(receipt.read_text())
-            self.assertEqual(reason, record["cause"])
-            self.assertEqual(pending, record["reserved_microusd"])
-            self.assertNotIn(KEY, receipt.read_text())
-            if pending:
-                self.ledger.settle("anthropic", hold, limit)
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
+            self.ledger.reserve("anthropic", KEY, 1)
+        self.assertFalse(receipt.exists())
+        self.ledger.settle("anthropic", hold, limit)
+        with self.assertRaisesRegex(Denied, "^free_grant_exhausted$"):
+            self.ledger.reserve("anthropic", KEY, 1)
+        record = json.loads(receipt.read_text())
+        self.assertEqual(("insufficient_allocation", 0), (record["cause"], record["reserved_microusd"]))
+        self.assertNotIn(KEY, receipt.read_text())
 
     def test_key_change_does_not_reset_provider_budget(self):
         self.ledger.reserve("anthropic", KEY, micros(200))
@@ -128,11 +137,11 @@ class LedgerTests(unittest.TestCase):
     def test_existing_anthropic_cycle_releases_only_retired_ceiling(self):
         settled = self.ledger.reserve("anthropic", KEY, micros(140))
         self.ledger.settle("anthropic", settled, micros(140))
-        self.ledger.reserve("anthropic", KEY, micros(10))
+        use_up(self.ledger, "anthropic", micros(10))
         data = self.ledger.read()
         data["cycles"][settled[0]]["limit"] = micros(150)
         self.ledger.save(data)
-        self.ledger.reserve("anthropic", KEY, micros(50))
+        use_up(self.ledger, "anthropic", micros(50))
         with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
             self.ledger.reserve("anthropic", KEY, 1)
 
@@ -173,7 +182,8 @@ class LedgerTests(unittest.TestCase):
         self.now = 1796083140  # 2026-11-30 23:59 UTC
         self.ledger.reserve("openai", KEY, micros(500))
         self.now += 120
-        with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
+        # The November hold survives the rollover and still blocks new calls (as a hold, not "used up").
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
             self.ledger.reserve("openai", KEY, 1)
         self.assertNotIn("2026-12", self.ledger.read()["months"])
 
@@ -220,12 +230,37 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, router, task="READER_SELECTION", model="claude-sonnet-5-5"):
         return [e async for e in router.events(task, model, "synthetic system", "synthetic prompt", 100)]
 
+    async def test_router_queues_behind_holds_then_proceeds(self):
+        # TON-740 review: holds filling the share are a queue, not "the free grant is used up".
+        hold = self.ledger.reserve("anthropic", KEY, micros(200))
+        sleeps = []
+        async def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                self.ledger.settle("anthropic", hold, 0, rejected=True)
+        router = self.router(frames("anthropic"), reservation_wait=30, sleep=sleep)
+        events = await self.collect(router, task="TEACH")
+        self.assertEqual("complete", events[-1]["kind"])
+        self.assertEqual([0.25, 0.5], sleeps)
+        self.assertEqual(1, len(self.requests))
+
+    async def test_router_reports_busy_not_used_up_when_holds_outlast_the_wait(self):
+        self.ledger.reserve("anthropic", KEY, micros(200))
+        now = [0.0]
+        async def sleep(seconds):
+            now[0] += seconds
+        router = self.router(frames("anthropic"), reservation_wait=3, sleep=sleep, clock=lambda: now[0])
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
+            await self.collect(router, task="TEACH")
+        self.assertLessEqual(now[0], 3)
+        self.assertEqual([], self.requests)
+
     async def test_missing_key_and_budget_limit_use_bridge_without_api_io(self):
         async def cli(req, model, effort):
             self.assertEqual("gpt-6.1-sol", model)
             req.physical_calls += 1
             return bridge.Outcome("complete", None, "stop", model, text="subscription answer")
-        self.ledger.reserve("openai", KEY, micros(500))
+        use_up(self.ledger, "openai", micros(500))
         for keys, expected in (({}, "missing_key"), ({"openai": KEY}, "free_grant_exhausted")):
             with self.subTest(reason=expected):
                 req = bridge.build_req({"model": "gpt-6.1-sol", "max_tokens": 100,
@@ -710,9 +745,9 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cost("claude-opus-5-5", {"input_tokens": 100, "output_tokens": 20}), month["spent_microusd"])
 
     async def test_vision_over_share_denies_with_zero_network_requests_and_no_cli_fallback(self):
-        # Fill both whole free grants: Anthropic $200 and OpenAI $500.
-        self.ledger.reserve("anthropic", KEY, micros(200))
-        self.ledger.reserve("openai", KEY, micros(500))
+        # Use up both whole free grants: Anthropic $200 and OpenAI $500.
+        use_up(self.ledger, "anthropic", micros(200))
+        use_up(self.ledger, "openai", micros(500))
 
         def fail_if_called(request):
             raise AssertionError(f"Unexpected upstream HTTP call to {request.url}")
@@ -820,7 +855,7 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], self.requests)
 
     async def test_vision_http_endpoint_enforces_share_and_returns_x_coach_without_network(self):
-        self.ledger.reserve("anthropic", KEY, micros(200))
+        use_up(self.ledger, "anthropic", micros(200))
 
         def fail_if_called(request):
             raise AssertionError(f"Unexpected upstream HTTP call to {request.url}")
@@ -884,7 +919,7 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
             root = Path(td)
             fund(root)
             ledger = CreditLedger(root, lambda: NOW)
-            ledger.reserve("anthropic", KEY, micros(200))
+            use_up(ledger, "anthropic", micros(200))
             seen = []
 
             def fail_if_called(request):
@@ -944,7 +979,7 @@ class VisionRoutingTests(unittest.IsolatedAsyncioTestCase):
             root = Path(td)
             fund(root)
             ledger = CreditLedger(root, lambda: NOW)
-            ledger.reserve("openai", KEY, micros(500))
+            use_up(ledger, "openai", micros(500))
             seen = []
 
             def primary_500(request):

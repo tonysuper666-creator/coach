@@ -77,7 +77,8 @@ def snapshot(ledger, now):
         limit = grant_limit_micros(provider)
         used = data["months"].get(month, {}).get(provider, {}).get("spent_microusd", 0)
         pending = sum(sum(c["reserved"].values()) for key, c in data["cycles"].items() if key.startswith(provider + ":"))
-        reached = used + pending >= limit or (ledger.state / f"credit-guard-{month}-{provider}.json").is_file()
+        # Settled spend decides; temporary holds alone never count as the grant being used up.
+        reached = used >= limit or (ledger.state / f"credit-guard-{month}-{provider}.json").is_file()
         warning |= reached
         detail = f"{provider} 本月已用 ${used / 1_000_000:.2f}，预留 ${pending / 1_000_000:.2f}，免费额度 ${limit / 1_000_000:.2f}"
         rows.append(detail + ("（已触线）" if reached else ""))

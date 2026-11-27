@@ -299,19 +299,18 @@ class HaikuStreamingCollectionQaTransport(
             val failure = result as? BridgeResult.Failure
             val reason = failure?.terminal?.reason
             val retryAfterSec = failure?.terminal?.retryAfterSec?.takeIf { it > 0 }
+            // Owner or friend: the exhausted free grant is the same 429 sentence everywhere.
+            failure?.rejectIfFreeGrantExhausted()
             if (friend != null) {
-                if (freeGrantExhausted(reason)) throw FriendServiceError(FREE_GRANT_EXHAUSTED)
                 if (retryAfterSec != null) {
                     throw CollectionQaRateLimitError(retryAfterSec, "当前提问较集中，请约 ${retryAfterSec} 秒后重试。")
                 }
                 throw FriendServiceError("unavailable")
             }
-            val isQuota = freeGrantExhausted(reason)
             val isRateLimited = reason in setOf("api_http_429", "rate_limited") ||
                 failure?.reason?.contains("http_429") == true ||
                 failure?.reason?.contains("api_http_429") == true
             when {
-                isQuota -> throw MockError(HttpStatusCode.TooManyRequests, FREE_GRANT_EXHAUSTED_MESSAGE)
                 isRateLimited -> throw CollectionQaRateLimitError(
                     retryAfterSec,
                     retryAfterSec?.let { "当前提问较集中，请约 ${it} 秒后重试。" } ?: "当前提问较集中，请几秒后重试。",

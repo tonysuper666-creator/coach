@@ -33,8 +33,12 @@ class Denied(Exception):
     """A content-free reason safe for diagnostics."""
 
 
-# The one spend refusal: Coach's share of this month's free grant is used up.
+# The one spend refusal: Coach's share of this month's free grant is used up —
+# what is already settled plus this request's upper bound would pass it.
 FREE_GRANT_EXHAUSTED = "free_grant_exhausted"
+# Not a refusal: other calls' temporary holds fill the rest for now. They settle within
+# seconds, so the router waits and retries; the reader is never told the grant is used up.
+RESERVATIONS_BUSY = "reservations_busy"
 
 
 def require(condition):
@@ -258,16 +262,17 @@ class CreditLedger:
             before_holds = min(ceiling - used, share - settled)
             remaining = before_holds - pending
             ceiling = min(ceiling, share)
-            if maximum > remaining:
-                # A request can cross the boundary before the settled total reaches
-                # it. Leave a content-free signal for the existing spend monitor.
+            if maximum > before_holds:
+                # Settled spend plus this request's bound passes Coach's free-grant share.
+                # Leave a content-free signal for the existing spend monitor.
                 atomic_json(self.state / f"credit-guard-{month}-{provider}.json",
                             {"maximum_microusd": maximum, "limit_microusd": ceiling,
                              "at_utc": int(now), "before_holds_microusd": before_holds,
-                             "reserved_microusd": pending,
-                             "cause": "pending_reservations" if maximum <= before_holds else "insufficient_allocation"})
+                             "reserved_microusd": pending, "cause": "insufficient_allocation"})
                 atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
                 raise Denied(FREE_GRANT_EXHAUSTED)
+            if maximum > remaining:
+                raise Denied(RESERVATIONS_BUSY)
             token = secrets.token_hex(16)
             if friend is not None:
                 if (provider != "anthropic" or not re.fullmatch(r"[a-f0-9]{64}", friend) or
@@ -283,8 +288,6 @@ class CreditLedger:
                 usage["reserved"][token] = {"tokens": tokens, "device": device, "microusd": maximum}
             cycle["reserved"][token] = maximum
             summary["reserved_microusd"] += maximum
-            if maximum == remaining:
-                atomic_json(self.state / f"grant-guard-{period}.json", {"period": period})
             self.save(data)
             return cycle_id, month, token
 

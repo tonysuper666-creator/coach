@@ -124,7 +124,9 @@ def main():
                 "/v1/courses/x/essays", "/v1/prewarm", "/v1/reader", "/v1/library", "/v1/health", "/health",
                 "/v1/%64evices", "/v1/%70airing-code", "/v1/library/explain/", "/v1/public/status/../devices"]
             for path in denied:
-                assert request(path, credentials=a) == (404, ""), path
+                # TON-1943: known owner endpoints answer 403 owner_only; unknown paths stay an empty 404.
+                status, body = request(path, credentials=a)
+                assert (status, body) == (404, "") or (status == 403 and json.loads(body).get("code") == "owner_only"), (path, status)
             command("revoke-friend", "Synthetic A")
             assert request("/v1/public/status", credentials=a)[0] == 401
             assert request("/v1/public/status", credentials=b)[0] == 200
@@ -167,7 +169,7 @@ def main():
             with sqlite3.connect(db) as connection:
                 assert connection.execute("SELECT COUNT(*) FROM ai_calls").fetchone()[0] == 0
             print("FRIEND_ACCEPTANCE PASS: real isolated listeners + actual bridge + offline Anthropic SSE")
-            print("pair A/B=friend; own sample explanation=200; 20 forbidden paths=empty404; revoke A=401/B=200")
+            print("pair A/B=friend; own sample explanation=200; 20 forbidden paths=404 or 403 owner_only; revoke A=401/B=200")
             print("B default=2 successful calls; a configured daily figure is recorded not refused (3 calls, input=300 output=60, cost recorded); "
                   "Coach free-grant share used up=429 「这个月的免费额度用完了」; owner AI calls=0")
             print("production=untouched; provider network=0; subscription CLI=0")

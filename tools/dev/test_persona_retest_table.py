@@ -11,6 +11,25 @@ import persona_retest_table as table
 
 
 class RateTests(unittest.TestCase):
+    def test_ask_state_distinguishes_a_new_answer_from_history_or_a_pending_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.sqlite"
+            db = sqlite3.connect(path)
+            try:
+                db.execute("CREATE TABLE book_ask_turns(id INTEGER PRIMARY KEY, action_kind, question_text, answer_status)")
+                self.assertEqual(table.ask_state(path, "q"), {"id": 0, "status": "absent"})
+                db.executemany("INSERT INTO book_ask_turns VALUES (?, ?, ?, ?)", [
+                    (1, "ask", "q", "complete"), (2, "ask", "other", "complete"),
+                    (3, "ask", "q", "pending"), (4, "explain", "q", "complete"),
+                ])
+                db.commit()
+                self.assertEqual(table.ask_state(path, "q"), {"id": 3, "status": "pending"})
+                db.execute("UPDATE book_ask_turns SET answer_status='complete' WHERE id=3")
+                db.commit()
+                self.assertEqual(table.ask_state(path, "q"), {"id": 3, "status": "complete"})
+            finally:
+                db.close()
+
     def test_rounding_matches_version_rates(self):
         self.assertEqual(table.rate({"ok": 1, "timeout": 1}), "50.0% (1/2)")
         self.assertEqual(table.rate({"ok": 2, "refusal": 1}), "33.3% (1/3)")

@@ -1476,7 +1476,9 @@ class PracticeGradeAndDiagnoseService(
         criterion: PracticeRubricCriterionInput,
         pages: List<PracticeSourcePageInput>,
     ): String {
-        val page = pages.firstOrNull { it.pdfPage == criterion.pdfPage }?.text.orEmpty()
+        val onPage = pages.filter { it.pdfPage == criterion.pdfPage }
+        val page = (onPage.firstOrNull { criterion.quoteAnchor.isNotBlank() && criterion.quoteAnchor in it.text }
+            ?: onPage.firstOrNull())?.text.orEmpty()
         val cut = ChapterOpenGate.sentenceAround(page, criterion.quoteAnchor)
         if (cut.isNotBlank() && (criterion.quoteAnchor.isBlank() || criterion.quoteAnchor in cut)) return cut
         val given = criterion.sourceExcerpt.trim()

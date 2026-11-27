@@ -346,7 +346,10 @@ class ChapterOpenQuestionTest {
                         sourceExcerpt = wrong,
                     ),
                 ),
-                sourcePages = listOf(PracticeSourcePageInput(2, page)),
+                sourcePages = listOf(
+                    PracticeSourcePageInput(2, "Gulls rest on the breakwater all morning."),
+                    PracticeSourcePageInput(2, page),
+                ),
             ),
         )
         val excerpt = Regex(""""courseDefinitionExcerpt":"([^"]+)"""").find(prompts.single())?.groupValues?.get(1)

@@ -815,13 +815,17 @@ function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18, [int]$wi
     $lineIdx = 0
     foreach ($l in @($lines)) {
         $lineIdx++
-        $compact = ([string]$l.Text) -replace '\s', ''
+        $trimmed = ([string]$l.Text).Trim()
+        $compact = $trimmed -replace '\s', ''
         if (-not $compact) { continue }
+        $allowedTokens = @('讲解', '提问', '批注', '提问批注', '浮层', '并排', '×', 'x', 'X')
+        if ($compact -notin @('讲解', '提问', '批注', '提问批注')) {
+            $tokens = @($trimmed -split '\s+' | Where-Object { $_ })
+            if ($tokens.Count -lt 2) { continue }
+            if (@($tokens | Where-Object { $_ -notin $allowedTokens }).Count -gt 0) { continue }
+        }
         $present = @($order | Where-Object { $compact.Contains($_) })
         if (-not $present.Count) { continue }
-        $stripped = $compact -replace '讲解|提问|批注|浮层|并排|[×xX·•|｜]', ''
-        $maxResidual = if ($present.Count -ge 2) { 2 } else { 0 }
-        if ($stripped.Length -gt $maxResidual) { continue }
         foreach ($name in $present) {
             $hit = Find-Text @($l) $name
             if (-not $hit) { continue }
@@ -909,6 +913,62 @@ function Ensure-CompanionDrawerOpen(
         $opened++
     }
     [pscustomobject]@{ Tab = $tab; Lines = $lines }
+}
+# 步骤6「读前自测」从当前帧实时定位模块条、提交按钮与上方最后一个选项，避免滚动/抽屉高度变化后沿用旧帧坐标漏选。
+function Find-Step6ModuleStrip($lines, [int]$winW = 0, [int]$maxY = [int]::MaxValue) {
+    $stripNames = @('自测', '要点', '推导', '练习', '习题')
+    $hits = New-Object System.Collections.ArrayList
+    foreach ($l in @($lines)) {
+        $t = ([string]$l.Text -replace '\s', '')
+        if (-not $t -or $t -notmatch '^(?:要点|自测|推导|练习|习题)+$') { continue }
+        $bb = Get-LineBox $l
+        if ($bb.X2 -lt $bb.X1 -or $bb.Y -ge $maxY) { continue }
+        $target = $null
+        foreach ($name in $stripNames) {
+            if ($t.Contains($name)) {
+                $m = Find-Text @($l) $name
+                if ($m) { $target = $m; break }
+            }
+        }
+        if (-not $target) {
+            $target = [pscustomobject]@{ X = [int](($bb.X1 + $bb.X2) / 2); Y = [int]$bb.Y; X1 = $bb.X1; X2 = $bb.X2; Y1 = $bb.Y1; Y2 = $bb.Y2 }
+        }
+        [void]$hits.Add($target)
+    }
+    if (-not $hits.Count) { return $null }
+    if ($winW -ge 1200) {
+        $right = @($hits | Where-Object { $_.X1 -ge [int]($winW * 0.50) })
+        if ($right.Count) { return @($right | Sort-Object Y | Select-Object -Last 1)[0] }
+    }
+    return @($hits | Sort-Object Y | Select-Object -Last 1)[0]
+}
+function Find-Step6PretestState($lines, [int]$winW, [int]$winH, $fallbackStrip = $null) {
+    $sub = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^提交$' } | Select-Object -First 1
+    $sb = if ($sub) { Get-LineBox $sub } else { $null }
+    if (-not $sb) {
+        $guessRow = $lines | Where-Object { ($_.Text -replace '\s', '') -match '这题是猜的' } | Select-Object -First 1
+        if ($guessRow) {
+            $gb = Get-LineBox $guessRow
+            $sb = [pscustomobject]@{ X1 = [int]($winW - 96); X2 = [int]($winW - 24); Y1 = $gb.Y1; Y2 = $gb.Y2; Y = $gb.Y }
+        }
+    }
+    if (-not $sb) { return [pscustomobject]@{ Submit = $null; Strip = $null; Option = $null } }
+    $curStrip = Find-Step6ModuleStrip $lines $winW $sb.Y
+    if (-not $curStrip -and $fallbackStrip -and $fallbackStrip.Y -lt ($sb.Y - 24)) {
+        $curStrip = $fallbackStrip
+    }
+    $minY = if ($curStrip) { [int]$curStrip.Y + 24 } else { 0 }
+    $optBandH = [Math]::Max(110, [int]($winH * 0.24))
+    $requireRightPane = ($winW -ge 1200 -and (-not $curStrip -or $curStrip.X -ge [int]($winW * 0.50)))
+    $above = @($lines | Where-Object {
+        $t = ($_.Text -replace '\s', '')
+        $bb = Get-LineBox $_
+        $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - $optBandH) -and $bb.Y -gt $minY -and
+        (-not $requireRightPane -or $bb.X1 -ge [int]($winW * 0.65)) -and
+        $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交|^(?:要点|自测|推导|练习|习题)+$'
+    } | Sort-Object { (Get-LineBox $_).Y })
+    $opt = if ($above.Count -gt 0) { $above[-1] } else { $null }
+    [pscustomobject]@{ Submit = $sb; Strip = $curStrip; Option = $opt }
 }
 # 跳页框里的数字紧挨在「前往」左边。认不出返回 $null（调用方仍可提交，交给页码断言）。
 # 读到截断数字时调用方不得按回车。
@@ -2061,15 +2121,8 @@ try {
         $deadline = (Get-Date).AddSeconds(90)
         while ((Get-Date) -lt $deadline -and -not $answered) {
             $lines = $script:Last
-            $sub = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^提交$' } | Select-Object -First 1
-            $sb = if ($sub) { Get-LineBox $sub } else { $null }
-            if (-not $sb) {
-                $guessRow = $lines | Where-Object { ($_.Text -replace '\s', '') -match '这题是猜的' } | Select-Object -First 1
-                if ($guessRow) {
-                    $gb = Get-LineBox $guessRow
-                    $sb = [pscustomobject]@{ X1 = [int]($winW - 96); X2 = [int]($winW - 24); Y1 = $gb.Y1; Y2 = $gb.Y2; Y = $gb.Y }
-                }
-            }
+            $state6 = Find-Step6PretestState $lines $winW $winH $strip
+            $sb = $state6.Submit
             # 11-23 14:22 那轮滚轮落点没让抽屉体动（OCR 帧一模一样 5 次就判了没「提交」）：
             # 改用 Scroll-DrawerBody 按像素确认真滚了、没滚就换落点；连着 3 次滚不动才算卡底。
             if (-not $sb) {
@@ -2086,23 +2139,15 @@ try {
                 $null = Shot 6 'pretest-scroll'
                 continue
             }
-            $optBandH = [Math]::Max(110, [int]($winH * 0.22))
-            $above = @($lines | Where-Object {
-                $t = ($_.Text -replace '\s', '')
-                $bb = Get-LineBox $_
-                $bb.Y -lt ($sb.Y - 6) -and $bb.Y -gt ($sb.Y - $optBandH) -and $bb.Y -gt ($strip.Y + 24) -and
-                (-not ($winW -ge 1200) -or $bb.X1 -ge [int]($winW * 0.65)) -and
-                $t -notmatch '这题是猜的|先猜一猜|^第\d+[/／]\d+[题題]$|提交'
-            } | Sort-Object { (Get-LineBox $_).Y })
             # 「提交」被滚到模块条底下时，它上面就只剩模块条（14:37 那轮把「习题」当成选项点了，切走了自测）：
-            # 选项只认模块条以下的行，认不到就往回滚。
-            if ($above.Count -eq 0) {
+            # 选项只认当前帧模块条以下、提交按钮以上的行，认不到就往回滚。
+            $opt6 = $state6.Option
+            if (-not $opt6) {
                 $null = Scroll-DrawerBody 3 $winW $winH
                 Start-Sleep -Milliseconds 700
                 $null = Shot 6 'pretest-up'
                 continue
             }
-            $opt6 = $above[-1]
             $ob = Get-LineBox $opt6
             $tries6++
             Note "步骤6 第 $tries6 次点选项「$($opt6.Text)」再点「提交」"

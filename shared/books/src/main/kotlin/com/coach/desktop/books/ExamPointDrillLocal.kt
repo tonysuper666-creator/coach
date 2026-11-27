@@ -55,6 +55,8 @@ internal data class ExamPointDrillReport(
     val agreed: Int,
     val discards: Map<String, Int>,
     val zeroNotes: List<String>,
+    val neverGenerated: Int = 0,
+    val droppedByCheck: Int = 0,
 ) {
     fun summary(): String {
         val rate = "$agreed/$checked"
@@ -62,7 +64,7 @@ internal data class ExamPointDrillReport(
         val histogram = if (discards.isEmpty()) "无" else discards.entries.joinToString(",") { "${it.key}:${it.value}" }
         val zeros = if (zeroNotes.isEmpty()) "0" else zeroNotes.joinToString("；")
         val counts = if (questionsPerPoint.isEmpty()) "无" else questionsPerPoint.joinToString("/")
-        return "考点${pointCount}个，每考点题数$counts，一致$rate，未入库$dropped（$histogram），零题：$zeros"
+        return "考点${pointCount}个，每考点题数$counts，一致$rate，未入库$dropped（$histogram），从未生成$neverGenerated，核对丢掉$droppedByCheck，零题：$zeros"
     }
 }
 
@@ -145,9 +147,15 @@ internal object ExamPointDrillLocal {
         drills.forEach { drill ->
             drill.discards.forEach { (reason, count) -> discards[reason] = (discards[reason] ?: 0) + count }
         }
+        var neverGenerated = 0
+        var droppedByCheck = 0
         val zeros = examPoints.mapIndexedNotNull { index, point ->
             val drill = point.pack?.drill
             if (drill != null && drill.choices.isNotEmpty()) return@mapIndexedNotNull null
+            val attempted = drill != null && (
+                drill.checked > 0 || drill.discards.isNotEmpty() || !drill.emptyReason.isNullOrBlank()
+            )
+            if (attempted) droppedByCheck += 1 else neverGenerated += 1
             val why = drill?.emptyReason?.takeIf { it.isNotBlank() } ?: "还没出题"
             "第${index + 1}个：$why"
         }
@@ -158,6 +166,8 @@ internal object ExamPointDrillLocal {
             agreed = drills.sumOf { it.agreed },
             discards = discards,
             zeroNotes = zeros,
+            neverGenerated = neverGenerated,
+            droppedByCheck = droppedByCheck,
         )
     }
 

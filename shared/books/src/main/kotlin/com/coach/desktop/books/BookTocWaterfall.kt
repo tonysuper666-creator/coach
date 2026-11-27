@@ -56,15 +56,15 @@ internal data class BookStudyChunk(
  */
 internal object BookTocWaterfall {
     private val FRONT_SCAFFOLD_NOISE = Regex(
-        """^(?:Cover|Half\s+Title|Title\s+Page|Copyright(?:\s+Page)?|Brief\s+Contents|Detailed\s+Contents|Contents|Table\s+of\s+Contents|Blank\s+Page|List\s+of\s+(?:Figures|Tables|Boxes)|目\s*录|总\s*目\s*录|简\s*目|版权页|封面)$""",
+        """^(?:Cover|Half\s+Title|Title\s*Page|Imprint|Copyright(?:\s+Page)?|Brief\s+Contents|Detailed\s+Contents|Contents|Table\s+of\s+Contents|Blank\s+Page|List\s+of\s+(?:Figures|Tables|Boxes)|目\s*录|总\s*目\s*录|简\s*目|版权页|封面)$""",
         RegexOption.IGNORE_CASE,
     )
     private val FRONT_MATTER_TITLE = Regex(
-        """^(?:Preface|Foreword|About\s+the\s+Authors?|Authors?[’']?\s+Acknowledgments?|Publisher[’']?s?\s+Acknowledgments?|Acknowledgments?|Suggested\s+Pathways.*|How\s+to\s+Use\s+This\s+Book|Introduction\s+to\s+the\s+Book|(?:《[^》]{1,30}》\s*)?(?:作者\s*|著者\s*|译者\s*|譯者\s*|编者\s*|編者\s*)?(?:前\s*言|序\s*言?|自\s*序|代\s*序|导\s*言|導\s*言|引\s*言|编\s*者\s*按|凡\s*例|致\s*谢))$""",
+        """^(?:Preface|Foreword|About\s+the\s+Authors?|Authors?[’']?\s+Acknowledgments?|Publisher[’']?s?\s+Acknowledgments?|Acknowledg(?:e)?ments?|Suggested\s+Pathways.*|How\s+to\s+Use\s+This\s+Book|Introduction\s+to\s+the\s+Book|(?:《[^》]{1,30}》\s*)?(?:作者\s*|著者\s*|译者\s*|譯者\s*|编者\s*|編者\s*)?(?:前\s*言|序\s*言?|自\s*序|代\s*序|导\s*言|導\s*言|引\s*言|编\s*者\s*按|凡\s*例|致\s*谢))$""",
         RegexOption.IGNORE_CASE,
     )
     private val BACK_MATTER_TITLE = Regex(
-        """^(?:Bibliography|References|Works\s+Cited|(?:Author|Subject|Name|General)\s+Index|Index|Glossary|Endnotes|参考文献|引用文献|索\s*引|主题索引|人名索引|后\s*记)$""",
+        """^(?:Bibliography|References|Solutions|Answer\s+Key|Colophon|Uncopyright|Conflicts?\s+of\s+Interests?(?:\s+Statement)?|Works\s+Cited|(?:Author|Subject|Name|General)\s+Index|Index|Glossary|Endnotes|参考文献|引用文献|索\s*引|主题索引|人名索引|后\s*记)$""",
         RegexOption.IGNORE_CASE,
     )
     private val APPENDIX_TITLE = Regex(
@@ -381,11 +381,19 @@ internal object BookTocWaterfall {
             return WaterfallOutcome(stageANodes, chunks, sections, lessons, refinedRoles, stageARaw.first().source.name, 1.0, allBlocks)
         }
 
+        val effectiveTypo = typographyLines.ifEmpty { deriveTypographyFromLayouts(pages) }
+        val openings = if (format == "pdf") PrintedChapterOpenings.detect(pages, effectiveTypo) else emptyList()
         // Stage B: Extended leading printed TOC parser (for PDFs without outline)
         val stageBResult = runStageB(bookId, pages, typographyLines, byPage, totalPages)
         if (stageBResult != null && stageBResult.first.count { it.kind in BODY_NODE_KINDS } >= 3) {
             val (tocNodes, conf) = stageBResult
-            if (conf >= 0.85) {
+            // A printed contents page often lists details at chapter depth. Prefer the
+            // physical openings when the inferred major destinations largely disagree.
+            val chapterStarts = tocNodes.filter { it.kind == TocNodeKind.CHAPTER }.map { it.startPage }
+            val supported = openings.isEmpty() || chapterStarts.count { start ->
+                openings.any { kotlin.math.abs(it.page - start) <= 1 }
+            } * 2 > chapterStarts.size
+            if (conf >= 0.85 && supported) {
                 val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage, nativeBodyStart = nativeBodyStart)
                 val (chunks, sections, lessons) = buildStudyChunks(bookId, bookTitle, pages, refinedRoles, tocNodes, byPage, nativeBodyStart)
                 return WaterfallOutcome(tocNodes, chunks, sections, lessons, refinedRoles, HeadingSource.TOC_PAGE.name, conf, allBlocks)
@@ -393,8 +401,7 @@ internal object BookTocWaterfall {
         }
 
         // Stage C: Typography clustering + strict negative filters (slides, academic papers, scanned OCR)
-        val effectiveTypo = typographyLines.ifEmpty { deriveTypographyFromLayouts(pages) }
-        val stageC = runStageC(bookId, pages, initialRoles, byPage, effectiveTypo, repeatingEdges, totalPages, format)
+        val stageC = runStageC(bookId, pages, initialRoles, byPage, effectiveTypo, repeatingEdges, totalPages, format, openings)
         val finalNodes = stageC.nodes
         val finalConf = stageC.confidence
         val finalSource = stageC.source
@@ -450,6 +457,7 @@ internal object BookTocWaterfall {
             val hasSlideNotes = format == "pptx" && page.text.substringAfter("\n\n备注\n\n", "").isNotBlank()
             val role = when {
                 nonPage.isEmpty() -> BookPageRole.BLANK
+                format == "pdf" && PrintedChapterOpenings.isContents(page.text.lines()) -> BookPageRole.TOC
                 analysis.kind == ExplainPageKind.TOC -> BookPageRole.TOC
                 analysis.kind == ExplainPageKind.COPYRIGHT -> BookPageRole.COPYRIGHT
                 hasIdxH || isIndex(nonPage) -> { inBackSection = BookPageRole.INDEX; BookPageRole.INDEX }
@@ -549,9 +557,24 @@ internal object BookTocWaterfall {
                 info.kind == TocNodeKind.CHAPTER && info.numberLabel != null
             }) || (it.rawLevel <= 3 && ROMAN_CHAPTER.matches(it.rawTitle))
         } else -1
+        // Preserve the source tree while classifying labels. A numbered bookmark inside
+        // "Solutions" or "Preface" indexes that material, even when it says "Chapter 1".
+        val matterAncestors = ArrayDeque<Pair<Int, TocNodeKind>>()
         val filtered = candidates.mapIndexedNotNull { index, cand ->
             val classified = classifyOutlineLabel(cand.rawTitle, cand.rawLevel)
+            val nativeOutline = epub || cand.source == HeadingSource.PDF_OUTLINE
+            while (matterAncestors.isNotEmpty() && matterAncestors.last().first >= cand.rawLevel) {
+                matterAncestors.removeLast()
+            }
+            val inherited = matterAncestors.lastOrNull()?.second
+            if (nativeOutline && classified.kind in setOf(TocNodeKind.FRONT_MATTER, TocNodeKind.BACK_MATTER) &&
+                !classified.isScaffoldNoise) {
+                matterAncestors.addLast(cand.rawLevel to (inherited ?: classified.kind))
+            }
             val info = when {
+                cand.source == HeadingSource.PDF_OUTLINE && classified.title.endsWith(".pdf", ignoreCase = true) ->
+                    classified.copy(isScaffoldNoise = true)
+                inherited != null -> classified.copy(kind = inherited)
                 !epub -> classified
                 classified.title == "正文" -> classified.copy(kind = TocNodeKind.SECTION)
                 cand.rawLevel <= 3 && ROMAN_CHAPTER.matches(cand.rawTitle) ->
@@ -1054,6 +1077,7 @@ internal object BookTocWaterfall {
         repeatingEdges: Set<String>,
         totalPages: Int,
         format: String,
+        openings: List<BookOutlineItem>,
     ): StageCResult {
         if (format == "txt") {
             val headings = textCollectionHeadings(pages)
@@ -1061,8 +1085,12 @@ internal object BookTocWaterfall {
                 return StageCResult(buildCanonicalNodes(bookId, totalPages, headings, 0.9), HeadingSource.TEXT_LAYOUT, 0.9)
             }
         }
+        if (openings.isNotEmpty()) {
+            val raw = openings.map { RawCandidate(it.title, 1, it.page, null, it.source, TocNodeKind.CHAPTER) }
+            return StageCResult(buildCanonicalNodes(bookId, totalPages, raw, 0.90), HeadingSource.HEADING_RULE, 0.90)
+        }
         val bodyPages = pages.filter { (pageRoles[it.number] ?: BookPageRole.BODY) == BookPageRole.BODY }
-        val activePages = if (bodyPages.isNotEmpty()) bodyPages else pages
+        val activePages = bodyPages.ifEmpty { pages.filter { pageRoles[it.number] != BookPageRole.TOC } }
         if (activePages.isEmpty()) return StageCResult(emptyList(), HeadingSource.FALLBACK_LENGTH, 0.0)
 
         // Check Lecture Slides / Handout mode first when typography exists.

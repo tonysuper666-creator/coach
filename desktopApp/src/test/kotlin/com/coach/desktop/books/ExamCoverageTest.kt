@@ -90,4 +90,128 @@ class ExamCoverageTest {
         )
         assertEquals(listOf("Explain the idea."), fromDoc.map { it.trim().trim('>') }.map { it.trim() })
     }
+
+    @Test
+    fun matchesLowercaseStemsAgainstIdentifiedAndTextbookAndReportsUnmatchedAsMissed() {
+        val synthTextbook = """
+            Simple market: Buyers and sellers trade goods at a clearing price.
+            ## Consumer surplus
+            The gap between willingness to pay and market price.
+            A **deadweight loss** arises when output falls below efficiency.
+        """.trimIndent()
+        val questions = listOf(
+            "1. Consider a simple market where buyers and sellers meet to trade.",
+            "2. Consider a simple situation where deadweight loss occurs after a tax.",
+            "3. Consider a simple situation where asymmetric signaling changes outcomes.",
+        )
+        val report = ExamCoverage.evaluate(
+            questions = questions,
+            identified = listOf("Simple market"),
+            bank = listOf(CoverageBankPoint("Simple market", choices = 3, essay = false)),
+            textbook = synthTextbook,
+        )
+        assertEquals(3, report.heldOutPoints)
+        assertEquals(1, report.covered)
+        assertEquals(listOf("Simple market"), report.coveredPoints)
+        assertEquals(
+            listOf(
+                "deadweight loss" to ExamCoverage.POINT_MISSED,
+                "未识别考点 #1" to ExamCoverage.POINT_MISSED,
+            ),
+            report.uncovered.map { it.name to it.reason },
+        )
+        assertTrue(report.uncovered.none { it.reason == ExamCoverage.TEXTBOOK_SILENT })
+        val json = report.toJson()
+        assertEquals("[\"Simple market\"]", json["coveredPoints"].toString())
+        assertFalse(json.toString().contains("asymmetric signaling"))
+        assertFalse(json.toString().contains("consider simple"))
+    }
+
+    @Test
+    fun stripsCoverInstructionsDraftFooterPartHeadersAndKeepsSubNumberingTogether() {
+        val syntheticExam = """
+            <!-- PDF 第 1 页 · 书第 1 页 -->
+            SYNTHETIC UNIVERSITY
+            ECON99999 Practice Midterm Examination
+            Time Allowed: 90 Minutes
+
+            Instructions to Candidates:
+            1. Write your student ID on the cover sheet.
+            2. Answer ALL questions in Part I and Part II.
+            3. Calculators are NOT permitted in this examination.
+
+            <!-- PDF 第 2 页 · 书第 2 页 -->
+            ECON99999 Practice Midterm
+            Part I: Multiple Choice Questions (20 marks)
+            Answer all questions in this part.
+
+            1. Consider a simple market with linear curves.
+            1). What is the equilibrium price?
+            2). What happens when supply shifts?
+            A) Price rises
+            B) Price falls
+            Page 2 of 4
+
+            <!-- PDF 第 3 页 · 书第 3 页 -->
+            ECON99999 Practice Midterm
+            2. Explain Demand Elasticity for a luxury good.
+
+            Part II: Short Answer Questions (30 marks)
+            3. Discuss Consumer Surplus under a price cap.
+            Please Turn Over
+
+            <!-- PDF 第 4 页 · 书第 4 页 -->
+            ECON99999 Practice Midterm
+            THIS PAGE IS INTENTIONALLY LEFT BLANK
+            Space for Rough Work
+            End of Examination
+            Page 4 of 4
+        """.trimIndent()
+
+        val questions = HeldOutDecomposer.questionsFromDocument(syntheticExam)
+        assertEquals(3, questions.size)
+        assertTrue(questions[0].contains("2). What happens when supply shifts?"))
+        assertFalse(questions.any { "Instructions" in it || "student ID" in it || "Part I" in it || "Part II" in it })
+        assertFalse(questions.any { "Practice Midterm" in it || "Page 2 of 4" in it || "Rough Work" in it || "INTENTIONALLY LEFT BLANK" in it })
+
+        val synthTextbook = """
+            Simple market: A competitive setting with buyers and sellers.
+            Demand elasticity: Sensitivity of quantity demanded to price.
+            Consumer surplus: Net gain to buyers from trade.
+        """.trimIndent()
+        val report = ExamCoverage.evaluate(
+            questions = questions,
+            identified = listOf("Simple market", "Demand elasticity", "Consumer surplus"),
+            bank = listOf(
+                CoverageBankPoint("Simple market", choices = 2, essay = false),
+                CoverageBankPoint("Demand elasticity", choices = 2, essay = false),
+                CoverageBankPoint("Consumer surplus", choices = 0, essay = true),
+            ),
+            textbook = synthTextbook,
+        )
+        assertEquals(3, report.heldOutPoints)
+        assertEquals(3, report.covered)
+        assertEquals(listOf("Simple market", "Demand elasticity", "Consumer surplus"), report.coveredPoints)
+        assertEquals(emptyList(), report.uncovered)
+    }
+
+    @Test
+    fun partBoundaryAllowsQuestionNumberRestartWithoutCreatingPartPoint() {
+        val exam = """
+            Part I: Core Concepts
+            1. Explain Demand Elasticity.
+            2. Explain Consumer Surplus.
+
+            Part II: Applied Analysis
+            1. Discuss Price Ceiling effects.
+        """.trimIndent()
+        val questions = HeldOutDecomposer.questionsFromDocument(exam)
+        assertEquals(3, questions.size)
+        val decomposed = HeldOutDecomposer.decomposeQuestions(
+            questions,
+            identified = listOf("Demand elasticity", "Consumer surplus", "Price ceiling"),
+            textbook = "",
+        )
+        assertEquals(listOf("Demand elasticity", "Consumer surplus", "Price ceiling"), decomposed.map { it.name })
+    }
 }

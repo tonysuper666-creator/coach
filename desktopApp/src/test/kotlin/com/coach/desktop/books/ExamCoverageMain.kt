@@ -38,6 +38,7 @@ fun main(args: Array<String>) {
     Files.createDirectories(outPath.parent)
     Files.writeString(outPath, report.toJson().toString(), StandardCharsets.UTF_8)
     println("heldOutPoints=${report.heldOutPoints} covered=${report.covered} coverage=${"%.4f".format(report.rate)}")
+    report.coveredPoints.forEach { println("已覆盖\t$it") }
     report.uncovered.forEach { println("${it.reason}\t${it.name}") }
 }
 

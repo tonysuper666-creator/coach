@@ -63,5 +63,21 @@ class PairingClient(
         }
         return response.status != HttpStatusCode.Unauthorized
     }
+    suspend fun account(credentials: PairedCredentials): kotlinx.serialization.json.JsonObject {
+        val response = client.get("${baseUrl.trimEnd('/')}/v1/session") { authenticate(credentials) }
+        check(response.status == HttpStatusCode.OK)
+        return LedgerJson.parseToJsonElement(response.bodyAsText()).jsonObject
+    }
+
+    suspend fun logout(credentials: PairedCredentials) {
+        val response = client.delete("${baseUrl.trimEnd('/')}/v1/session") { authenticate(credentials) }
+        check(response.status == HttpStatusCode.NoContent || response.status == HttpStatusCode.Unauthorized)
+    }
+
+    private fun HttpRequestBuilder.authenticate(credentials: PairedCredentials) {
+        header("X-Coach-Device", credentials.deviceId)
+        bearerAuth(credentials.token)
+    }
+
     fun close() = client.close()
 }

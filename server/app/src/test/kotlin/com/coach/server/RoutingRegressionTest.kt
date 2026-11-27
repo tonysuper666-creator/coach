@@ -222,7 +222,7 @@ class RoutingRegressionTest {
                     })
                     put("x_coach", buildJsonObject {
                         put("status", "failed")
-                        put("reason", "credit_limit_95_percent")
+                        put("reason", "free_grant_exhausted")
                         put("served_by", model)
                         put("physical_calls", 1)
                     })
@@ -258,7 +258,7 @@ class RoutingRegressionTest {
                     })
                     put("x_coach", buildJsonObject {
                         put("status", "failed")
-                        put("reason", "credit_limit_95_percent")
+                        put("reason", "free_grant_exhausted")
                         put("served_by", model)
                         put("physical_calls", 0)
                     })
@@ -428,7 +428,7 @@ class RoutingRegressionTest {
                     })
                     put("x_coach", buildJsonObject {
                         put("status", "failed")
-                        put("reason", "credit_limit_95_percent")
+                        put("reason", "free_grant_exhausted")
                         put("served_by", model)
                         put("physical_calls", 0)
                     })

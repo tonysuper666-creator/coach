@@ -191,8 +191,11 @@ internal object HeldOutDecomposer {
     private val instructionsHeader = Regex(
         """(?i)^\s*(?:(?:exam(?:ination)?|general|candidate)\s+)?(?:instructions|directions|rules|notes\s+to\s+candidates|read\s+(?:the\s+following\s+)?instructions)(?:\s+to\s+(?:candidates|students))?\s*[:：]?\s*$|^\s*(?:考场须知|考生须知|答题须知|注意事项)\s*[:：]?\s*$""",
     )
+    private val coverStartLine = Regex(
+        """(?i)^\s*(?:(?:the\s+)?(?:university|college|school|faculty|department|institute)\s+of\s+[a-z][a-z\s&,'-]{1,60}|[a-z][a-z\s&,'-]{2,40}\s+university|[A-Z]{2,6}\s*\d{3,5}|[A-Z]{2,6}\s*\d{3,5}\b.*(?:exam(?:ination)?|midterm|final|practice|mock|sample|test|paper|quiz)[^?]{0,80}|(?:practice|sample|mock|past|resit|supplementary)\s+(?:midterm\s+|final\s+)?(?:exam(?:ination)?|paper|test)[^?]{0,80}|(?:[a-z]+\s+){0,3}(?:midterm|final)\s+examination[^?]{0,80}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+20\d{2}(?:\s+(?:exam(?:ination)?|diet|paper))?|(?:time\s+allowed|duration|total\s+marks|candidate\s+(?:number|id)|student\s+(?:id|number|name)|seat\s+number|examination\s+number|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|diet|course\s+code|module\s+code)\s*[:：].*|this\s+(?:exam(?:ination)?|question)\s+paper\s+consists\s+of\b.*|={3,}.*|-{3,}\s*(?:paper|exam|midterm|final).*|#\s+.*(?:exam(?:ination)?|midterm|final|paper|practice).*)\s*$""",
+    )
     private val instructionLine = Regex(
-        """(?i)\b(?:student\s+(?:id|number|name)|candidate\s+number|seat\s+number|examination\s+number|write\s+your\s+(?:name|id|answers?)|do\s+not\s+(?:open|turn|write|remove)|calculators?\s+(?:are|is)\s+(?:not\s+)?(?:permitted|allowed)|(?:is|are)\s+(?:not\s+)?permitted\s+in\s+this\s+exam|time\s+allowed|this\s+(?:exam(?:ination)?|paper)\s+consists\s+of|answer\s+(?:all|any\s+\d+)\s+questions?|marks?\s+will\s+be\s+awarded|read\s+(?:all\s+)?instructions\s+carefully|use\s+(?:black|blue)\s+(?:pen|ink)|invigilator)\b|考生须知|考场须知|答题须知|不得携带|禁止使用计算器|请勿翻开|考试时间|共\s*\d+\s*页|满分\s*\d+\s*分|填写姓名|填写学号""",
+        """(?i)\b(?:student\s+(?:id|number|name)|candidate\s+number|seat\s+number|examination\s+number|write\s+your\s+(?:name|id|answers?)|do\s+not\s+(?:open|turn|write|remove)|calculators?\s+(?:are|is)\s+(?:not\s+)?(?:permitted|allowed)|(?:is|are)\s+(?:not\s+)?permitted\s+in\s+this\s+exam|time\s+allowed|this\s+(?:exam(?:ination)?|paper)\s+consists\s+of|answer\s+(?:all|any\s+\d+)\s+questions?|attempt\s+(?:all|any\s+\d+)\s+questions?|marks?\s+will\s+be\s+awarded|credit\s+will\s+be\s+given|show\s+(?:all\s+)?(?:your\s+)?working|read\s+(?:all\s+)?instructions\s+carefully|use\s+(?:black|blue)\s+(?:pen|ink|ballpoint)|(?:closed|open)\s+book|no\s+books|legibly|invigilator)\b|考生须知|考场须知|答题须知|不得携带|禁止使用计算器|请勿翻开|考试时间|共\s*\d+\s*页|满分\s*\d+\s*分|填写姓名|填写学号""",
     )
     private val draftOrBlankLine = Regex(
         """(?i)^\s*\[?\s*(?:this\s+page\s+(?:is\s+)?(?:intentionally\s+)?left\s+blank(?:\s+for\s+rough\s+work)?|intentionally\s+left\s+blank|blank\s+page|rough\s+work|draft\s+page|scrap\s+paper|space\s+for\s+rough\s+work|use\s+this\s+page\s+for\s+rough\s+work|additional\s+space(?:\s+for\s+answers?)?|草稿纸|草稿页|空白页|此页留白)\s*\]?\.?\s*$""",
@@ -238,6 +241,8 @@ internal object HeldOutDecomposer {
     private enum class QuestionStyle { EXPLICIT_Q, DOT, PAREN }
 
     private data class QuestionMarker(val style: QuestionStyle, val number: Int)
+
+    private data class ExamPage(val lines: List<String>, val resetToFirstPage: Boolean = false)
 
     private data class TermMatcher(
         val title: String,
@@ -286,7 +291,7 @@ internal object HeldOutDecomposer {
     private fun extractRawExamQuestions(text: String): List<String> {
         val pages = splitExamPages(text)
         val repeatedLines = findRepeatedPageLines(pages)
-        val filteredPages = pages.filterNot { isBlankOrDraftPage(it) }
+        val filteredPages = pages.filterNot { isBlankOrDraftPage(it.lines) }
 
         val questions = mutableListOf<StringBuilder>()
         var startedQuestions = false
@@ -297,13 +302,25 @@ internal object HeldOutDecomposer {
         var lastInstructionNum = 0
         var currentSectionStyle: QuestionStyle? = null
         var lastQuestionNum = 0
+        var prevLineBlank = true
 
         for (page in filteredPages) {
             if (pages.size >= 2) inTrailingNoise = false
-            for (rawLine in page) {
+            if (page.resetToFirstPage) {
+                startedQuestions = false
+                inInstructions = false
+                inTrailingNoise = false
+                skipSubtitleLines = 0
+                lastInstructionNum = 0
+                currentSectionStyle = null
+                lastQuestionNum = 0
+                prevLineBlank = true
+            }
+            for (rawLine in page.lines) {
                 val trimmed = rawLine.trim()
                 if (trimmed.isEmpty()) {
                     skipSubtitleLines = 0
+                    prevLineBlank = true
                     continue
                 }
                 if (PRINTED_PAGE_MARK.matches(trimmed) || trimmed in repeatedLines || footerLine.matches(trimmed)) {
@@ -322,25 +339,53 @@ internal object HeldOutDecomposer {
                     skipSubtitleLines = 2
                     currentSectionStyle = null
                     lastQuestionNum = 0
+                    prevLineBlank = true
                     continue
                 }
                 if (instructionsHeader.matches(trimmed)) {
                     sawStructuralMarker = true
+                    startedQuestions = false
                     inInstructions = true
                     inTrailingNoise = false
                     lastInstructionNum = 0
+                    currentSectionStyle = null
+                    lastQuestionNum = 0
+                    prevLineBlank = true
                     continue
                 }
-                if (inTrailingNoise) continue
+                if (coverStartLine.matches(trimmed)) {
+                    sawStructuralMarker = true
+                    startedQuestions = false
+                    inInstructions = false
+                    inTrailingNoise = false
+                    skipSubtitleLines = 0
+                    lastInstructionNum = 0
+                    currentSectionStyle = null
+                    lastQuestionNum = 0
+                    prevLineBlank = true
+                    continue
+                }
 
                 val marker = parseQuestionMarker(trimmed)
+                if (inTrailingNoise) {
+                    if (marker != null && marker.number == 1 && !instructionLine.containsMatchIn(trimmed)) {
+                        inTrailingNoise = false
+                        currentSectionStyle = null
+                        lastQuestionNum = 0
+                    } else {
+                        continue
+                    }
+                }
+
                 if (inInstructions) {
                     val exitToQuestion = marker != null && !instructionLine.containsMatchIn(trimmed) && (
                         marker.style == QuestionStyle.EXPLICIT_Q ||
-                            (lastInstructionNum > 0 && marker.number <= lastInstructionNum)
+                            lastInstructionNum == 0 ||
+                            marker.number <= lastInstructionNum
                         )
                     if (!exitToQuestion) {
                         if (marker != null) lastInstructionNum = marker.number
+                        prevLineBlank = false
                         continue
                     }
                     inInstructions = false
@@ -350,21 +395,25 @@ internal object HeldOutDecomposer {
                     sawStructuralMarker = true
                     inInstructions = true
                     lastInstructionNum = marker.number
+                    prevLineBlank = false
                     continue
                 }
 
                 if (skipSubtitleLines > 0) {
                     if (marker == null && (sectionSubtitleLine.matches(trimmed) || ('?' !in trimmed && trimmed.length <= 70))) {
                         skipSubtitleLines -= 1
+                        prevLineBlank = false
                         continue
                     }
                     skipSubtitleLines = 0
                 }
 
-                if (marker != null && isNewQuestionStart(marker, currentSectionStyle, lastQuestionNum)) {
+                if (marker != null && isNewQuestionStart(marker, currentSectionStyle, lastQuestionNum, prevLineBlank)) {
                     startedQuestions = true
                     sawStructuralMarker = true
-                    if (currentSectionStyle == null || marker.style == QuestionStyle.EXPLICIT_Q) {
+                    if (currentSectionStyle == null || marker.style == QuestionStyle.EXPLICIT_Q ||
+                        (marker.number == 1 && lastQuestionNum >= 2)
+                    ) {
                         currentSectionStyle = marker.style
                     }
                     lastQuestionNum = marker.number
@@ -372,6 +421,7 @@ internal object HeldOutDecomposer {
                 } else if (startedQuestions && questions.isNotEmpty()) {
                     questions.last().append('\n').append(rawLine.trimEnd())
                 }
+                prevLineBlank = false
             }
         }
 
@@ -385,31 +435,39 @@ internal object HeldOutDecomposer {
         }
     }
 
-    private fun splitExamPages(text: String): List<List<String>> {
-        val pages = mutableListOf<MutableList<String>>(mutableListOf())
+    private fun splitExamPages(text: String): List<ExamPage> {
+        val pages = mutableListOf(mutableListOf<String>() to false)
         for (rawLine in text.lineSequence()) {
             if ('\u000C' in rawLine) {
                 val parts = rawLine.split('\u000C')
                 for ((idx, part) in parts.withIndex()) {
-                    if (idx > 0) pages += mutableListOf<String>()
-                    if (part.isNotBlank()) pages.last() += part
+                    if (idx > 0) pages += mutableListOf<String>() to false
+                    if (part.isNotBlank()) pages.last().first += part
                 }
                 continue
             }
-            if (PRINTED_PAGE_MARK.matches(rawLine.trim())) {
-                if (pages.last().isNotEmpty()) pages += mutableListOf<String>()
+            val mark = PRINTED_PAGE_MARK.matchEntire(rawLine.trim())
+            if (mark != null) {
+                val pdfPage = Regex("""PDF 第 (\d+) 页""").find(mark.value)?.groupValues?.get(1)?.toIntOrNull()
+                val reset = pdfPage == 1 && pages.any { it.first.any(String::isNotBlank) }
+                if (pages.last().first.isNotEmpty()) {
+                    pages += mutableListOf<String>() to reset
+                } else if (reset) {
+                    pages[pages.lastIndex] = pages.last().first to true
+                }
                 continue
             }
-            pages.last() += rawLine
+            pages.last().first += rawLine
         }
-        return pages.filter { page -> page.any { it.isNotBlank() } }
+        return pages.filter { (lines, _) -> lines.any(String::isNotBlank) }
+            .map { (lines, reset) -> ExamPage(lines, reset) }
     }
 
-    private fun findRepeatedPageLines(pages: List<List<String>>): Set<String> {
+    private fun findRepeatedPageLines(pages: List<ExamPage>): Set<String> {
         if (pages.size < 2) return emptySet()
         val counts = mutableMapOf<String, Int>()
         for (page in pages) {
-            val nonEmpty = page.map { it.trim() }.filter { it.isNotEmpty() }
+            val nonEmpty = page.lines.map { it.trim() }.filter { it.isNotEmpty() }
             val edgeLines = (nonEmpty.take(2) + nonEmpty.takeLast(2))
                 .filter { it.length in 4..100 && parseQuestionMarker(it) == null && !footerLine.matches(it) }
                 .toSet()
@@ -430,12 +488,19 @@ internal object HeldOutDecomposer {
         marker: QuestionMarker,
         currentStyle: QuestionStyle?,
         lastQuestionNum: Int,
+        prevLineBlank: Boolean,
     ): Boolean = when (currentStyle) {
         null -> true
-        QuestionStyle.EXPLICIT_Q -> marker.style == QuestionStyle.EXPLICIT_Q
+        QuestionStyle.EXPLICIT_Q -> marker.style == QuestionStyle.EXPLICIT_Q ||
+            (marker.style == QuestionStyle.DOT && marker.number == 1 && lastQuestionNum >= 2 && prevLineBlank)
         QuestionStyle.DOT -> marker.style == QuestionStyle.EXPLICIT_Q ||
-            (marker.style == QuestionStyle.DOT && marker.number > lastQuestionNum)
-        QuestionStyle.PAREN -> marker.style != QuestionStyle.PAREN || marker.number > lastQuestionNum
+            (marker.style == QuestionStyle.DOT && (
+                marker.number > lastQuestionNum ||
+                    (marker.number == 1 && (lastQuestionNum >= 2 || prevLineBlank))
+                ))
+        QuestionStyle.PAREN -> marker.style != QuestionStyle.PAREN ||
+            marker.number > lastQuestionNum ||
+            (marker.number == 1 && (lastQuestionNum >= 2 || prevLineBlank))
     }
 
     private fun parseQuestionMarker(trimmed: String): QuestionMarker? {

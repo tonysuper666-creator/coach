@@ -96,6 +96,38 @@ data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wor
 /** [weeks] 是课程大纲里已有知识点的周，自己贴题时从这里选；[unmatched] 是因为那一周还没有知识点而暂时练不了的题数。 */
 data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, val unmatched: Int)
 
+/** TON-740: the server's only spend refusal — Coach's share of this month's free API grant is used up. */
+const val FREE_GRANT_EXHAUSTED_CODE = "free_grant_exhausted"
+const val FREE_GRANT_EXHAUSTED_TEXT = "这个月的免费额度用完了"
+
+/** TON-740: the server is briefly full (503 `unavailable` with `retryAfterSec`); the client says so and retries by itself. */
+const val SERVICE_BUSY_CODE = "service_busy"
+const val SERVICE_BUSY_TEXT = "人多，几秒后自动重试"
+
+private fun busyReply(retryAfterMs: Long) =
+    MockReply(null, SERVICE_BUSY_TEXT, retryable = true, statusCode = 503, code = SERVICE_BUSY_CODE, retryAfterMs = retryAfterMs)
+
+/**
+ * Re-sends a request the server marked busy, waiting the time it asked for. [onBusy] gets the sentence to show
+ * while waiting; after [attempts] retries the last reply is returned as is.
+ */
+suspend fun withBusyRetry(
+    attempts: Int = 3,
+    stillCurrent: suspend () -> Boolean = { true },
+    onBusy: (String) -> Unit = {},
+    request: suspend () -> MockReply,
+): MockReply {
+    var reply = request()
+    repeat(attempts) {
+        if (reply.code != SERVICE_BUSY_CODE || !stillCurrent()) return reply
+        onBusy(SERVICE_BUSY_TEXT)
+        kotlinx.coroutines.delay((reply.retryAfterMs ?: 5_000L).coerceIn(1_000L, 30_000L))
+        if (!stillCurrent()) return reply
+        reply = request()
+    }
+    return reply
+}
+
 /**
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
@@ -196,6 +228,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 when {
                     parsed == null && status != 403 && text.trimStart().startsWith("<") ->
                         MockReply(null, "需要联网才能使用，读书和做题照常。", retryable = true, code = "offline")
+                    // TON-740: the only spend refusal left is the exhausted free grant; say so plainly.
+                    code == FREE_GRANT_EXHAUSTED_CODE ->
+                        MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = status, code = code)
                     // Older friend services return a quota sentence. Use the same service guidance on both clients.
                     status == 429 || code == "daily_quota" || code == "monthly_quota" ->
                         MockReply(null, "讲解服务暂时不可用，请稍后再试。", retryable = true, statusCode = status,
@@ -554,6 +589,8 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             when {
                 parsed == null && status != 403 -> MockReply(null, "连不上学习服务，可继续阅读或稍后重试。")
                 response.status.isSuccess() -> MockReply(parsed, null, statusCode = status)
+                code == FREE_GRANT_EXHAUSTED_CODE ->
+                    MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = status, code = code)
                 status == 429 || code == "daily_quota" || code == "monthly_quota" ->
                     MockReply(null, "伴读服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
                 else -> MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "章节伴读暂时不可用，请稍后重试。", statusCode = status, code = code)
@@ -620,7 +657,12 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 val errText = response.bodyAsText()
                 val parsed = runCatching { Json.parseToJsonElement(errText).jsonObject }.getOrNull()
                 val code = parsed?.s("code")?.ifBlank { null }
-                if (status == 429 || code == "daily_quota" || code == "monthly_quota") {
+                val busyMs = if (status == 503 && code == "unavailable") response.readerRetryDelay(parsed) else null
+                if (code == FREE_GRANT_EXHAUSTED_CODE) {
+                    MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = status, code = code)
+                } else if (busyMs != null) {
+                    busyReply(busyMs)
+                } else if (status == 429 || code == "daily_quota" || code == "monthly_quota") {
                     MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status, code = "unavailable")
                 } else {
                     MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "学法伴读请求失败，请稍后重试。", statusCode = status, code = code)
@@ -634,6 +676,8 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 var currentEvent = ""
                 var finalPack: JsonObject? = null
                 var streamError: String? = null
+                var streamCode: String? = null
+                var streamRetryMs: Long? = null
                 while (!ch.isClosedForRead) {
                     val line = ch.readUTF8Line() ?: break
                     val trimmed = line.trimEnd()
@@ -655,7 +699,12 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                                     onProgress(chars, null, delta)
                                 }
                                 "pack" -> finalPack = obj
-                                "error" -> streamError = obj.s("error").ifBlank { "生成失败" }
+                                "error" -> {
+                                    streamError = obj.s("error").ifBlank { "生成失败" }
+                                    streamCode = obj.s("code").ifBlank { null }
+                                    streamRetryMs = (obj["retryAfterSec"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+                                        ?.takeIf { it > 0 }?.times(1000)
+                                }
                             }
                         }
                         trimmed.isEmpty() -> currentEvent = ""
@@ -663,6 +712,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 }
                 when {
                     finalPack != null -> MockReply(finalPack, null, statusCode = status)
+                    // TON-740: a stream that started and then hit the exhausted free grant says so plainly.
+                    streamCode == FREE_GRANT_EXHAUSTED_CODE ->
+                        MockReply(null, FREE_GRANT_EXHAUSTED_TEXT, retryable = false, statusCode = 429, code = FREE_GRANT_EXHAUSTED_CODE)
+                    // A stream that was refused before any text because the service is briefly full.
+                    streamCode == "unavailable" && streamRetryMs != null -> busyReply(streamRetryMs!!)
                     streamError != null -> MockReply(null, streamError, statusCode = status)
                     else -> MockReply(null, "未收到完整学法内容，请重试。", statusCode = status)
                 }
@@ -683,6 +737,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             input,
             timeoutMs = 300_000L,
             timeoutMsg = "全书地图生成等待超时，请重试。",
+            busyRetry = true,
         )
 
     private suspend fun postCourseEndpoint(
@@ -690,6 +745,8 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         input: JsonObject,
         timeoutMs: Long,
         timeoutMsg: String,
+        /** Callers that retry through [withBusyRetry] get the busy reply instead of a plain error. */
+        busyRetry: Boolean = false,
     ): MockReply = try {
         val response = http.post("$base/$path") {
             timeout { requestTimeoutMillis = timeoutMs; socketTimeoutMillis = timeoutMs }
@@ -703,6 +760,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             val status = response.status.value
             val code = parsed?.s("code")?.ifBlank { null }
             when {
+                code == FREE_GRANT_EXHAUSTED_CODE || (status == 429 && parsed?.s("error")?.startsWith(FREE_GRANT_EXHAUSTED_TEXT) == true) ->
+                    MockReply(null, parsed?.s("error")?.takeIf { it.startsWith(FREE_GRANT_EXHAUSTED_TEXT) } ?: FREE_GRANT_EXHAUSTED_TEXT,
+                        retryable = false, statusCode = status, code = FREE_GRANT_EXHAUSTED_CODE)
+                busyRetry && status == 503 && code == "unavailable" && response.readerRetryDelay(parsed) != null ->
+                    busyReply(response.readerRetryDelay(parsed)!!)
                 path == "v1/library/collection/ask" && (status == 429 || status in 500..599) ->
                     MockReply(null, "课程服务暂时繁忙，请稍后再试。", retryable = true, statusCode = status,
                         code = "unavailable", retryAfterMs = response.readerRetryDelay(parsed))

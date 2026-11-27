@@ -304,13 +304,6 @@ fun Application.libraryExplainRoutes(
                     if (!allowedPersonal) {
                         throw MockError(HttpStatusCode.Conflict, "这本书的来源或可见范围尚未核实，暂时无法生成伴读。")
                     }
-                } else {
-                    val quota = withContext(Dispatchers.IO) { friends!!.status(friend, device) }
-                    val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                    val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                    if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                        throw FriendServiceError("daily_quota")
-                    }
                 }
                 val resolvedImports = importStore
                     ?: throw MockError(HttpStatusCode.ServiceUnavailable, "服务还未接通新书伴读，请更新服务后重试。")

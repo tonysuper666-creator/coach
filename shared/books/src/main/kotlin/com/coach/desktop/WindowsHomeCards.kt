@@ -607,6 +607,10 @@ private fun SettingsSwitch(label: String, checked: Boolean, tag: String, onChang
 /**
  * V7 单页四分区设置（UX-14）：账号与连接 / 阅读与外观 / 学习默认项 / 数据与关于。
  */
+internal val LocalOpenAccountSettings = staticCompositionLocalOf<(() -> Unit)?> { null }
+internal val LocalAccountSettings = androidx.compose.runtime.staticCompositionLocalOf<(@Composable () -> Unit)?> { null }
+internal val LocalDataSettings = androidx.compose.runtime.staticCompositionLocalOf<(@Composable () -> Unit)?> { null }
+
 @Composable
 internal fun HostSettings(
     directory: Path,
@@ -631,13 +635,16 @@ internal fun HostSettings(
 
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("设置") },
+        title = { Text(if (LocalAccountSettings.current == null) "设置" else "账号与设置") },
         text = {
             Column(
                 Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()).testTag("settings-page"),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 SettingsSection("账号与连接", "settings-section-account")
+                CompositionLocalProvider(LocalContentColor provides colors.fgPrimary) {
+                    LocalAccountSettings.current?.invoke()
+                }
                 Text(
                     "教材和进度保存在本地设备。提问与讲解时仅发送当前所选片段或本节正文至学习服务。",
                     style = MaterialTheme.typography.bodyMedium,
@@ -675,6 +682,9 @@ internal fun HostSettings(
                     }
                 }
                 SettingsSection("数据与关于", "settings-section-data")
+                CompositionLocalProvider(LocalContentColor provides colors.fgPrimary) {
+                    LocalDataSettings.current?.invoke()
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                     SelectionContainer {

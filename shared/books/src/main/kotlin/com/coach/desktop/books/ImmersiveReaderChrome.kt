@@ -306,6 +306,12 @@ internal fun ImmersiveTopHud(
                         },
                         containerColor = colors.surface1,
                     ) {
+                        com.coach.desktop.LocalOpenAccountSettings.current?.let { openSettings ->
+                            DropdownMenuItem(
+                                text = { Text("账号与设置") },
+                                onClick = { moreMenuOpen = false; openSettings() },
+                            )
+                        }
                         if (hasOriginal) {
                             Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
                                 ViewModeSwitchPill(textView = textView, compact = veryCompact, onSelect = {

@@ -48,6 +48,7 @@ private fun Notice(text: String) = Text(text, style = MaterialTheme.typography.b
 
 private fun reasonText(reason: String?) = when (reason) {
     "rate_limited" -> "这会儿有点忙，正在换个方式接着答"
+    "free_grant_exhausted" -> "这个月的免费额度用完了"
     "exam_protection" -> "考前保护时段，这段时间先不答"
     "first_token_timeout" -> "25 秒没有出字"
     "stall" -> "30 秒没有新内容"

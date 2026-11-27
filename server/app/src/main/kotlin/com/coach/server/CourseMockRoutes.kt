@@ -48,12 +48,6 @@ fun Application.courseMockRoutes(
                         if (!allowed) {
                             throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法生成课程模考卷。")
                         }
-                        val quota = withContext(Dispatchers.IO) { friends.status(friend, device) }
-                        val callsRem = quota["callsRemaining"]?.jsonPrimitive?.longOrNull
-                        val tokensRem = quota["tokensRemaining"]?.jsonPrimitive?.longOrNull
-                        if ((callsRem != null && callsRem <= 0L) || (tokensRem != null && tokensRem <= 0L)) {
-                            throw FriendServiceError("daily_quota")
-                        }
                     }
 
                     val maxBytes = 2 * 1024 * 1024

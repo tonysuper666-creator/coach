@@ -449,7 +449,7 @@ internal fun LibraryHome(
                     }
 
                     // 2. 条件今日复习卡：有到期项写「今天 N 道，约 M 分钟」，点击卡片或按钮进清单；无到期项如实提示，不推送。
-                    val dueCount = if (ui.todayQueue.cards.isNotEmpty()) ui.todayQueue.cards.size else ui.reviews.size
+                    val dueCount = ui.todayQueue.lineup.size.takeIf { it > 0 } ?: ui.reviews.size
                     if (dueCount > 0) {
                         PaperCard(
                             Modifier.fillMaxWidth().testTag("home-review-card"),

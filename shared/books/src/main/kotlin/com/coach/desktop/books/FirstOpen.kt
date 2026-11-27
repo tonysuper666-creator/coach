@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -81,36 +82,43 @@ internal object FirstOpenPlanner {
     fun openingGroup(book: Textbook): ChapterSectionGroup? {
         if (book.lessons.isEmpty()) return null
         val bodyPage = runCatching { book.bodyStart.importPage }.getOrDefault(1)
-        val index = book.lessons.indexOfFirst { lesson ->
+        val hasProse = { lesson: BookLesson -> lesson.blocks.any { !it.heading && it.text.isNotBlank() } }
+        val inBody = book.lessons.indices.filter { i ->
+            val lesson = book.lessons[i]
             lesson.blocks.isNotEmpty() &&
                 lesson.lastPage >= bodyPage &&
                 !ChapterCompanionGrouping.isExerciseSection(lesson.title) &&
-                lesson.blocks.any { !it.heading && it.text.isNotBlank() }
-        }.let { found ->
-            if (found >= 0) found
-            else book.lessons.indexOfFirst { it.blocks.any { block -> !block.heading && block.text.isNotBlank() } }
+                hasProse(lesson)
         }
-        if (index < 0) return null
-        val chosenLesson = book.lessons[index]
-        val group = ChapterCompanionGrouping.groupForSection(book, index)
-        val first = if (group != null) {
-            ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
-                ?.takeIf { g -> g.sections.any { sec -> sec.blocks.any { !it.heading && it.text.isNotBlank() } } }
+        // Front matter that runs into the body page belongs to no chapter; try the next section instead of
+        // sending the preface as the opening.
+        val candidates = (inBody.sortedBy { book.lessons[it].firstPage < bodyPage } +
+            book.lessons.indices.filter { hasProse(book.lessons[it]) }).distinct()
+        for (index in candidates) {
+            val group = ChapterCompanionGrouping.groupForSection(book, index) ?: continue
+            val chosenLesson = book.lessons[index]
+            val first = ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
+                ?.takeIf { g -> g.sections.any(hasProse) }
                 ?: group.copy(
                     firstPage = chosenLesson.firstPage,
                     lastPage = chosenLesson.lastPage,
                     sections = listOf(chosenLesson),
                 )
-        } else {
-            ChapterSectionGroup(
+            trim(first, OPENING_CHARS)?.let { return it }
+        }
+        // No section sits inside a chapter (a book without an outline): ask about the first prose section alone.
+        for (index in candidates) {
+            val chosenLesson = book.lessons[index]
+            val alone = ChapterSectionGroup(
                 chapterId = chosenLesson.id,
                 chapterTitle = chosenLesson.title,
                 sections = listOf(chosenLesson),
                 firstPage = chosenLesson.firstPage,
                 lastPage = chosenLesson.lastPage,
             )
+            trim(alone, OPENING_CHARS)?.let { return it }
         }
-        return trim(first, OPENING_CHARS)
+        return null
     }
 
     fun questionOf(pack: BookCompanionPack): BookCompanionQuiz? =
@@ -206,11 +214,29 @@ internal fun FirstOpenInvite(
     }
 }
 
-private sealed interface TasteStep {
+internal sealed interface TasteStep {
     data object Loading : TasteStep
     data class Hold(val block: FirstOpenBlock, val message: String) : TasteStep
     data class Ask(val quiz: BookCompanionQuiz) : TasteStep
     data class Told(val quiz: BookCompanionQuiz, val picked: String) : TasteStep
+}
+
+/**
+ * The first question once it is on screen, kept outside the panel so a connectivity flip or the
+ * panel being re-mounted never throws away the question the reader is answering.
+ */
+@Stable
+internal class FirstTasteMemory {
+    private var bookId: String? = null
+    var step by mutableStateOf<TasteStep>(TasteStep.Loading)
+    var picked by mutableStateOf<String?>(null)
+
+    fun bind(id: String) {
+        if (bookId == id) return
+        bookId = id
+        step = TasteStep.Loading
+        picked = null
+    }
 }
 
 @Composable
@@ -221,6 +247,7 @@ internal fun FirstTastePanel(
     onReadBook: () -> Unit,
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
+    memory: FirstTasteMemory = remember { FirstTasteMemory() },
 ) {
     val colors = CoachTheme.colors
     val pollMs = LocalConnectivityPollMs.current
@@ -230,8 +257,7 @@ internal fun FirstTastePanel(
     var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
     var recoveredOnline by remember(book.id) { mutableStateOf(false) }
     var waitingBookReady by remember(book.id) { mutableStateOf(false) }
-    var step by remember(book.id) { mutableStateOf<TasteStep>(TasteStep.Loading) }
-    var picked by remember(book.id) { mutableStateOf<String?>(null) }
+    memory.bind(book.id)
 
     // If Tier 0 PDF import had not yet extracted body paragraphs when FirstTastePanel mounted,
     // automatically proceed as soon as Tier 1 / OCR updates the book in memory.
@@ -246,7 +272,7 @@ internal fun FirstTastePanel(
     // Never touches Ask or Told once the first question has already loaded.
     LaunchedEffect(book.id, connectivity) {
         if (connectivity == CoachConnectivityStatus.ONLINE &&
-            (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+            (memory.step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
         ) {
             recoveredOnline = true
             fetchTrigger += 1
@@ -255,7 +281,7 @@ internal fun FirstTastePanel(
 
     // Background probe while held on a network failure so standalone panels or requests that failed
     // before host connectivity flipped also recover without requiring a manual click.
-    val heldOffline = (step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
+    val heldOffline = (memory.step as? TasteStep.Hold)?.block == FirstOpenBlock.OFFLINE
     LaunchedEffect(book.id, heldOffline, connectivity, pollMs) {
         if (!heldOffline) return@LaunchedEffect
         val probeClient = explainer.unifiedUploadClient()
@@ -291,17 +317,17 @@ internal fun FirstTastePanel(
     LaunchedEffect(book.id, fetchTrigger) {
         val isManual = manualClicks > handledManualClicks
         handledManualClicks = manualClicks
-        if (step is TasteStep.Ask || step is TasteStep.Told) return@LaunchedEffect
+        if (memory.step is TasteStep.Ask || memory.step is TasteStep.Told) return@LaunchedEffect
         if (connectivity == CoachConnectivityStatus.OFFLINE && !isManual && !recoveredOnline) {
-            step = TasteStep.Hold(
+            memory.step = TasteStep.Hold(
                 FirstOpenBlock.OFFLINE,
                 FirstOpenPlanner.statusText(FirstOpenBlock.OFFLINE, null, bookInHand = true),
             )
             return@LaunchedEffect
         }
         recoveredOnline = false
-        step = TasteStep.Loading
-        picked = null
+        memory.step = TasteStep.Loading
+        memory.picked = null
         val snapshotBook = currentBook
         val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(snapshotBook) }.getOrNull() }
         if (group == null) {
@@ -309,7 +335,7 @@ internal fun FirstTastePanel(
                 waitingBookReady = true
                 return@LaunchedEffect
             }
-            step = TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
+            memory.step = TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
             return@LaunchedEffect
         }
         waitingBookReady = false
@@ -321,14 +347,15 @@ internal fun FirstTastePanel(
         when (val result = explainer.fetchChapterCompanion(wire, blocks)) {
             is ChapterCompanionFetchResult.Ready -> {
                 val quiz = FirstOpenPlanner.questionOf(result.pack)
-                step = if (quiz == null) TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
+                memory.picked = null
+                memory.step = if (quiz == null) TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
                 else TasteStep.Ask(quiz)
             }
             is ChapterCompanionFetchResult.Failed -> {
                 val latestConnectivity = CoachConnectivityRegistry.statusFor(explainer.identity?.serverUrl.orEmpty())
                     .takeIf { it != CoachConnectivityStatus.UNKNOWN } ?: connectivity
                 val block = FirstOpenPlanner.blockFor(result.trouble, latestConnectivity)
-                step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
+                memory.step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
             }
         }
     }
@@ -343,7 +370,7 @@ internal fun FirstTastePanel(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text(book.title, style = MaterialTheme.typography.titleLarge, color = colors.fgPrimary, textAlign = TextAlign.Center)
-        when (val current = step) {
+        when (val current = memory.step) {
             TasteStep.Loading -> {
                 Text(FirstOpenCopy.MAKING, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
             }
@@ -362,10 +389,10 @@ internal fun FirstTastePanel(
             }
             is TasteStep.Ask -> {
                 Text(FirstOpenCopy.ANSWER_HINT, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
-                QuestionCard(current.quiz, picked) { picked = it }
+                QuestionCard(current.quiz, memory.picked) { memory.picked = it }
                 PrimaryButton(
-                    onClick = { picked?.let { step = TasteStep.Told(current.quiz, it) } },
-                    enabled = picked != null,
+                    onClick = { memory.picked?.let { memory.step = TasteStep.Told(current.quiz, it) } },
+                    enabled = memory.picked != null,
                     modifier = Modifier.testTag("first-taste-primary"),
                 ) { Text(FirstOpenCopy.SUBMIT) }
             }

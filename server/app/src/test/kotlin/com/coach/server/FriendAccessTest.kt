@@ -78,6 +78,21 @@ class FriendAccessTest {
         fun parse(response: HttpResponse<String>) = LedgerJson.parseToJsonElement(response.body()).jsonObject
     }
 
+    @Test fun logoutRevokesOnlyTheAuthenticatedSession() = Harness().use { h ->
+        h.friends.sable = SableSessions(h.actor, SableVault(h.root.resolve("vault")), {
+            SableIdentity("stable-sub", "demo", "demo@example.org")
+        })
+        fun login() = parse(h.request("/v1/public/sable", "POST", json("token" to "synthetic-token-for-settings")))
+        val first = login()
+        val second = login()
+        val profile = parse(h.request("/v1/session", credential = first))
+        assertEquals("demo", profile.str("nickname"))
+        assertEquals("d***@example.org", profile.str("maskedEmail"))
+        assertEquals(204, h.request("/v1/session", "DELETE", credential = first).statusCode())
+        assertEquals(401, h.request("/v1/public/status", credential = first).statusCode())
+        assertEquals(200, h.request("/v1/public/status", credential = second).statusCode())
+    }
+
     @Test fun sableCredentialUsesFriendQuotaAndChecksRevocationOnStartupAndAfterTenMinutes() = Harness().use { h ->
         var time = 100L
         var active = true
@@ -102,7 +117,7 @@ class FriendAccessTest {
         offline = false
         assertEquals(200, h.request("/v1/public/status", credential = first).statusCode())
         assertEquals("friend", first.str("role"))
-        h.stub.stream(1, StubTutor.terminal("failed", "daily_quota"), StubTutor.DONE)
+        h.stub.stream(1, StubTutor.terminal("failed", "free_grant_exhausted"), StubTutor.DONE)
         assertEquals(429, h.lesson(first, "ab13").statusCode())
         active = false
         time += 10 * 60_000
@@ -203,12 +218,16 @@ class FriendAccessTest {
         val b = h.pair("乙")
         assertEquals(403, h.request("/v1/library/explain", "POST", b, json("requestId" to "ab12", "kind" to "explain", "selection" to "x",
             "blocks" to JsonArray(listOf(json("id" to "owner:p1:0", "text" to "x")))).toString()).statusCode())
-        for ((code, status) in listOf("daily_quota" to 429, "monthly_quota" to 429, "unavailable" to 503)) {
-            h.stub.stream(1, StubTutor.terminal("failed", code), StubTutor.DONE)
+        // TON-740: only the exhausted free grant refuses (429, its own sentence); retired quota codes read as unavailable.
+        for ((reason, code, status) in listOf(Triple("free_grant_exhausted", "free_grant_exhausted", 429),
+                Triple("credit_limit_95_percent", "free_grant_exhausted", 429), Triple("daily_quota", "unavailable", 503),
+                Triple("monthly_quota", "unavailable", 503), Triple("unavailable", "unavailable", 503))) {
+            h.stub.stream(1, StubTutor.terminal("failed", reason), StubTutor.DONE)
             val response = h.explain(b)
             assertEquals(status, response.statusCode())
             assertEquals(FriendServiceError(code).body, parse(response))
         }
+        assertEquals("这个月的免费额度用完了", FriendServiceError("free_grant_exhausted").body.str("error"))
     }
 
     @Test fun entireLessonUsesOneFriendCallAndOnlyStoresConsentedBlocks() = Harness().use { h ->
@@ -232,10 +251,10 @@ class FriendAccessTest {
         assertEquals(2L, audit.num("citedAnchors"))
         assertEquals(JsonNull, audit["formatReason"])
         assertFalse(audit.toString().contains("Self-authored"))
-        h.stub.stream(1, StubTutor.terminal("failed", "daily_quota"), StubTutor.DONE)
+        h.stub.stream(1, StubTutor.terminal("failed", "free_grant_exhausted"), StubTutor.DONE)
         val limited = h.lesson(friend, "ab13")
         assertEquals(429, limited.statusCode())
-        assertEquals(FriendServiceError("daily_quota").body, parse(limited))
+        assertEquals(FriendServiceError("free_grant_exhausted").body, parse(limited))
         assertEquals(2, h.stub.requests, "No retry after the second manual request hits quota")
     }
 

@@ -103,6 +103,7 @@ internal fun WindowsTextbookHost(
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
+    val openAccountSettings: (() -> Unit)? = if (LocalAccountSettings.current == null) null else ({ settings = true })
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var creatingKind by remember { mutableStateOf<CollectionKind?>(null) }
     var activeCollection by remember { mutableStateOf<CollectionSummary?>(null) }
@@ -179,6 +180,8 @@ internal fun WindowsTextbookHost(
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     var sawEmptyShelf by remember { mutableStateOf(false) }
     var tasteActive by remember { mutableStateOf(false) }
+    // Outlives the panel, so the question on screen survives the panel leaving and re-entering composition.
+    val tasteMemory = remember(controller.library.directory) { com.coach.desktop.books.FirstTasteMemory() }
     var tasteDone by remember(controller.library.directory) {
         mutableStateOf(com.coach.desktop.books.FirstOpenStore.isDone(controller.library.directory))
     }
@@ -288,7 +291,12 @@ internal fun WindowsTextbookHost(
                                     (book.format == "pdf" || book.format in BookFormats.images) &&
                                         !(controller.library.preferredTextView(book.id) ?: defaultTextView)
                                 },
-                                extra = extra,
+                                extra = { close ->
+                                    if (openAccountSettings != null) {
+                                        V7TextButton({ close(); openAccountSettings() }, ringInside = true) { Text("账号与设置") }
+                                    }
+                                    extra(close)
+                                },
                             )
                         }
                         panel
@@ -325,6 +333,7 @@ internal fun WindowsTextbookHost(
                     }
 
                     CompositionLocalProvider(
+                        LocalOpenAccountSettings provides openAccountSettings,
                         LocalDeskSelect provides deskSelect,
                         LocalDeskTypeControl provides typeControl,
                         LocalReadingFont provides preferences.font,
@@ -402,6 +411,7 @@ internal fun WindowsTextbookHost(
                         onReadBook = ::finishFirstTaste,
                         onDone = ::finishFirstTaste,
                         modifier = Modifier.fillMaxSize(),
+                        memory = tasteMemory,
                     )
                 }
             }

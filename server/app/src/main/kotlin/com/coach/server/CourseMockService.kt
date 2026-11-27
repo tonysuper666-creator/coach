@@ -129,10 +129,9 @@ class SonnetBridgeMockPlannerTransport(
         val elapsedMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
         when (result) {
             is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
                 if (friend != null) {
-                    val reason = result.terminal?.reason
-                    val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
-                    throw FriendServiceError(quotaCode ?: "unavailable")
+                    throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 }
                 throw IllegalStateException("course_mock_plan_failed:${result.reason}")
             }

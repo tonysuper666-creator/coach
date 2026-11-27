@@ -10,6 +10,7 @@ import com.coach.android.BuildConfig
 import com.coach.android.CoachCredentialStore
 import com.coach.android.KeystoreCredentials
 import com.coach.client.CourseHttp
+import com.coach.client.withBusyRetry
 import com.coach.client.MockReply
 import com.coach.client.DeviceAuthorizationException
 import com.coach.client.HttpLedgerTransport
@@ -490,11 +491,23 @@ internal class BookExplainer(private val library: TextbookLibrary? = null) {
         bookId: String,
         mode: String,
         input: JsonObject,
+        /** Shown while the server is briefly full and the request waits to retry by itself (TON-740). */
+        onBusy: (String) -> Unit = {},
         onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit = { _, _, _ -> },
-    ): CourseServerCallResult = callCourseEndpoint { http -> http.streamStudyModePack(bookId, mode, input, onProgress) }
+    ): CourseServerCallResult {
+        var streamedAny = false
+        return callCourseEndpoint { http ->
+            withBusyRetry(stillCurrent = { !streamedAny }, onBusy = onBusy) {
+                http.streamStudyModePack(bookId, mode, input) { chars, firstTokenMs, delta ->
+                    if (chars > 0 || delta.isNotEmpty()) streamedAny = true
+                    onProgress(chars, firstTokenMs, delta)
+                }
+            }
+        }
+    }
 
-    suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
-        callCourseEndpoint { http -> http.fetchBookMapBatch(bookId, input) }
+    suspend fun fetchBookMapBatch(bookId: String, input: JsonObject, onBusy: (String) -> Unit = {}): CourseServerCallResult =
+        callCourseEndpoint { http -> withBusyRetry(onBusy = onBusy) { http.fetchBookMapBatch(bookId, input) } }
 
     private suspend fun callCourseEndpoint(
         block: suspend (CourseHttp) -> MockReply,

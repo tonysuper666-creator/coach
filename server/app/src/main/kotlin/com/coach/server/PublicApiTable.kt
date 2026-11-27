@@ -63,6 +63,8 @@ internal object PublicApiTable {
         open(post, "/v1/public/sable", "Sable token exchange; creates only this account's device credential"),
         open(post, "/v1/pair", "pairing code exchange; public pairing never issues owner credentials"),
         open(get, "/v1/public/status", "this account's own quota from friends.json and the friend ledger"),
+        open(get, "/v1/session", "display information for the authenticated device's session"),
+        open(delete, "/v1/session", "revokes only the authenticated non-admin device"),
         open(post, "/v1/incidents", "redacted crash report; no owner data is read"),
         open(delete, "/v1/account", "deletes only this account's data (FriendAccess.deleteAccountData)"),
         // Reading and companion.

@@ -230,7 +230,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         for capped in (False, True):
             self.router.path(self.key()).unlink(missing_ok=True)
             if capped:
-                self.ledger.reserve("anthropic", KEY, micros(190))
+                self.ledger.reserve("anthropic", KEY, micros(200))
             router = self.make_router(keys=None if capped else {})
             def req():
                 return bridge.build_req({"model": "claude-opus-5-5", "max_tokens": 100,
@@ -305,11 +305,11 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["model"], json.loads(self.calls[0].content)["requests"][0]["params"]["model"])
 
         friend = bridge.build_req(body, dict(headers, **{"x-coach-friend": "a" * 64, "x-coach-friend-device": "pc"}))
-        denied = AsyncMock(side_effect=Denied("credit_limit_95_percent"))
+        denied = AsyncMock(side_effect=Denied("free_grant_exhausted"))
         with patch.object(bridge.API_BATCH, "run", denied), patch.object(bridge, "write_log"), \
                 patch.object(bridge, "dispatch_cli", side_effect=AssertionError("guide fell through to CLI")):
             result = await bridge.dispatch_batch(friend, friend.model, None)
-        self.assertEqual(("failed", "credit_limit_95_percent"), (result.status, result.reason))
+        self.assertEqual(("failed", "free_grant_exhausted"), (result.status, result.reason))
         self.assertEqual("a" * 64, denied.await_args.kwargs["friend"])
         self.assertEqual("pc", denied.await_args.kwargs["device"])
 

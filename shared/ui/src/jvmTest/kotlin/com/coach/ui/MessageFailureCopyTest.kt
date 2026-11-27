@@ -21,6 +21,7 @@ class MessageFailureCopyTest {
             "max_output_tokens" to "这次回答达到长度上限",
             "unknown_internal_reason" to "暂时没法确认原因",
             "rate_limited" to "这会儿有点忙，正在换个方式接着答",
+            "free_grant_exhausted" to "这个月的免费额度用完了",
             "exam_protection" to "考前保护时段，这段时间先不答"
         )
         for ((code, explanation) in reasons) {

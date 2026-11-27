@@ -58,8 +58,20 @@ no tools, no explicit prompt-cache writes and no regional/Fast mode.
 Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
 `api-spend-YYYY-MM.json` report `spent_microusd`, `reserved_microusd`, and accounted
 `calls` per provider. One dollar is 1,000,000 microdollars. Coach reserves at most
-95% of each configured monthly API grant, including all unresolved reservations.
-The nominal Anthropic $200 and OpenAI $500 grants allow $190 and $475 respectively.
+the whole configured monthly API grant, including all unresolved reservations
+(TON-740: usage inside the free grant is recorded, never throttled). The nominal
+Anthropic $200 and OpenAI $500 grants allow $200 and $500 respectively; Coach's own
+share is the grant minus `other_writers_microusd`. A request is refused as
+`free_grant_exhausted` only when settled spend plus its own upper-bound price passes
+that share. When other calls' temporary holds fill the rest, the request queues
+(`BRIDGE_RESERVATION_WAIT_SEC`, default 30 s) and then answers `reservations_busy`
+(a retryable 503 for friends), never "used up".
+
+Prices in `model_routes.json` are the providers' standard list prices, checked on
+2026-11-27 (sources in `price_notes`); GPT-6.2 input is priced at its cache-write
+rate because automatic cache writes cannot be told apart in the usage receipt.
+`tools/bridge/tests/test_price_floor.py` fails if a routed model has no price or a
+price below its list floor.
 The spend monitor reports a reservation that would cross this boundary to the
 main session for Li Zheng's decision before incurring paid usage. The limit
 applies across API keys.
@@ -121,7 +133,9 @@ spend to date. `prior_settled_microusd` includes only verified settled charges
 from **before** this grant began. Use zero when a historical charge cannot be
 excluded. Never subtract unresolved reservations. A current-window settlement
 of an older reservation counts against the same local share. The sum of all
-shares plus other writers is bounded by 95% of the verified gross grant.
+shares plus other writers is bounded by the verified gross grant (100%; every call
+is reserved at its upper-bound price before it is sent, so the ledger never trails
+the provider's charges).
 
 The private and isolation services on hermes use one entry for their common
 locked ledger. The Mac friend bridge has a separate Anthropic entry and no

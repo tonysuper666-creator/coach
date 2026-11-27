@@ -1,7 +1,18 @@
 """Single-writer synthetic grants for existing offline routing contracts."""
+import os
 import socket
 
 from api_budget import MONTHLY_GRANTS, atomic_json, grant_limit_micros, micros
+
+
+# Offline tests never queue behind holds unless a test asks for it explicitly.
+os.environ.setdefault("BRIDGE_RESERVATION_WAIT_SEC", "0")
+
+
+def use_up(ledger, provider, amount, key="synthetic-not-a-real-key"):
+    """Record `amount` as settled spend (not a temporary hold)."""
+    reservation = ledger.reserve(provider, key, amount)
+    ledger.settle(provider, reservation, amount)
 
 
 def fund(state, *, start=1793491200, end=1798761600, prior_anthropic=0):

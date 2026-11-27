@@ -658,10 +658,9 @@ class HaikuPinnedBridgeTransport(
                 elapsedMs = result.call.durMs.coerceAtLeast(1L),
             )
             is BridgeResult.Failure -> {
+                result.rejectIfFreeGrantExhausted()
                 if (friend != null) {
-                    val reason = result.terminal?.reason
-                    val quotaCode = reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
-                    throw FriendServiceError(quotaCode ?: "unavailable")
+                    throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 }
                 throw IllegalStateException("haiku_pinned_failed:${result.reason}")
             }
@@ -812,7 +811,7 @@ class PracticeGradeAndDiagnoseService(
                     append(gradeRequest.rubricCriteria.joinToString(", ") { it.cid })
                 }
                 val jsonRepairKey = "pjr-${sha256("${request.bookId}|${request.questionId}|$jsonRepairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-                val jsonRepairReply = runCatching {
+                val jsonRepairReply = modelCatching {
                     effectiveTransport.generateSection(
                         systemPrompt = JSON_REPAIR_SYSTEM,
                         userPrompt = jsonRepairPrompt,
@@ -866,7 +865,7 @@ class PracticeGradeAndDiagnoseService(
                         append("Return an exact contiguous substring from Student Written Answer.")
                     }
                     val repairKey = "pqr-${sha256("${request.bookId}|${crit.cid}|$repairPrompt".toByteArray(Charsets.UTF_8)).take(16)}"
-                    val repairReply = runCatching {
+                    val repairReply = modelCatching {
                         effectiveTransport.generateSection(
                             systemPrompt = QUOTE_REPAIR_SYSTEM,
                             userPrompt = repairPrompt,
@@ -1078,7 +1077,7 @@ class PracticeGradeAndDiagnoseService(
             if (rows.isEmpty()) return emptyMap()
             val prompt = CourseEssayFramework.blindUserPrompt(rows, request.studentAnswer)
             val key = "$keyPrefix-${sha256(prompt.toByteArray(Charsets.UTF_8)).take(16)}"
-            val reply = runCatching {
+            val reply = modelCatching {
                 activeTransport.generateSection(
                     systemPrompt = CourseEssayFramework.CHECK_SYSTEM.trim(),
                     userPrompt = prompt,

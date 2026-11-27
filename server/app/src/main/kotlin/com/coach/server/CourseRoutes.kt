@@ -213,6 +213,8 @@ internal fun Route.courseRoutes(
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: FriendServiceError) {
+                call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
                 call.respondText(buildJsonObject { put("error", e.message) }.toString(), ContentType.Application.Json, e.status)
             } catch (_: IllegalArgumentException) {

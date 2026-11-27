@@ -126,8 +126,8 @@ class BatchRouter:
                         raise Denied("unsupported_batch_size")
                     provider = vendor(model)
                     maximum = cost(model, {"input_tokens": bound, "output_tokens": limit}, batch=True)
-                    state["reservation"] = self.router.ledger.reserve(provider, self.router.keys.get(provider, ""), maximum,
-                                                                    friend=friend, device=device, tokens=bound + limit)
+                    state["reservation"] = await self.router.reserve_waiting(provider, self.router.keys.get(provider, ""), maximum,
+                                                                             friend=friend, device=device, tokens=bound + limit)
                     atomic_json(path, state)
                     async with self.router.client_factory() as client:
                         submitting_http = True

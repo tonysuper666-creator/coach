@@ -151,6 +151,9 @@ class ExplainTroubleTest {
         assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(500, null))
         assertEquals(ExplainTrouble.Busy, ExplainTrouble.of(408, null))
         assertEquals(ExplainTrouble.Other, ExplainTrouble.of(400, "source_mismatch"))
+        // TON-740: the exhausted free grant shows the server's own sentence, not the busy copy.
+        assertEquals(ExplainTrouble.Other, ExplainTrouble.of(429, "free_grant_exhausted"))
+        assertEquals("这个月的免费额度用完了", ExplainTrouble.message(ExplainTrouble.of(429, "free_grant_exhausted"), "这个月的免费额度用完了"))
         assertFalse(ExplainTrouble.Revoked.retry)
         assertTrue(ExplainTrouble.Unreachable.retry && ExplainTrouble.Busy.retry && ExplainTrouble.Other.retry)
         // 连不上和停用用固定的话，不管服务端或底层说了什么。

@@ -51,7 +51,7 @@ class DesktopSableLoginTest {
                         else -> 200 to """{"access_token":"$upstream"}"""
                     }
                 }
-                "/api/coach/whoami" -> if (offline.get()) 503 to "{}" else if (bearer == "Bearer $secondGrant" || (bearer == "Bearer $upstream" && !revoked.get())) 200 to """{"sub":"subject","username":"demo","display_name":"Demo"}""" else 401 to "{}"
+                "/api/coach/whoami" -> if (offline.get()) 503 to "{}" else if (bearer == "Bearer $secondGrant" || (bearer == "Bearer $upstream" && !revoked.get())) 200 to """{"sub":"subject","username":"demo","display_name":"Demo","email":"reader@example.org"}""" else 401 to "{}"
                 else -> 404 to "{}"
             }
             val bytes = reply.second.toByteArray()
@@ -95,6 +95,22 @@ class DesktopSableLoginTest {
             suspend fun status(credential: PairedCredentials = saved.credentials) = send(HttpRequest.newBuilder(URI("$base/v1/public/status"))
                 .header("X-Coach-Device", credential.deviceId)
                 .header("Authorization", "Bearer ${credential.token}").GET()).statusCode()
+            val settingsClient = com.coach.client.PairingClient(base)
+            try {
+                val info = settingsClient.account(saved.credentials)
+                assertEquals("Demo", info.str("nickname"))
+                assertEquals("r***@example.org", info.str("maskedEmail"))
+            } finally { settingsClient.close() }
+            val thirdGrant = send(HttpRequest.newBuilder(URI("$base/v1/public/sable"))
+                .header("Authorization", "Bearer $secondGrant").POST(HttpRequest.BodyPublishers.noBody()))
+            val thirdBody = LedgerJson.parseToJsonElement(thirdGrant.body()).jsonObject
+            val third = PairedCredentials(thirdBody.str("deviceId"), thirdBody.str("token"), thirdBody.str("role"))
+            val separateStore = DesktopCredentials(root.resolve("separate-client"))
+            separateStore.save(base, third)
+            DesktopPairing(settings, separateStore).logout(DesktopIdentity(base, third))
+            assertNull(separateStore.load(base))
+            assertEquals(401, status(third))
+            assertEquals(200, status(second))
             offline.set(true)
             clock.addAndGet(10 * 60_000)
             assertEquals(200, status())

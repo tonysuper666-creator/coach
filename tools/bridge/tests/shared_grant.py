@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import io
 import json
 import os
+import grant_fixture  # noqa: F401  (offline tests never wait behind holds)
 from pathlib import Path
 import socket
 import tempfile
@@ -61,8 +62,17 @@ class SharedGrantTests(unittest.TestCase):
                       for i in (0, 1))
         self.assertEqual(190_000_000, pending + self.plan["other_writers_microusd"])
         for site in (0, 1):
-            with self.assertRaisesRegex(Denied, "95_percent"):
+            # Every share is held by in-flight calls, nothing settled: a busy moment, never "used up".
+            with self.assertRaisesRegex(Denied, "^reservations_busy$"):
                 self.ledger(site).reserve("anthropic", KEY, 1)
+        self.assertEqual([], list(self.states[0].glob("grant-guard-*.json")))
+        # Once that spend is settled, the next call is the grant used up — only then is a notice left.
+        for site in (0, 1):
+            ledger = self.ledger(site)
+            for token, amount in list(ledger.read()["cycles"]["anthropic:2026-11"]["reserved"].items()):
+                ledger.settle("anthropic", ("anthropic:2026-11", "2026-11", token), amount)
+            with self.assertRaisesRegex(Denied, "^free_grant_exhausted$"):
+                ledger.reserve("anthropic", KEY, 1)
 
         # Both machines deliver the same durable notice after the receiver restarts.
         inbox = self.root / "inbox"
@@ -95,12 +105,15 @@ class SharedGrantTests(unittest.TestCase):
         old = self.ledger(0).reserve("anthropic", KEY, 15_210_000)
         self.states[1].rename(self.root / "offline")
         self.now += 120
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
             self.ledger(0).reserve("anthropic", KEY, 1)
         for _ in range(2):
             self.ledger(0).settle("anthropic", old, 15_209_999, idempotent=True)
-        self.ledger(0).reserve("anthropic", KEY, 1)
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        last = self.ledger(0).reserve("anthropic", KEY, 1)
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
+            self.ledger(0).reserve("anthropic", KEY, 1)
+        self.ledger(0).settle("anthropic", last, 1)
+        with self.assertRaisesRegex(Denied, "^free_grant_exhausted$"):
             self.ledger(0).reserve("anthropic", KEY, 1)
         self.now = self.plan["end_utc"]
         with self.assertRaisesRegex(Denied, "allocation_unavailable"):
@@ -118,7 +131,7 @@ class SharedGrantTests(unittest.TestCase):
         before["cycles"]["anthropic:2026-11"]["limit"] = 0
         self.ledger(1).save(before)
         self.now += 120
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
             self.ledger(1).reserve("anthropic", KEY, 1)
         self.assertEqual(before, self.ledger(1).read())
 
@@ -128,7 +141,7 @@ class SharedGrantTests(unittest.TestCase):
         reservation = ledger.reserve("anthropic", KEY, share)
         ledger.defer_interrupted(reservation, 100, 30)
         self.now += 3600  # December, same grant window.
-        with self.assertRaisesRegex(Denied, "credit_limit_95_percent"):
+        with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
             self.ledger(0).reserve("anthropic", KEY, 1)
         data = ledger.read()
         self.assertEqual({}, data["interrupted_streams"])
@@ -160,7 +173,7 @@ class SharedGrantTests(unittest.TestCase):
         self.ledger(0).reserve("anthropic", KEY, 15_210_000 - 17)
         self.ledger(0).settle("anthropic", pending, 16)
         self.ledger(0).reserve("anthropic", KEY, 1)
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
             self.ledger(0).reserve("anthropic", KEY, 1)
 
     def test_adjusted_legacy_ceiling_survives_mid_grant_calendar_rollover(self):
@@ -171,16 +184,18 @@ class SharedGrantTests(unittest.TestCase):
         data["cycles"]["anthropic:2026-11"] = {"spent": 149_790_000, "limit": 149_790_000, "reserved": {}}
         self.ledger(1).save(data)
         self.now += 120
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
             self.ledger(1).reserve("anthropic", KEY, 1)
 
     def test_wrong_identity_overallocated_reissued_and_missing_ledger(self):
         state = self.states[0]
-        self.plan["other_writers_microusd"] += 1
+        # One microdollar past the whole free grant ($200) is over-allocated.
+        over = 200_000_000 - 190_000_000 + 1
+        self.plan["other_writers_microusd"] += over
         self.install(state)
         with self.assertRaisesRegex(Denied, "allocation_unavailable"):
             self.ledger(0).reserve("anthropic", KEY, 1)
-        self.plan["other_writers_microusd"] -= 1
+        self.plan["other_writers_microusd"] -= over
         self.install(state)
         self.ledger(0).reserve("anthropic", KEY, 1)
         self.plan["ledgers"][0]["limit_microusd"] -= 1
@@ -216,7 +231,7 @@ class SharedGrantTests(unittest.TestCase):
         # Reserve the remaining share in another worker. A retry cannot open a client.
         spent = self.ledger(1).read()["cycles"]["anthropic:2026-11"]["spent"]
         self.ledger(1).reserve("anthropic", KEY, 149_790_000 - spent)
-        with self.assertRaisesRegex(Denied, "95_percent"):
+        with self.assertRaisesRegex(Denied, "^reservations_busy$"):
             asyncio.run(stream())
         self.assertEqual(1, len(requests))
 

@@ -466,14 +466,22 @@ class CollectionQaServiceTest {
             assertTrue(Files.exists(friendDir.resolve("explanations.sqlite")))
             assertTrue(Files.readString(friendDir.resolve("requests.log")).contains("complete"))
 
-            // 4. Friend explicit daily_calls=0 quota returns 429 without hitting bridge
+            // 4. TON-740: an explicit daily_calls=0 is recorded, not enforced — the question still reaches the bridge.
             val beforeQuotaStubCalls = stub.requests
             Files.writeString(friendConfig, json("defaults" to json("daily_calls" to 0)).toString())
+            stub.stream(1, modelReply, StubTutor.terminal("complete"), StubTutor.DONE)
             val quotaRes = post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth)
-            assertEquals(429, quotaRes.statusCode())
-            assertEquals("daily_quota", LedgerJson.parseToJsonElement(quotaRes.body()).jsonObject.str("code"))
-            assertEquals(beforeQuotaStubCalls, stub.requests)
+            assertEquals(200, quotaRes.statusCode())
+            assertEquals(beforeQuotaStubCalls + 1, stub.requests)
             Files.deleteIfExists(friendConfig)
+
+            // 4a. Only the exhausted free grant refuses, with its own code and sentence.
+            stub.stream(1, StubTutor.terminal("failed", "free_grant_exhausted"), StubTutor.DONE)
+            val exhaustedRes = post(publicPort, "/v1/library/collection/ask", payload, sableDevice, sableAuth)
+            assertEquals(429, exhaustedRes.statusCode())
+            val exhaustedBody = LedgerJson.parseToJsonElement(exhaustedRes.body()).jsonObject
+            assertEquals("free_grant_exhausted", exhaustedBody.str("code"))
+            assertEquals("这个月的免费额度用完了", exhaustedBody.str("error"))
 
             // 4b. Sable hitting over-budget upstream 429 gets HTTP 429 + Retry-After header + plain-Chinese wait time
             stub.stream(1, StubTutor.terminal("failed", "unavailable", retryAfterSec = 60), StubTutor.DONE)

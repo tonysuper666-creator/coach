@@ -47,6 +47,9 @@ internal data class LibraryUi(
     val page: Int = 1, val source: BookLesson? = null,
     val answer: PracticeAnswer = PracticeAnswer(), val busy: Boolean = false, val error: String? = null,
     val reviews: List<LocalBookReview> = emptyList(), val review: LocalBookReview? = null,
+    val memoryReview: MemoryReviewItem? = null,
+    /** 从概念或批注跳回原句时为 true。返回复习卡，不重排今日队列。 */
+    val memorySentenceOpen: Boolean = false,
     /** 今日复习的顺序：开列表时定下，复习途中不重排，答完才刷新。 */
     val todayQueue: LocalReviewQueue = LocalReviewQueue(emptyList(), 0),
     val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
@@ -328,7 +331,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     private fun ensureQueueIncludes(queue: LocalReviewQueue, active: LocalBookReview?): LocalReviewQueue {
         if (active == null) return queue
         val present = queue.cards.any { it.book == active.book && it.lesson == active.lesson && it.mode == active.mode }
-        return if (present) queue else queue.copy(cards = listOf(active) + queue.cards)
+        if (present) return queue
+        val cards = listOf(active) + queue.cards
+        val alreadyLined = queue.lineup.any {
+            it is ReviewLine.Question && it.review.book == active.book && it.review.lesson == active.lesson && it.review.mode == active.mode
+        }
+        val lineup = if (alreadyLined) queue.lineup else listOf(ReviewLine.Question(active)) + queue.lineup
+        return queue.copy(cards = cards, lineup = lineup)
     }
 
     fun launchDroppedBooks(paths: List<Path>, onStaged: () -> Unit = {}): Job? {
@@ -1325,6 +1334,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         it.record.kind == CollectionKind.BOOKLIST && it.record.id == askDraft.collectionId
                     }?.record?.id,
                     review = null,
+                    memoryReview = null,
+                    memorySentenceOpen = false,
                     reviews = reviews,
                     todayQueue = todayQueue,
                     learningPath = restoredPath(activeBook),
@@ -1393,7 +1404,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             book.copy(readingPage = resumePage).also { library.save(it) }
         } else book
         library.saveOpenSession(activeBook.id, "READER")
-        mutable.update { it.copy(book = activeBook, review = null, questionsOpen = false,
+        mutable.update { it.copy(book = activeBook, review = null, memoryReview = null, memorySentenceOpen = false,
+            questionsOpen = false,
             screen = BookScreen.READER, page = activeBook.readingPage, source = null,
             prompt = null, initialized = true, activePracticeDraft = draft,
             focusRecommendation = focusRec,
@@ -1440,7 +1452,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             enabled
         } else book
         library.saveLearningPath(readyBook.id, target.name)
-        mutable.update { it.copy(book = readyBook, review = null, prompt = null, learningPath = target, learningPathSaved = true) }
+        mutable.update { it.copy(book = readyBook, review = null, memoryReview = null, memorySentenceOpen = false,
+            prompt = null, learningPath = target, learningPathSaved = true) }
         openLearning(readyBook, target)
     }
 
@@ -1449,6 +1462,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
         mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null,
+            memoryReview = null, memorySentenceOpen = false,
             learningPath = path, ladder = library.ladder(book.id),
             questionsOpen = path == LearningPath.QUESTION_FIRST || answer.text.isNotBlank() || answer.revealed) }
     }
@@ -1581,6 +1595,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             mutable.update {
                 it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
             }
+        } else if (cur.screen == BookScreen.READER && cur.memorySentenceOpen && cur.memoryReview != null) {
+            mutable.update { it.copy(screen = BookScreen.REVIEWING, memorySentenceOpen = false, pendingCourseJump = null) }
         } else if (cur.activeCourseId != null && cur.screen != BookScreen.COURSE && cur.screen != BookScreen.HOME) {
             val refreshed = library.withCourseDatabase { db ->
                 CourseStore.loadCourseDetail(db, cur.activeCourseId, library.clock)
@@ -1622,7 +1638,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 )
             }
         } else {
-            val fromReview = cur.review != null
+            val fromReview = cur.review != null || cur.memoryReview != null
             library.closeReview()
             if (!fromReview) library.clearOpenSession()
             mutable.update {
@@ -1630,6 +1646,8 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
                     page = if (fromReview) it.page else (it.book?.readingPage ?: it.page),
                     review = null,
+                    memoryReview = null,
+                    memorySentenceOpen = false,
                     prompt = null,
                     activeCourseId = null,
                     activeCourseTopicId = null,
@@ -1656,68 +1674,162 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
     suspend fun showReviews() = action {
         library.closeReview()
         library.clearOpenSession()
-        mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
-            prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+        mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, memoryReview = null, memorySentenceOpen = false,
+            source = null, prompt = null, reviews = library.reviews(), todayQueue = library.reviewQueue()) }
     }
 
-    /** 单卡流：打开今日队列里的下一题；没有下一题就回到复习页，显示刷新后的队列或「今日复习已完成」。 */
+    /** 单卡流：打开今日队列里的下一条；没有下一条就回到复习页，显示刷新后的队列或「今日复习已完成」。 */
     suspend fun nextReview() = action {
         val ui = mutable.value
-        val cards = ui.todayQueue.cards
-        val at = ui.review?.let { open -> cards.indexOfFirst { it.book == open.book && it.lesson == open.lesson && it.mode == open.mode } } ?: -1
-        val next = cards.getOrNull(at + 1)
-        if (next == null) {
-            library.closeReview()
-            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, prompt = null,
-                reviews = library.reviews(), todayQueue = library.reviewQueue()) }
-        } else {
-            val review = library.review(next.book, next.lesson, next.mode)
-            library.openReview(review)
-            mutable.update { it.copy(book = library.book(review.book), screen = BookScreen.REVIEWING, source = null,
-                prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
-        }
+        val at = lineupIndex(ui)
+        val next = ui.todayQueue.lineup.getOrNull(at + 1)
+        if (next == null) finishReviewList() else openLine(next, ui.todayQueue)
     }
 
     /** The mounted host refreshes this projection across local midnight, including on 今天. */
     suspend fun refreshReviews() = action(showBusy = false) {
         val current = mutable.value.review
+        val memoryOpen = mutable.value.memoryReview
         val updated = current?.let { library.review(it.book, it.lesson, it.mode) }
-        val nextQueue = if (current == null) library.reviewQueue() else mutable.value.todayQueue
+        val nextQueue = if (current == null && memoryOpen == null) library.reviewQueue() else mutable.value.todayQueue
         mutable.update { it.copy(reviews = library.reviews(), review = updated,
             answer = updated?.answer ?: it.answer, todayQueue = nextQueue) }
     }
 
     suspend fun openReview(entry: LocalBookReview) = action {
         val review = library.review(entry.book, entry.lesson, entry.mode)
-        val book = library.book(review.book)
-        library.openReview(review)
         val existingQueue = mutable.value.todayQueue
         val hydratedQueue = ensureQueueIncludes(
-            if (existingQueue.cards.isEmpty()) library.reviewQueue() else existingQueue,
+            if (existingQueue.lineup.isEmpty()) library.reviewQueue() else existingQueue,
             review,
         )
-        mutable.update { it.copy(book = book, screen = BookScreen.REVIEWING, source = null,
-            prompt = null, review = review, answer = review.answer, reviews = library.reviews(),
-            todayQueue = hydratedQueue) }
+        openLine(ReviewLine.Question(review), hydratedQueue)
     }
 
-    /** 单卡自评：点「没记住」(AGAIN) 或「记住了」(GOOD) 后写入 FSRS 并推进到今日队列下一题。 */
+    suspend fun openMemoryReview(item: MemoryReviewItem) = action {
+        val existing = mutable.value.todayQueue
+        val queue = if (existing.lineup.isEmpty()) library.reviewQueue() else existing
+        openLine(ReviewLine.Memory(item), queue)
+    }
+
+    /** 原句还在这一页上才高亮。对不上也打开这一页，今日队列不重排。 */
+    suspend fun showMemorySentence() = action {
+        val item = mutable.value.memoryReview ?: return@action
+        val book = library.book(item.bookId)
+        val pageNumber = item.page.takeIf { book.page(it) != null } ?: book.readingPage
+        val pageText = book.page(pageNumber)?.text
+        val passage = if (pageText == null) null
+        else ConceptSayingLogic.passageIfExact(book.id, pageNumber, pageText, item.offsetUtf16, item.quote)
+        mutable.update {
+            it.copy(
+                book = book,
+                screen = BookScreen.READER,
+                page = pageNumber,
+                source = null,
+                prompt = null,
+                memorySentenceOpen = true,
+                pendingCourseJump = passage,
+            )
+        }
+    }
+
+    suspend fun rateMemoryReview(remembered: Boolean, editedNote: String?) = action {
+        val ui = mutable.value
+        val item = ui.memoryReview ?: return@action
+        library.rateMemoryReview(item, remembered, editedNote)
+        val at = lineupIndex(ui)
+        if (at < 0) {
+            finishReviewList()
+        } else {
+            val next = ui.todayQueue.lineup.getOrNull(at + 1)
+            if (next == null) finishReviewList() else openLine(next, ui.todayQueue)
+        }
+    }
+
+    /** 单卡自评：点「没记住」(AGAIN) 或「记住了」(GOOD) 后写入 FSRS 并推进到今日队列下一条。 */
     suspend fun rateReview(rating: com.coach.domain.fsrs.FsrsRating, currentAnswer: PracticeAnswer) = action {
         val ui = mutable.value
         val open = ui.review ?: return@action
         library.saveReviewRating(open, rating, currentAnswer)
-        val cards = ui.todayQueue.cards
-        val at = cards.indexOfFirst { it.book == open.book && it.lesson == open.lesson && it.mode == open.mode }
-        val next = if (at >= 0) cards.getOrNull(at + 1) else null
-        if (next == null) {
-            library.closeReview()
-            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, prompt = null,
-                reviews = library.reviews(), todayQueue = library.reviewQueue()) }
+        val at = lineupIndex(ui)
+        if (at < 0) {
+            finishReviewList()
         } else {
-            val review = library.review(next.book, next.lesson, next.mode)
-            library.openReview(review)
-            mutable.update { it.copy(book = library.book(review.book), screen = BookScreen.REVIEWING, source = null,
-                prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+            val next = ui.todayQueue.lineup.getOrNull(at + 1)
+            if (next == null) finishReviewList() else openLine(next, ui.todayQueue)
+        }
+    }
+
+    private fun lineupIndex(ui: LibraryUi): Int {
+        val review = ui.review
+        val memory = ui.memoryReview
+        return when {
+            review != null -> ui.todayQueue.lineup.indexOfFirst {
+                it is ReviewLine.Question && it.review.book == review.book && it.review.lesson == review.lesson && it.review.mode == review.mode
+            }
+            memory != null -> ui.todayQueue.lineup.indexOfFirst {
+                it is ReviewLine.Memory && it.item.kind == memory.kind && it.item.objectId == memory.objectId && it.item.bookId == memory.bookId
+            }
+            else -> -1
+        }
+    }
+
+    private fun openLine(line: ReviewLine, queue: LocalReviewQueue) {
+        when (line) {
+            is ReviewLine.Question -> {
+                val review = library.review(line.review.book, line.review.lesson, line.review.mode)
+                library.openReview(review)
+                mutable.update {
+                    it.copy(
+                        book = library.book(review.book),
+                        screen = BookScreen.REVIEWING,
+                        source = null,
+                        prompt = null,
+                        review = review,
+                        answer = review.answer,
+                        reviews = library.reviews(),
+                        todayQueue = queue,
+                        memoryReview = null,
+                        memorySentenceOpen = false,
+                        pendingCourseJump = null,
+                    )
+                }
+            }
+            is ReviewLine.Memory -> {
+                library.closeReview()
+                val book = runCatching { library.book(line.item.bookId) }.getOrNull()
+                mutable.update {
+                    it.copy(
+                        book = book ?: it.book,
+                        screen = BookScreen.REVIEWING,
+                        source = null,
+                        prompt = null,
+                        review = null,
+                        memoryReview = line.item,
+                        memorySentenceOpen = false,
+                        pendingCourseJump = null,
+                        reviews = library.reviews(),
+                        todayQueue = queue,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun finishReviewList() {
+        library.closeReview()
+        mutable.update {
+            it.copy(
+                screen = BookScreen.REVIEWS,
+                review = null,
+                memoryReview = null,
+                memorySentenceOpen = false,
+                source = null,
+                prompt = null,
+                pendingCourseJump = null,
+                reviews = library.reviews(),
+                todayQueue = library.reviewQueue(),
+            )
         }
     }
 
@@ -2631,9 +2743,24 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
             }
 
             val allBookIds = pending.flatMap { it.sources.map { s -> s.bookId } }.distinct()
-            val pagesByBook = withContext(Dispatchers.IO) {
+            val textbookBookIds = detail.materials
+                .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+                .map { it.bookId }
+                .toSet()
+            val (pagesByBook, chapterStartPagesByBook) = withContext(Dispatchers.IO) {
                 library.withCourseDatabase { db ->
-                    allBookIds.associateWith { bookId -> CourseStore.loadPagesForBook(db, bookId, maxPages = Int.MAX_VALUE) }
+                    val pages = allBookIds.associateWith { bookId ->
+                        CourseStore.loadPagesForBook(db, bookId, maxPages = Int.MAX_VALUE)
+                    }
+                    val chapterStarts = allBookIds.filter { it in textbookBookIds }.associateWith { bookId ->
+                        val structure = BookStructureStore.loadStructure(db, bookId, pages[bookId].orEmpty())
+                        structure?.tocNodes
+                            ?.filter { it.kind == TocNodeKind.CHAPTER }
+                            ?.map { it.startPage }
+                            ?.toSet()
+                            .orEmpty()
+                    }
+                    pages to chapterStarts
                 }
             }
             val workerCount = concurrency.coerceIn(1, 16)
@@ -2670,7 +2797,12 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                             try {
                                 val pointPages = point.sources.map { it.bookId }.distinct()
                                     .associateWith { pagesByBook[it].orEmpty() }
-                                val request = CourseAutoAligner.buildTopicPackRequest(detail, point, pointPages)
+                                val request = CourseAutoAligner.buildTopicPackRequest(
+                                    detail,
+                                    point,
+                                    pointPages,
+                                    chapterStartPagesByBook,
+                                )
                                 if (ownerOnly.get() != null) return@withPermit
                                 val reply = explainer.examPointDrill(request)
                                 if (reply.code == "owner_only") {

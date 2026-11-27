@@ -19,6 +19,7 @@ import java.util.UUID
 internal class DesktopCredentials(clientDirectory: Path) {
     private val directory = clientDirectory.resolve("pairing").toAbsolutePath().normalize()
     internal val file: Path = directory.resolve("credentials.properties")
+    private val displayFile = directory.resolve("account-display.properties")
     private val addressFile = directory.resolve("server-url")
     private val revokedFile = directory.resolve("revoked")
 
@@ -52,7 +53,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
         return PairedCredentials(device, token, values.getProperty("role", "owner"))
     }
 
-    @Synchronized fun save(serverUrl: String, credentials: PairedCredentials) {
+    @Synchronized fun save(serverUrl: String, credentials: PairedCredentials, display: SessionDisplay? = null) {
         check(credentials.deviceId.matches(Regex("[A-Za-z0-9_-]{1,128}")) && credentials.token.matches(Regex("[A-Za-z0-9_-]{43}"))) {
             "Invalid Coach pairing"
         }
@@ -63,9 +64,41 @@ internal class DesktopCredentials(clientDirectory: Path) {
                 setProperty("deviceId", credentials.deviceId)
                 setProperty("token", credentials.token)
                 setProperty("role", credentials.role)
+                display?.let {
+                    setProperty("method", it.method)
+                    setProperty("nickname", it.nickname)
+                    setProperty("maskedEmail", it.maskedEmail)
+                }
             }.store(output, "Coach pairing; private to this user")
         }
         Files.deleteIfExists(revokedFile)
+    }
+
+    @Synchronized fun display(identity: DesktopIdentity): SessionDisplay? {
+        val current = load(identity.serverUrl) ?: return null
+        if (current.deviceId != identity.credentials.deviceId || current.token != identity.credentials.token) return null
+        val values = readPrivate(file) { input -> Properties().apply { load(input) } } ?: return null
+        val cached = readPrivate(displayFile) { input -> Properties().apply { load(input) } }
+        val source = cached?.takeIf {
+            it.getProperty("server") == identity.serverUrl && it.getProperty("deviceId") == current.deviceId
+        } ?: values
+        return source.getProperty("method")?.let {
+            SessionDisplay(it, source.getProperty("nickname", ""), source.getProperty("maskedEmail", ""))
+        }
+    }
+
+    @Synchronized fun rememberDisplay(identity: DesktopIdentity, display: SessionDisplay) {
+        val current = load(identity.serverUrl) ?: return
+        if (current.deviceId != identity.credentials.deviceId || current.token != identity.credentials.token) return
+        writePrivate(displayFile) { output ->
+            Properties().apply {
+                setProperty("server", identity.serverUrl)
+                setProperty("deviceId", current.deviceId)
+                setProperty("method", display.method)
+                setProperty("nickname", display.nickname)
+                setProperty("maskedEmail", display.maskedEmail)
+            }.store(output, null)
+        }
     }
 
     private fun writePrivate(path: Path, write: (OutputStream) -> Unit) {
@@ -97,6 +130,7 @@ internal class DesktopCredentials(clientDirectory: Path) {
             protect(file, false)
             Files.delete(file)
         }
+        Files.deleteIfExists(displayFile)
         if (markRevoked) {
             writePrivate(revokedFile) { it.write("revoked".toByteArray(Charsets.UTF_8)) }
         } else {

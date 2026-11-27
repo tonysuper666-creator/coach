@@ -1051,11 +1051,11 @@ function Send-PageDigits([int]$page) {
     }
 }
 
-function Jump-Step4Page([int]$physPage, [int]$midX, [int]$hoverY, [string]$tag) {
+function Jump-VerifiedReaderPage([int]$step, [int]$physPage, [int]$midX, [int]$hoverY, [string]$tag) {
     # Ctrl+G 打开跳页框。逐位敲，先读回数字，再核对阅读器底栏的物理页。
     Send-Keys '^g'; Start-Sleep -Milliseconds 900
-    $opened = [bool](Await-Text 4 "$tag-goto" @('前往') 10)
-    if (-not $opened) { Fail 4 "Ctrl+G 没展开跳页框（读不到「前往」，见 4-$tag-goto.png）" }
+    $opened = [bool](Await-Text $step "$tag-goto" @('前往') 10)
+    if (-not $opened) { Fail $step "Ctrl+G 没展开跳页框（读不到「前往」，见 $step-$tag-goto.png）" }
     # 一次把「154」送进父状态会丢位（框里只剩 15，回车就跳到目录页）。逐位敲，敲完先认框里的数字。
     # 认成别的数就整段重敲，最多 3 次；三次都是错的数就不按回车。这一帧没认出数字才提交，交给下面的页码断言。
     $typedSeen = $null
@@ -1067,24 +1067,24 @@ function Jump-Step4Page([int]$physPage, [int]$midX, [int]$hoverY, [string]$tag) 
         Start-Sleep -Milliseconds 120
         Send-PageDigits $physPage
         Start-Sleep -Milliseconds 300
-        $typedLines = Shot 4 $(if ($attempt -eq 1) { "$tag-goto-typed" } else { "$tag-goto-typed$attempt" })
+        $typedLines = Shot $step $(if ($attempt -eq 1) { "$tag-goto-typed" } else { "$tag-goto-typed$attempt" })
         $typedSeen = Get-JumpFieldText $typedLines
         if ($typedSeen -eq "$physPage") { $typedOk = $true; break }
         if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，整段重敲" }
         else { Note "跳页框里的数字这一帧没认出来（第 $attempt 次），提交后交给页码断言"; break }
     }
-    if ($typedSeen -and -not $typedOk) { Fail 4 "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 4-$tag-goto-typed*.png）" }
+    if ($typedSeen -and -not $typedOk) { Fail $step "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 $step-$tag-goto-typed*.png）" }
     Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
     $pageNow = $null
     foreach ($try in 1..6) {
         Start-Sleep -Seconds 2
         Hover $midX $hoverY; Start-Sleep -Milliseconds 700
-        $null = Shot 4 "$tag-jumped"
+        $null = Shot $step "$tag-jumped"
         $c = Get-HudCounter $script:LastPng
         if ($c) { $pageNow = "$($c.Cur)" }
         if ($pageNow -eq "$physPage") { break }
     }
-    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow，见 4-$tag-jumped.png）" }
+    if ($pageNow -ne "$physPage") { Fail $step "页码没跳到 $physPage（现在 $pageNow，见 $step-$tag-jumped.png）" }
 }
 
 function Click-Step2ImportPoint([int]$screenX, [int]$screenY) {
@@ -1453,11 +1453,11 @@ try {
     # 1.1.1（TON-1766）删掉了每段的「讲解这段」：选中文字后浮出的工具条「讲讲」才是这条路径的入口。
     $sel = Get-Content $Selection -Raw -Encoding UTF8 | ConvertFrom-Json
     $physPage = [int]([regex]::Match($sel.blocks[0].id, ':p(\d+):').Groups[1].Value)
-    Jump-Step4Page $physPage $midX $hoverY 'initial'
+    Jump-VerifiedReaderPage 4 $physPage $midX $hoverY 'initial'
     # V 在阅读器内切换原页和文字。避开 OCR 未识别的菜单和会返回首页的 Esc。
     Hover $midX $hoverY; Start-Sleep -Milliseconds 400
     Send-Keys 'v'; Start-Sleep -Seconds 1
-    Jump-Step4Page $physPage $midX $hoverY 'after-mode'
+    Jump-VerifiedReaderPage 4 $physPage $midX $hoverY 'after-mode'
     $null = Shot 4 'text-mode'
     # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，常在下一张纸上。
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
@@ -1492,7 +1492,7 @@ try {
         # V 是切换：要是按之前本来就在文字视图，上面那一下把它切回了原页，再按一次切回来。
         Note '按 V 后没找到段落，再按一次 V 再找'
         Send-Keys 'v'; Start-Sleep -Seconds 1
-        Jump-Step4Page $physPage $midX $hoverY 'retry-mode'
+        Jump-VerifiedReaderPage 4 $physPage $midX $hoverY 'retry-mode'
         $nextSheets = 0
     }
     if (-not $paraLine) { Fail 4 '文字视图里找不到可信选段所在的段落（见 4-blocks.png）' }
@@ -1936,6 +1936,11 @@ try {
         $midX = [int]($winW / 2); $midY = [int]($winH / 2)
         $hoverY = [int]($winH - 10)
         $scrollX = $midX; $scrollY = [int]($winH * 0.72)
+        # 上一步的追问出处可能指向扉页等没有正文小节的页。回到可信选段页，
+        # 让本章讲解与读前自测都从本来要验的正文位置开始。
+        $chapterPage = if ($physPage -gt 0) { $physPage } else { $LessonPage }
+        Note "步骤5 回到章内物理页 $chapterPage 再打开伴读"
+        Jump-VerifiedReaderPage 5 $chapterPage $midX $hoverY 'chapter-start'
         # 抽屉页签：讲解 / 提问 / 批注，排在抽屉头最左边。④ 点「出处」跳到原文页时顶栏会隐去，
         # 帧里可能一条页签都没有：先沿顶边把顶栏叫出来，再点顶栏右边的「伴读」把抽屉叫回来。
         $drawer5 = Ensure-CompanionDrawerOpen 5 $winW $winH -tries 3 -missTag 'explain-tab0' -openTagPrefix 'explain-tab'

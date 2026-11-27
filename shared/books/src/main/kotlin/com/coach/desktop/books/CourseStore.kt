@@ -201,7 +201,11 @@ internal object CourseStore {
                 pageCount = meta.pageCount,
                 sourceFilename = meta.sourceFilename,
             )
-            val weekNum = CourseMaterialRole.inferWeekNumber(meta.title, meta.sourceFilename, meta.previewText)
+            val weekNum = if (role in setOf(CourseMaterialRole.SYLLABUS, CourseMaterialRole.CORE_TEXTBOOK)) {
+                null
+            } else {
+                CourseMaterialRole.inferWeekNumber(meta.title, meta.sourceFilename, meta.previewText)
+            }
             val contentHash = loadBookContentFingerprint(db, bookId)
             db.prepareStatement(
                 """INSERT INTO collection_materials(collection_id, material_id, role, ordinal, added_at, metadata_json, week_num, user_locked, authority_rank, source_hash)
@@ -554,8 +558,27 @@ internal object CourseStore {
 
             val existingById = existingTopics.associateBy { it.topicId }
             val points = if (plan.includeExamPoints) {
-                val excluded = plan.topics.filter { it.examStatus == CourseTopicStatus.EXCLUDED }.flatMap { it.sources }
-                CourseExamPoints.build(db, courseId, loadMaterials(db, courseId), excluded)
+                fun effectiveStatus(incoming: CourseTopicPlan): CourseTopicStatus {
+                    val matched = incoming.topicId?.let(existingById::get) ?: existingTopics.firstOrNull { ex ->
+                        (ex.weekLabel == incoming.weekLabel && normalizeMatch(ex.title) == normalizeMatch(incoming.title)) ||
+                            (incoming.weekNum != null && extractWeekNum(ex.weekLabel) == incoming.weekNum &&
+                                (ex.examStatus != CourseTopicStatus.EXCLUDED && incoming.examStatus != CourseTopicStatus.EXCLUDED))
+                    }
+                    return if (matched != null && matched.userLocked) matched.examStatus else incoming.examStatus
+                }
+                val taughtByBook = plan.topics
+                    .filter { effectiveStatus(it) == CourseTopicStatus.EXAMINABLE }
+                    .flatMap { it.sources }
+                    .groupBy { it.bookId }
+                    .mapValues { (_, links) -> links.map { it.startPage..it.endPage } }
+                val untaughtOrExcluded = plan.topics
+                    .filter { effectiveStatus(it) in setOf(CourseTopicStatus.EXCLUDED, CourseTopicStatus.PENDING_MATERIALS) }
+                    .flatMap { it.sources }
+                    .filter { link ->
+                        val taught = taughtByBook[link.bookId].orEmpty()
+                        taught.none { link.startPage in it && link.endPage in it }
+                    }
+                CourseExamPoints.build(db, courseId, loadMaterials(db, courseId), untaughtOrExcluded)
             } else emptyList()
             for (incoming in plan.topics + points) {
                 val matched = incoming.topicId?.let(existingById::get) ?: existingTopics.firstOrNull { ex ->

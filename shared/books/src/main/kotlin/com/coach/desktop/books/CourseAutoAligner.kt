@@ -20,14 +20,29 @@ import java.sql.Connection
  */
 internal object CourseAutoAligner {
     private val syllabusWeekLineRegex = Regex(
-        """(?im)^(?:\s*[-*#•]*\s*)?(?:week|wk)\s*(\d{1,2})\s*[:：\-—.]\s*(.{2,120})$|^第\s*(\d{1,2})\s*周\s*[:：\-—.]\s*(.{2,120})$""",
+        """(?i)^(?:\s*[-*#•|]*\s*)(?:weeks?|wk|w)\s*(\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?(?:\s*[:：\-—.|]\s*(.*)|\s{2,}(.+)|\s+([A-Z\u4e00-\u9fff].{2,})|\s*)$""",
     )
-    private val chapterTokenRegex = Regex("""(?i)\b(?:ch(?:apter)?\.?|第)\s*(\d{1,2})\b""")
+    private val syllabusZhWeekLineRegex = Regex(
+        """^(?:\s*[-*#•|]*\s*)第\s*(\d{1,2})(?:\s*[-–—到至]\s*(\d{1,2}))?\s*周(?:\s*[:：\-—.|]\s*(.*)|\s+(.+)|\s*)$""",
+    )
+    private val chapterTokenRegex = Regex("""(?i)\b(?:ch(?:apter)?s?\.?|第)\s*(\d{1,2})\b""")
+    private val leadingChapterNumRegex = Regex("""^(?:chapter\s+|第\s*)?(\d{1,2})(?:[\s.:：—\-]+|章)""", RegexOption.IGNORE_CASE)
+    private val chapterSequenceRegex = Regex(
+        """(?i)(?:\b(?:chapters?|chs?\.?)\s*|第\s*)(\d{1,2}(?:\s*(?:[-–—~到至]|to)\s*\d{1,2})?(?:\s*(?:[,，、&/]|\band\b)\s*\d{1,2}(?:\s*(?:[-–—~到至]|to)\s*\d{1,2})?)*)(?:\s*章)?""",
+    )
     private val chapterHeadingRegex = Regex("""(?i)^chapter\s+\d+|^第\s*[0-9一二三四五六七八九十]+\s*章""")
+    private val sectionHeadingLineRegex = Regex("""^(?:#{2,4}\s+\S.*|\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+\S.*)""")
     private val stopWords = setOf(
-        "week", "lecture", "slides", "tutorial", "solution", "solutions", "key", "chapter",
+        "week", "weeks", "lecture", "lectures", "slides", "slide", "tutorial", "tutorials",
+        "solution", "solutions", "key", "chapter", "chapters", "section", "sections",
         "textbook", "notes", "summary", "review", "course", "handbook", "syllabus", "part",
-        "the", "and", "for", "with", "into", "from", "that", "this", "introduction", "overview",
+        "the", "and", "for", "with", "into", "from", "that", "this", "these", "those",
+        "introduction", "overview", "conclusion", "conclusions", "reading", "readings",
+        "required", "optional", "recommended", "further", "topic", "topics", "module",
+        "unit", "class", "seminar", "workshop", "problem", "problems", "exercise", "exercises",
+        "question", "questions", "answer", "answers", "example", "examples", "case", "study",
+        "model", "models", "theory", "analysis", "empirical", "evidence", "data", "policy",
+        "are", "was", "were", "have", "has", "had", "will", "can", "may", "not", "all", "its",
     )
 
     data class TextbookChapterRange(
@@ -37,7 +52,106 @@ internal object CourseAutoAligner {
         val startPage: Int,
         val endPage: Int,
         val keywords: Set<String>,
+        val chapterNum: Int? = null,
+        val sectionTitles: List<String> = emptyList(),
+        val sectionKeywords: Set<String> = emptySet(),
     )
+
+    private data class SyllabusWeekBlock(
+        val title: String,
+        val fullText: String,
+    )
+
+    internal fun extractChapterNumbers(text: String): Set<Int> {
+        if (text.isBlank()) return emptySet()
+        val out = linkedSetOf<Int>()
+        val rangeSep = Regex("""\s*(?:[-–—~到至]|(?i)\bto\b)\s*""")
+        val itemSep = Regex("""\s*(?:[,，、&/]|(?i)\band\b)\s*""")
+        for (match in chapterSequenceRegex.findAll(text)) {
+            val expr = match.groupValues[1]
+            for (part in expr.split(itemSep)) {
+                val trimmed = part.trim()
+                if (trimmed.isEmpty()) continue
+                val bounds = trimmed.split(rangeSep).mapNotNull { it.trim().toIntOrNull() }
+                if (bounds.size == 2) {
+                    val start = bounds[0]
+                    val end = bounds[1]
+                    if (start in 1..60 && end in start..60 && (end - start) <= 15) {
+                        for (n in start..end) out += n
+                    }
+                } else if (bounds.size == 1 && bounds[0] in 1..60) {
+                    out += bounds[0]
+                }
+            }
+        }
+        return out
+    }
+
+    private fun parseSyllabusWeeks(pages: List<BookPage>): Pair<Map<Int, SyllabusWeekBlock>, Set<String>> {
+        val titlesByWeek = LinkedHashMap<Int, String>()
+        val linesByWeek = LinkedHashMap<Int, MutableList<String>>()
+        val excludedHints = mutableSetOf<String>()
+        var activeWeeks: List<Int> = emptyList()
+        var activeLineBudget = 0
+        for (line in pages.flatMap { it.text.lines() }) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                if (activeLineBudget > 0) activeLineBudget = (activeLineBudget - 2).coerceAtLeast(0)
+                continue
+            }
+            val lower = trimmed.lowercase()
+            if ("not examinable" in lower || "excluded" in lower || "不考" in trimmed || "跳过" in trimmed) {
+                excludedHints += keywordsOf(trimmed)
+            }
+            val enMatch = syllabusWeekLineRegex.matchEntire(trimmed)
+            val zhMatch = if (enMatch == null) syllabusZhWeekLineRegex.matchEntire(trimmed) else null
+            if (enMatch != null || zhMatch != null) {
+                val m = enMatch ?: zhMatch!!
+                val startWk = m.groupValues[1].toIntOrNull()
+                val endWk = m.groupValues[2].toIntOrNull() ?: startWk
+                val rest = (3 until m.groupValues.size)
+                    .map { m.groupValues[it].trim() }
+                    .firstOrNull { it.isNotEmpty() }
+                    .orEmpty()
+                if (startWk != null && startWk in 1..20 && endWk != null && endWk in startWk..20 && (endWk - startWk) <= 4) {
+                    activeWeeks = (startWk..endWk).toList()
+                    activeLineBudget = 6
+                    for (wk in activeWeeks) {
+                        if (rest.isNotEmpty() && wk !in titlesByWeek) {
+                            titlesByWeek[wk] = rest.take(90)
+                        }
+                        if (rest.isNotEmpty()) {
+                            linesByWeek.getOrPut(wk) { mutableListOf() }.add(rest)
+                        } else {
+                            linesByWeek.getOrPut(wk) { mutableListOf() }
+                        }
+                    }
+                    continue
+                }
+            }
+            if (activeWeeks.isNotEmpty() && activeLineBudget > 0) {
+                // Stop absorbing lines if a major unrelated section heading starts.
+                if (Regex("""(?i)^(?:assessment|grading|office\s+hours|plagiarism|academic\s+integrity|bibliography)\b""").containsMatchIn(trimmed)) {
+                    activeWeeks = emptyList()
+                    activeLineBudget = 0
+                    continue
+                }
+                for (wk in activeWeeks) {
+                    if (wk !in titlesByWeek && trimmed.length >= 3) {
+                        titlesByWeek[wk] = trimmed.take(90)
+                    }
+                    linesByWeek.getOrPut(wk) { mutableListOf() }.add(trimmed)
+                }
+                activeLineBudget--
+            }
+        }
+        val blocks = LinkedHashMap<Int, SyllabusWeekBlock>()
+        for ((wk, collected) in linesByWeek) {
+            val title = titlesByWeek[wk]?.takeIf { it.isNotBlank() } ?: continue
+            blocks[wk] = SyllabusWeekBlock(title = title, fullText = collected.joinToString("\n").take(900))
+        }
+        return blocks to excludedHints
+    }
 
     fun alignLocally(db: Connection, courseId: String): CourseDetailSnapshot {
         val current = CourseStore.loadCourseDetail(db, courseId)
@@ -58,46 +172,60 @@ internal object CourseAutoAligner {
                     sourceFilename = mat.sourceFilename,
                     pageCount = mat.pageCount,
                 )
-                val inferredWeek = mat.weekNum ?: CourseMaterialRole.inferWeekNumber(mat.title, mat.sourceFilename, preview)
+                val inferredWeek = if (inferredRole in setOf(CourseMaterialRole.SYLLABUS, CourseMaterialRole.CORE_TEXTBOOK)) {
+                    null
+                } else {
+                    mat.weekNum ?: CourseMaterialRole.inferWeekNumber(mat.title, mat.sourceFilename, preview)
+                }
                 CourseMaterialLinkSpec(mat.bookId, inferredRole, inferredWeek, false, idx)
             }
         }
         val specByBook = resolvedMaterials.associateBy { it.bookId }
 
-        // Parse syllabus week outlines when available
-        val syllabusTitlesByWeek = LinkedHashMap<Int, String>()
+        // Parse syllabus week outlines (single-line and multi-line table blocks) when available
+        val syllabusByWeek = LinkedHashMap<Int, SyllabusWeekBlock>()
         val excludedHints = mutableSetOf<String>()
         for (mat in current.materials) {
             val effRole = specByBook[mat.bookId]?.role ?: mat.role
             if (effRole != CourseMaterialRole.SYLLABUS) continue
-            val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = 30)
-            for (line in pages.flatMap { it.text.lines() }) {
-                val lower = line.lowercase()
-                if ("not examinable" in lower || "excluded" in lower || "不考" in line || "跳过" in line) {
-                    excludedHints += keywordsOf(line)
-                }
-                val m = syllabusWeekLineRegex.find(line) ?: continue
-                val wk = m.groupValues[1].toIntOrNull() ?: m.groupValues[3].toIntOrNull() ?: continue
-                val title = (m.groupValues[2].ifBlank { m.groupValues[4] }).trim().take(90)
-                if (wk in 1..20 && title.isNotEmpty() && wk !in syllabusTitlesByWeek) {
-                    syllabusTitlesByWeek[wk] = title
-                }
+            val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = 40)
+            val (parsedWeeks, hints) = parseSyllabusWeeks(pages)
+            excludedHints += hints
+            for ((wk, block) in parsedWeeks) {
+                syllabusByWeek.putIfAbsent(wk, block)
             }
         }
 
-        val textbookChapters = current.materials
+        val textbookMaterials = current.materials
             .filter { (specByBook[it.bookId]?.role ?: it.role) == CourseMaterialRole.CORE_TEXTBOOK }
-            .flatMap { loadTextbookChapters(db, it) }
+        val textbookChapters = textbookMaterials.flatMap { loadTextbookChapters(db, it) }
         val firstChapterByBook = textbookChapters.distinctBy { it.bookId }.associateBy { it.bookId }
 
-        val coveredChapterTitles = mutableSetOf<String>()
+        // Words appearing in the course/textbook title or in >35% of chapters are too generic to match chapters alone.
+        val genericCourseWords = buildSet {
+            addAll(keywordsOf(current.title))
+            textbookMaterials.forEach { addAll(keywordsOf(it.title)) }
+            if (textbookChapters.size >= 4) {
+                val docFreq = HashMap<String, Int>()
+                for (ch in textbookChapters) {
+                    for (kw in ch.keywords) docFreq[kw] = (docFreq[kw] ?: 0) + 1
+                }
+                val threshold = (textbookChapters.size * 35) / 100
+                docFreq.forEach { (kw, count) -> if (count > threshold && count >= 3) add(kw) }
+            }
+        }
+
+        val coveredChapterKeys = mutableSetOf<Triple<String, Int, String>>()
         val weeksWithMaterials = resolvedMaterials.mapNotNull { it.weekNum }.toSortedSet()
-        val allWeeks = (weeksWithMaterials + syllabusTitlesByWeek.keys).toSortedSet()
+        val allWeeks = (weeksWithMaterials + syllabusByWeek.keys).toSortedSet()
 
         val topics = mutableListOf<CourseTopicPlan>()
         for (wk in allWeeks) {
-            val matsForWeek = current.materials.filter { specByBook[it.bookId]?.weekNum == wk }
-                .sortedBy { (specByBook[it.bookId]?.role ?: it.role).displayOrder }
+            val matsForWeek = current.materials.filter {
+                val spec = specByBook[it.bookId]
+                val role = spec?.role ?: it.role
+                spec?.weekNum == wk && (it.userLocked || role !in setOf(CourseMaterialRole.SYLLABUS, CourseMaterialRole.CORE_TEXTBOOK))
+            }.sortedBy { (specByBook[it.bookId]?.role ?: it.role).displayOrder }
             val hasPrimaryTeachingMaterial = matsForWeek.any {
                 val r = specByBook[it.bookId]?.role ?: it.role
                 r in setOf(
@@ -107,20 +235,63 @@ internal object CourseAutoAligner {
                     CourseMaterialRole.TRANSCRIPT,
                     CourseMaterialRole.REQUIRED_READING,
                     CourseMaterialRole.USER_NOTES,
+                    CourseMaterialRole.HANDOUT,
                 )
             }
-            val weekTitle = syllabusTitlesByWeek[wk]
+            val syllabusBlock = syllabusByWeek[wk]
+            val weekTitle = syllabusBlock?.title
                 ?: matsForWeek.firstOrNull { (specByBook[it.bookId]?.role ?: it.role) == CourseMaterialRole.LECTURE_SLIDES }
                     ?.let { cleanTopicTitle(it.title, wk) }
                 ?: matsForWeek.firstOrNull()?.let { cleanTopicTitle(it.title, wk) }
                 ?: "第 $wk 周专题"
 
-            val weekKeywords = buildSet {
-                addAll(keywordsOf(weekTitle))
-                for (m in matsForWeek) {
-                    addAll(keywordsOf(m.title))
-                    addAll(keywordsOf(previewByBook[m.bookId].orEmpty().take(500)))
+            val weekExplicitChapters = linkedSetOf<Int>()
+            val weekHeadingLines = mutableListOf<String>()
+            val weekHeadingNorms = mutableListOf<String>()
+            if (syllabusBlock != null) {
+                weekExplicitChapters += extractChapterNumbers(syllabusBlock.fullText)
+                weekHeadingLines += syllabusBlock.fullText.lines().map(String::trim).filter(String::isNotEmpty)
+            } else {
+                weekExplicitChapters += extractChapterNumbers(weekTitle)
+                weekHeadingLines += weekTitle
+            }
+
+            val weekKeywords = linkedSetOf<String>()
+            weekKeywords += keywordsOf(syllabusBlock?.fullText ?: weekTitle)
+            for (m in matsForWeek) {
+                val effRole = specByBook[m.bookId]?.role ?: m.role
+                weekKeywords += keywordsOf(m.title)
+                weekHeadingLines += m.title
+                weekExplicitChapters += extractChapterNumbers(m.title)
+                if (effRole != CourseMaterialRole.CORE_TEXTBOOK && effRole != CourseMaterialRole.SYLLABUS) {
+                    val matPages = CourseStore.loadPagesForBook(db, m.bookId, maxPages = 120)
+                    for (p in matPages) {
+                        val cleanText = if (effRole == CourseMaterialRole.USER_NOTES) {
+                            CourseClientGates.sanitizeUserNote(p.text).cleanText
+                        } else {
+                            p.text
+                        }
+                        weekExplicitChapters += extractChapterNumbers(cleanText)
+                        val nonEmpty = cleanText.lineSequence().map(String::trim).filter {
+                            it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) && !ExplainClassifier.isPageNumber(it)
+                        }.take(4).toList()
+                        for (headingLine in nonEmpty) {
+                            weekHeadingLines += headingLine
+                            weekKeywords += keywordsOf(headingLine)
+                        }
+                    }
+                } else {
+                    weekKeywords += keywordsOf(previewByBook[m.bookId].orEmpty().take(500))
                 }
+            }
+            for (h in weekHeadingLines) weekHeadingNorms += CourseExamPoints.normalize(h)
+            val weekHeadingTextNorm = weekHeadingNorms.joinToString("\n")
+            val weekHeadingKeywordSets = weekHeadingLines.map { keywordsOf(it) - genericCourseWords }.filter { it.isNotEmpty() }
+
+            val status = if (hasPrimaryTeachingMaterial || matsForWeek.isNotEmpty()) {
+                CourseTopicStatus.EXAMINABLE
+            } else {
+                CourseTopicStatus.PENDING_MATERIALS
             }
 
             val links = mutableListOf<CourseTopicLinkPlan>()
@@ -136,24 +307,33 @@ internal object CourseAutoAligner {
                 )
             }
             for (ch in textbookChapters) {
-                val overlaps = ch.keywords.count { it in weekKeywords }
-                val sameChapterNum = chapterNumberOf(weekTitle) != null && chapterNumberOf(weekTitle) == chapterNumberOf(ch.title)
-                if ((overlaps >= 2 || sameChapterNum) && ch.keywords.none { it in excludedHints && overlaps < 2 }) {
-                    coveredChapterTitles += ch.title
+                val specificTitleKw = (ch.keywords - genericCourseWords).ifEmpty { ch.keywords }
+                val overlaps = specificTitleKw.count { it in weekKeywords }
+                val sameChapterNum = ch.chapterNum != null && ch.chapterNum in weekExplicitChapters
+                val sectionMatched = ch.sectionTitles.any { secTitle ->
+                    val stripped = secTitle.replace(Regex("""^\d{1,2}(?:\.\d{1,2})+\s+"""), "").trim()
+                    val normSec = CourseExamPoints.normalize(stripped)
+                    if (normSec.length >= 8 && normSec in weekHeadingTextNorm) return@any true
+                    val secSpecific = keywordsOf(stripped) - genericCourseWords
+                    if (secSpecific.size >= 2) {
+                        val lineHit = weekHeadingKeywordSets.any { lineKw -> secSpecific.count { it in lineKw } >= 2 }
+                        if (lineHit) return@any true
+                        if (secSpecific.size >= 3 && secSpecific.count { it in weekKeywords } >= 3) return@any true
+                    }
+                    false
+                }
+                val excludedByHint = !sameChapterNum && ch.keywords.any { it in excludedHints } && overlaps < 2 && !sectionMatched
+                if ((sameChapterNum || overlaps >= 2 || sectionMatched) && !excludedByHint) {
+                    coveredChapterKeys += Triple(ch.bookId, ch.startPage, ch.title)
                     links += CourseTopicLinkPlan(
                         bookId = ch.bookId,
                         tocNodeId = ch.tocNodeId,
                         startPage = ch.startPage,
                         endPage = ch.endPage,
                         role = CourseMaterialRole.CORE_TEXTBOOK,
-                        scopeNote = ch.title,
+                        scopeNote = if (status == CourseTopicStatus.PENDING_MATERIALS) "尚未上课（预习） · ${ch.title}" else ch.title,
                     )
                 }
-            }
-            val status = if (hasPrimaryTeachingMaterial || matsForWeek.isNotEmpty()) {
-                CourseTopicStatus.EXAMINABLE
-            } else {
-                CourseTopicStatus.PENDING_MATERIALS
             }
             topics += CourseTopicPlan(
                 weekLabel = CourseStore.formatWeekLabel(wk),
@@ -193,11 +373,11 @@ internal object CourseAutoAligner {
         // "已收到考纲，暂按整本书安排".
         val hasScopeNarrowing = current.isExam &&
             hasSyllabusScope(resolvedMaterials.map { it.role }) &&
-            coveredChapterTitles.isNotEmpty()
+            coveredChapterKeys.isNotEmpty()
         if (hasScopeNarrowing) {
             var excludedOrd = 1000
             for (ch in textbookChapters) {
-                if (ch.title in coveredChapterTitles) continue
+                if (Triple(ch.bookId, ch.startPage, ch.title) in coveredChapterKeys) continue
                 topics += CourseTopicPlan(
                     weekLabel = "本课不考",
                     weekNum = null,
@@ -227,7 +407,7 @@ internal object CourseAutoAligner {
                     ?.takeIf { CourseStore.isChapterTopicLabel(topic.weekLabel) && it.role == CourseMaterialRole.CORE_TEXTBOOK }
                 source?.tocNodeId?.let { (source.bookId to it) to topic.topicId }
             }.toMap()
-            val uncoveredChapters = textbookChapters.filter { it.title !in coveredChapterTitles }
+            val uncoveredChapters = textbookChapters.filter { Triple(it.bookId, it.startPage, it.title) !in coveredChapterKeys }
             if (uncoveredChapters.isNotEmpty()) {
                 uncoveredChapters.forEachIndexed { idx, ch ->
                     val chapterOrder = chapterPosByKey[Triple(ch.bookId, ch.startPage, ch.title)] ?: (idx + 1)
@@ -396,21 +576,61 @@ internal object CourseAutoAligner {
     }
 
     private fun loadTextbookChapters(db: Connection, mat: CourseMaterialEntry): List<TextbookChapterRange> {
-        val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = mat.pageCount)
+        val pages = CourseStore.loadPagesForBook(db, mat.bookId, maxPages = mat.pageCount.coerceAtLeast(1))
         if (pages.isEmpty()) return emptyList()
         val structure = BookStructureStore.loadStructure(db, mat.bookId, pages)
         val nodes = structure?.tocNodes ?: BookTocStore.loadTocNodes(db, mat.bookId)
         val bodyStart = BookBoundaries.bodyStart(pages, structure, CourseStore.loadCorrectedBodyPage(db, mat.bookId))
         val opening = BookBoundaries.openingNode(nodes)
-        val fromToc = nodes.mapNotNull { node ->
+        val bodyNodes = nodes.filter { node ->
             val title = node.title.trim()
-            if (title.isBlank() || node.kind == TocNodeKind.FRONT_MATTER || node.kind == TocNodeKind.PART ||
-                (node.level > 2 && node.id != opening?.id) ||
-                (opening != null && node.ordinal < opening.ordinal) ||
-                node.endPage < bodyStart.importPage
-            ) return@mapNotNull null
+            title.isNotBlank() &&
+                node.kind != TocNodeKind.FRONT_MATTER &&
+                node.kind != TocNodeKind.BACK_MATTER &&
+                node.kind != TocNodeKind.PART &&
+                (opening == null || node.ordinal >= opening.ordinal) &&
+                node.endPage >= bodyStart.importPage
+        }
+        val hasExplicitChapters = bodyNodes.any { it.kind == TocNodeKind.CHAPTER }
+        val chapterNodes = if (hasExplicitChapters) {
+            bodyNodes.filter { it.kind == TocNodeKind.CHAPTER || it.id == opening?.id }
+        } else {
+            bodyNodes.filter { it.level <= 2 || it.id == opening?.id }
+        }
+        val parentById = nodes.associate { it.id to it.parentId }
+        fun descendsFrom(node: BookTocNode, ancestorId: String): Boolean {
+            var cur = node.parentId
+            var guard = 0
+            while (cur != null && guard++ < 8) {
+                if (cur == ancestorId) return true
+                cur = parentById[cur]
+            }
+            return false
+        }
+        val fromToc = chapterNodes.map { node ->
+            val title = node.title.trim()
             val start = maxOf(node.startPage, bodyStart.importPage)
-            TextbookChapterRange(mat.bookId, node.id, title, start, node.endPage.coerceAtLeast(start), keywordsOf(title))
+            val end = node.endPage.coerceAtLeast(start)
+            val childSections = bodyNodes.filter { other ->
+                other.id != node.id &&
+                    other.kind in setOf(TocNodeKind.SECTION, TocNodeKind.SUBSECTION) &&
+                    (descendsFrom(other, node.id) || (other.startPage in start..end && other.level > node.level))
+            }.map { it.title.trim() }.distinct()
+            val chNum = node.numberLabel?.trim()?.toIntOrNull()
+                ?: chapterNumberOf(title)
+                ?: leadingChapterNum(title)
+            val secKeywords = childSections.flatMap { keywordsOf(it) }.toSet()
+            TextbookChapterRange(
+                bookId = mat.bookId,
+                tocNodeId = node.id,
+                title = title,
+                startPage = start,
+                endPage = end,
+                keywords = keywordsOf(title),
+                chapterNum = chNum,
+                sectionTitles = childSections,
+                sectionKeywords = secKeywords,
+            )
         }
         if (fromToc.isNotEmpty()) return fromToc
 
@@ -418,14 +638,23 @@ internal object CourseAutoAligner {
             .filter { it.number >= bodyStart.importPage }
             .take(800)
             .filter { structure == null || structure.pageRole(it.number) == BookPageRole.BODY }
+            .filter { !CourseExamPoints.isTocOrIndexPage(it.text) }
             .mapNotNull { page ->
                 page.text.lineSequence().map(String::trim).firstOrNull { line ->
                     line.length in 4..80 && (line.startsWith("# ") || chapterHeadingRegex.containsMatchIn(line))
                 }?.let { page.number to it.removePrefix("# ").trim() }
             }.toList()
             .ifEmpty { listOf(bodyStart.importPage to mat.title) }
+        val pagesByNum = pages.associateBy { it.number }
         return starts.mapIndexed { i, (startPage, chTitle) ->
             val endPage = (starts.getOrNull(i + 1)?.first?.minus(1) ?: mat.pageCount).coerceAtLeast(startPage)
+            val sectionTitles = (startPage..endPage).flatMap { pNum ->
+                pagesByNum[pNum]?.text?.lineSequence().orEmpty()
+                    .map(String::trim)
+                    .filter { it.length in 4..90 && sectionHeadingLineRegex.matches(it) }
+                    .map { it.trimStart('#', ' ') }
+                    .toList()
+            }.distinct()
             TextbookChapterRange(
                 bookId = mat.bookId,
                 tocNodeId = null,
@@ -433,6 +662,9 @@ internal object CourseAutoAligner {
                 startPage = startPage,
                 endPage = endPage,
                 keywords = keywordsOf(chTitle),
+                chapterNum = chapterNumberOf(chTitle) ?: leadingChapterNum(chTitle),
+                sectionTitles = sectionTitles,
+                sectionKeywords = sectionTitles.flatMap { keywordsOf(it) }.toSet(),
             )
         }
     }
@@ -447,7 +679,10 @@ internal object CourseAutoAligner {
     }
 
     private fun chapterNumberOf(text: String): Int? =
-        chapterTokenRegex.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        chapterTokenRegex.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..60 }
+
+    private fun leadingChapterNum(text: String): Int? =
+        leadingChapterNumRegex.find(text.trim())?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it in 1..60 }
 
     private fun keywordsOf(text: String): Set<String> = buildSet {
         Regex("""[a-z0-9]{3,}|[\u4e00-\u9fff]{2,6}""").findAll(text.lowercase()).forEach { m ->
@@ -572,29 +807,75 @@ internal object CourseAutoAligner {
         topic: CourseTopicEntry,
         pagesByBook: Map<String, List<BookPage>>,
     ): JsonObject {
-        val blocks = buildJsonArray {
-            for (src in topic.sources) {
-                val pages = pagesByBook[src.bookId].orEmpty()
-                    .filter { it.number in src.startPage..src.endPage }
-                for (p in pages.take(20)) {
+        val cleanTextbookByBook = HashMap<String, Map<Int, String>>()
+        val candidateBlocks = mutableListOf<Triple<CourseTopicSourceLink, Int, String>>()
+        for (src in topic.sources) {
+            val allPages = pagesByBook[src.bookId].orEmpty()
+            val windowPages = allPages.filter { it.number in src.startPage..src.endPage }
+            if (src.role == CourseMaterialRole.CORE_TEXTBOOK) {
+                val cleaned = cleanTextbookByBook.getOrPut(src.bookId) {
+                    CourseExamPoints.cleanTextbookPagesByNumber(allPages)
+                }
+                for (p in windowPages.take(20)) {
+                    val text = cleaned[p.number].orEmpty()
+                    if (text.isBlank()) continue
+                    candidateBlocks += Triple(src, p.number, text)
+                }
+            } else {
+                for (p in windowPages.take(20)) {
                     val raw = p.text
                     val text = if (src.role == CourseMaterialRole.USER_NOTES) {
                         CourseClientGates.sanitizeUserNote(raw).cleanText
                     } else {
                         raw
                     }
-                    if (text.isBlank()) continue
-                    add(buildJsonObject {
-                        put("blockId", "${src.bookId}:p${p.number}:0")
-                        put("bookId", src.bookId)
-                        put("bookTitle", src.bookTitle)
-                        put("role", src.role.wire)
-                        put("authorityRank", src.authorityRank)
-                        put("page", p.number)
-                        put("startUtf16", 0)
-                        put("text", text.take(4500))
-                    })
+                    if (text.isBlank() || CourseExamPoints.isTocOrIndexPage(text)) continue
+                    candidateBlocks += Triple(src, p.number, text)
                 }
+            }
+        }
+
+        // For exam points matching dozens of pages, prioritize pages where the topic is defined or titled,
+        // and keep the prompt focused instead of sending hundreds of loosely related pages.
+        val selected = if (topic.weekLabel == CourseExamPoints.LABEL && candidateBlocks.size > 24) {
+            val normTitle = CourseExamPoints.normalize(topic.title)
+            val pattern = if (normTitle.length >= 2) CourseExamPoints.termPattern(normTitle) else null
+            fun score(text: String): Int {
+                val norm = CourseExamPoints.normalize(text)
+                val mentions = if (pattern != null) pattern.findAll(norm).count().coerceAtMost(10) else 0
+                val hasHeadingOrDef = text.lineSequence().map(String::trim).any { line ->
+                    val n = CourseExamPoints.normalize(line)
+                    n.startsWith("$normTitle:") || n.startsWith("$normTitle：") || n.startsWith("# $normTitle") || n == normTitle
+                }
+                return (if (hasHeadingOrDef) 100 else 0) + mentions
+            }
+            val textbookTop = candidateBlocks
+                .filter { it.first.role == CourseMaterialRole.CORE_TEXTBOOK }
+                .sortedByDescending { score(it.third) }
+                .take(20)
+                .sortedWith(compareBy({ it.first.bookId }, { it.second }))
+            val otherTop = candidateBlocks
+                .filter { it.first.role != CourseMaterialRole.CORE_TEXTBOOK }
+                .sortedByDescending { score(it.third) }
+                .take(8)
+                .sortedWith(compareBy({ it.first.authorityRank }, { it.first.bookId }, { it.second }))
+            textbookTop + otherTop
+        } else {
+            candidateBlocks
+        }
+
+        val blocks = buildJsonArray {
+            for ((src, pageNum, text) in selected) {
+                add(buildJsonObject {
+                    put("blockId", "${src.bookId}:p$pageNum:0")
+                    put("bookId", src.bookId)
+                    put("bookTitle", src.bookTitle)
+                    put("role", src.role.wire)
+                    put("authorityRank", src.authorityRank)
+                    put("page", pageNum)
+                    put("startUtf16", 0)
+                    put("text", text.take(4500))
+                })
             }
         }
         return buildJsonObject {

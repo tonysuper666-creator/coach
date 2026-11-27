@@ -24,6 +24,7 @@ internal object CollectionQaRetriever {
     private data class CollectionMaterialMeta(
         val bookId: String,
         val title: String,
+        val sourceFilename: String?,
         val format: String,
         val role: CourseMaterialRole,
         val authorityRank: Int,
@@ -389,9 +390,16 @@ internal object CollectionQaRetriever {
         } else {
             loadCollectionMaterials(db, collectionId, collectionRow.kind)
         }
-        val materials = questionMaterials(collectionMaterials, question, currentBookId.takeIf { isVirtualReadLibrary })
+        val acrossPapers = paperScopePattern.containsMatchIn(question)
+        val materials = questionMaterials(db, collectionMaterials, question, currentBookId.takeIf { isVirtualReadLibrary }, acrossPapers)
         val shortLabelByBookId = materials.associate { it.bookId to it.shortLabel }
         val docLabelByBookId = materials.associate { it.bookId to it.docLabel }
+        if (acrossPapers && materials.isEmpty()) {
+            return RetrievalBundle(
+                collectionRow, emptyList(), emptyMap(), emptyMap(), shortLabelByBookId, docLabelByBookId, emptyList(),
+                blockedBooklistEmptyMessage = "当前材料中没有找到可供对比的论文。",
+            )
+        }
 
         val allowedPagesByBook = HashMap<String, Set<Int>>()
         var focusedBodyStart: Int? = null
@@ -612,7 +620,7 @@ internal object CollectionQaRetriever {
             )
             .map { it.key }
 
-        val isComparison = isMultiBookComparisonQuery(question)
+        val isComparison = acrossPapers || isMultiBookComparisonQuery(question)
         val bestBookScore = bookOrder.firstOrNull()?.let { byBookQueue[it]?.firstOrNull()?.score } ?: 0.0
         val secondBookScore = bookOrder.getOrNull(1)?.let { byBookQueue[it]?.firstOrNull()?.score } ?: 0.0
         val focusedSingleBookMode = collectionRow.kind == CollectionKind.BOOKLIST &&
@@ -734,28 +742,68 @@ internal object CollectionQaRetriever {
     private val currentSourcePattern = Regex("""(?:这本|這本|本文|本书|本書|本篇)|\bthis (?:book|paper|study|source)\b""", RegexOption.IGNORE_CASE)
     private val authorYear = Regex("""(?<![a-z])([a-z]{3,})(?:\s+et al\.?)?[\s(,_-]*((?:19|20)\d{2})(?!\d)""")
     private val titleSeparator = Regex("""[^\p{L}\p{N}]+""")
+    private val paperScopePattern = Regex(
+        """\b(?:(?:across|among|between|compare|contrast|in)\s+(?:(?:the|my|these|those|both|all|two)\s+)*|(?:these|both|multiple|several|other|different)\s+)(?:papers|studies|articles)\b|(?:各篇|几篇|幾篇|多篇|两篇|兩篇|这些|這些|比较|比較|对比|對比)(?:研究)?(?:论文|論文)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val paperHeader = Regex(
+        """(?im)^\s*(?:#{1,3}\s*)?(?:abstract\b|摘\s*要)(?:\s|[:：.—-]|$)|\b(?:arxiv:\s*\d{4}\.\d+|doi\.org/10\.\d{4,9}/)""",
+    )
+    private val paperLabel = Regex("""学术论文|學術論文|\b(?:research paper|journal article|arxiv)\b""", RegexOption.IGNORE_CASE)
 
     private fun questionMaterials(
+        db: Connection,
         materials: List<CollectionMaterialMeta>,
         question: String,
         currentBookId: String?,
+        acrossPapers: Boolean,
     ): List<CollectionMaterialMeta> {
         val lower = question.lowercase()
         val normalized = " " + lower.replace(titleSeparator, " ") + " "
-        val citations = authorYear.findAll(lower).map { it.groupValues.drop(1) }.toSet()
-        val named = materials.filter { mat ->
+        val citations = authorYear.findAll(lower).map { it.groupValues[1] to it.groupValues[2] }.toSet()
+        val unresolved = citations.toMutableSet()
+        val named = materials.filterTo(linkedSetOf()) { mat ->
             val title = mat.title.lowercase()
             val words = title.replace(titleSeparator, " ").trim()
             val chineseTitle = title.any { it in '\u4e00'..'\u9fff' } && title.length >= 2 && title in lower
-            chineseTitle || (words.length >= 3 && " $words " in normalized) ||
-                authorYear.findAll(title).any { it.groupValues.drop(1) in citations }
+            val matched = if (citations.isEmpty()) emptySet() else {
+                listOfNotNull(title, mat.sourceFilename?.lowercase()).flatMap { label ->
+                    authorYear.findAll(label).map { it.groupValues[1] to it.groupValues[2] }
+                }.intersect(citations)
+            }
+            unresolved.removeAll(matched)
+            chineseTitle || (words.length >= 3 && " $words " in normalized) || matched.isNotEmpty()
         }
-        if (named.size >= 2) return named
+        val headers = mutableMapOf<String, String>()
+        fun header(mat: CollectionMaterialMeta) = headers.getOrPut(mat.bookId) {
+            db.prepareStatement("SELECT substr(text, 1, 3000) FROM pages WHERE book=? ORDER BY page LIMIT 1").use { sql ->
+                sql.setString(1, mat.bookId)
+                sql.executeQuery().use { rows -> if (rows.next()) rows.getString(1).orEmpty() else "" }
+            }
+        }
+        // An old import or a renamed download can lack an author-year filename. Match the byline,
+        // rather than treating an incidental reference in the body as the author of the paper.
+        if (unresolved.isNotEmpty()) {
+            for (mat in materials) {
+                val front = header(mat)
+                if (unresolved.none { (author, year) -> year in front && front.contains(author, ignoreCase = true) }) continue
+                val meta = LiteratureMetadata.extract(null, mat.bookId, mat.title, mat.sourceFilename, listOf(front))
+                val authors = meta.author.lowercase()
+                if (unresolved.any { (author, year) -> year == meta.year && containsWholeWord(authors, author) }) named += mat
+            }
+        }
+        if (acrossPapers) {
+            val pool = if (named.size >= 2) named else materials
+            return pool.filter { mat ->
+                paperLabel.containsMatchIn(mat.title) || paperHeader.containsMatchIn(header(mat))
+            }
+        }
+        if (named.size >= 2) return named.toList()
         if (crossSourcePattern.containsMatchIn(question)) return materials
         if (named.isNotEmpty() && currentSourcePattern.containsMatchIn(question) && isMultiBookComparisonQuery(question)) {
             return materials.filter { it in named || it.bookId == currentBookId }
         }
-        if (named.isNotEmpty()) return named
+        if (named.isNotEmpty()) return named.toList()
         return materials.find { it.bookId == currentBookId }?.let(::listOf) ?: materials
     }
 
@@ -1550,7 +1598,7 @@ internal object CollectionQaRetriever {
     ): List<CollectionMaterialMeta> {
         if (!BookSchemaMigration.tableExists(db, "collection_materials")) return emptyList()
         return db.prepareStatement(
-            """SELECT cm.material_id, b.title, b.format, cm.role, cm.authority_rank, cm.week_num
+            """SELECT cm.material_id, b.title, b.format, cm.role, cm.authority_rank, cm.week_num, ${sourceFilenameColumn(db)}
                FROM collection_materials cm
                JOIN books b ON b.id = cm.material_id
                WHERE cm.collection_id=?
@@ -1579,6 +1627,7 @@ internal object CollectionQaRetriever {
                             CollectionMaterialMeta(
                                 bookId = bookId,
                                 title = title,
+                                sourceFilename = rows.getString(7),
                                 format = format,
                                 role = role,
                                 authorityRank = rank,
@@ -1595,7 +1644,7 @@ internal object CollectionQaRetriever {
 
     private fun loadVirtualReadLibraryMaterials(db: Connection): List<CollectionMaterialMeta> {
         if (!BookSchemaMigration.tableExists(db, "books")) return emptyList()
-        return db.prepareStatement("SELECT id, title, format FROM books ORDER BY touched DESC").use { sql ->
+        return db.prepareStatement("SELECT id, title, format, ${sourceFilenameColumn(db)} FROM books b ORDER BY touched DESC").use { sql ->
             sql.executeQuery().use { rows ->
                 buildList {
                     while (rows.next()) {
@@ -1607,6 +1656,7 @@ internal object CollectionQaRetriever {
                             CollectionMaterialMeta(
                                 bookId = bookId,
                                 title = title,
+                                sourceFilename = rows.getString(4),
                                 format = format,
                                 role = CourseMaterialRole.LECTURE_SLIDES,
                                 authorityRank = 2,
@@ -1620,6 +1670,9 @@ internal object CollectionQaRetriever {
             }
         }
     }
+
+    private fun sourceFilenameColumn(db: Connection): String =
+        if ("source_filename" in BookSchemaMigration.tableColumns(db, "books")) "b.source_filename" else "NULL"
 
     private fun loadBooksWithReadActivity(db: Connection, currentBookId: String?): Set<String> {
         val active = HashSet<String>()

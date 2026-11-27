@@ -23,14 +23,22 @@ class CollectionQaRetrievalRankingTest {
         val root = Files.createTempDirectory("coach-qa-paper-scope-")
         try {
             val lib = TextbookLibrary(root.resolve("lib"))
-            fun importPaper(name: String): Textbook {
+            fun importMaterial(name: String, heading: String): Textbook {
                 val file = root.resolve("$name.md")
-                Files.writeString(file, "# $name\nThe teachers compared hand-written quizzes with generated quizzes.")
+                Files.writeString(file, "# $name\n$heading\nThe teachers compared hand-written quizzes with generated quizzes.")
                 return lib.importBook(file).also { lib.saveReadSpot(it.id, 1, 0) }
             }
-            val older = importPaper("Rivers2023-classroom")
-            val newer = importPaper("Rivers2024-teachers")
-            val survey = importPaper("Survey-of-quizzes")
+            val older = importMaterial("Rivers2023-classroom", "Abstract")
+            val newer = importMaterial("Rivers2024-teachers", "Author: Anne Rivers\nYear: 2024\nAbstract")
+            val survey = importMaterial("Survey-of-quizzes", "Abstract")
+            val novel = importMaterial("The Quiz Master", "Chapter One")
+            lib.withCourseDatabase { db ->
+                db.prepareStatement("UPDATE books SET title=? WHERE id=?").use {
+                    it.setString(1, "Classroom Assessment Strategies")
+                    it.setString(2, newer.id)
+                    it.executeUpdate()
+                }
+            }
             fun books(q: String) = CollectionQaRetriever.retrieve(
                 lib, CollectionQaVirtualCollections.READ_LIBRARY_ID, q, newer.id,
             ).blocks.map { it.bookId }.toSet()
@@ -39,6 +47,14 @@ class CollectionQaRetrievalRankingTest {
             assertEquals(setOf(older.id, newer.id), books("Compare quizzes in Rivers 2023 and Rivers 2024."))
             assertEquals(setOf(older.id, newer.id), books("Compare this paper with Rivers et al. (2023) on quizzes."))
             assertEquals(setOf(older.id, newer.id, survey.id), books("Compare quizzes across the papers."))
+            assertEquals(setOf(older.id, newer.id, survey.id, novel.id), books("Compare quizzes across the books."))
+            lib.withCourseDatabase { db ->
+                db.prepareStatement("UPDATE books SET source_filename=NULL WHERE id=?").use {
+                    it.setString(1, newer.id)
+                    it.executeUpdate()
+                }
+            }
+            assertEquals(setOf(older.id, newer.id), books("Compare quizzes in Rivers 2023 and Rivers 2024."))
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -77,6 +93,13 @@ class CollectionQaRetrievalRankingTest {
                 lib.saveReadSpot(book.id, book.pages.size, 0)
             }
             val collection = CollectionQaVirtualCollections.READ_LIBRARY_ID
+            val current = books.getValue("qg-elkins2024-teachers-bloom").id
+            fun comparisonSources(question: String) =
+                CollectionQaRetriever.retrieve(lib, collection, question, current).blocks.map { it.bookId }.toSet()
+            assertEquals(setOf(books.getValue("qg-elkins2023-useful-questions").id, current),
+                comparisonSources("Compare Elkins 2023 and Elkins 2024 on Bloom quizzes"))
+            assertEquals(books.filterKeys { it !in scenePages }.values.map { it.id }.toSet(),
+                comparisonSources("Compare quizzes across the papers"))
             val missedScenes = mutableListOf<String>()
             for ((name, book) in books) {
                 questions.getValue(name).forEachIndexed { index, question ->

@@ -63,8 +63,12 @@ internal object LiteratureQuiz {
     private val comparisonClaim = Regex("""与.{1,16}同样|同样重要|更重要|相比|比起|而非|优于|不如|比.{1,12}更|equally|more important|rather than|in contrast""")
     private val comparisonSource = Regex("""(?i)同样|相比|而非|whereas|unlike|rather than|equally|more important|in contrast|compared with|compared to""")
     private val denial = Regex("""原文(?:并)?没有|并未(?:提及|讨论|论述|说明|记载)|没有这类|没提到|未提及|不存在这类|并无此类|does not (?:mention|discuss)|no such""")
+    private val leadingDenial = Regex("""^(?:原文(?:并)?没有|并未|没有这类|并没有|未提及|没提到|不存在这类|并无此类|does not\b|no such)""")
     private val authorYearPage = Regex("""\([A-Z][\p{L}'\-]+(?:\s+et\s+al\.?)?,\s*(?:1[5-9]\d{2}|20\d{2})\s*[,:;]\s*(?:pp?\.\s*)?\d+""")
     private val cjkYearPage = Regex("""（[^）]{0,40}(?:1[5-9]\d{2}|20\d{2})[^）]{0,20}第\s*\d+\s*页""")
+    private val noteCue = Regex(
+        """(?i)\bon whom see\b|\bsee also\b|\b(?:ibid|op\.?\s*cit|loc\.?\s*cit)\b|^\s*see\s+|\(\s*(?:cf\.?|see)\s+(?-i:[A-Z])|^\s*(?-i:[A-Z])[\p{L}'\-]{2,},\s+(?-i:[A-Z])[^.]{0,80}\b(?:1[5-9]\d{2}|20\d{2})\b""",
+    )
 
     private val metadataStem = Regex(
         """(?i)页眉|页脚|书目|参考文献|版权|jstor|下载于|作者是谁|哪一年|发表于哪|标题是什么|running\s*head|bibliography|page\s*header""",
@@ -88,7 +92,7 @@ internal object LiteratureQuiz {
                         put("questionIndex", index)
                         put("ask", ask)
                         put("question", input.questions[index])
-                        put("because", "该思考题目前通过核验 ${count(first.items, index)} 道，请再写 $ask 道。")
+                        put("because", repairBecause(first, index, ask))
                     })
                 }
             })
@@ -270,9 +274,7 @@ internal object LiteratureQuiz {
     }
 
     private fun select(input: LiteratureInput, indices: List<Int>, excluded: Set<String>): List<GuideExcerpt> {
-        val candidatesByBook = input.allCandidatesByBook.mapValues { (_, excerpts) ->
-            excerpts.filterNot { isFooterCitation(it.anchor.quoteAnchor) }
-        }
+        val candidatesByBook = input.allCandidatesByBook.mapValues { (_, excerpts) -> quizCandidates(excerpts) }
         val groups = indices.distinct().map { index ->
             LiteraturePassages.topAcrossBooksForQuestion(
                 books = input.books,
@@ -432,8 +434,34 @@ internal object LiteratureQuiz {
         return result
     }
 
+    private fun repairBecause(first: QuizVerification, index: Int, ask: Int): String {
+        val reasons = first.failures.filter { it.questionIndex == index }
+            .distinctBy { it.rule to it.detail }
+            .take(6)
+            .joinToString("；") { "${it.rule}：${it.detail}" }
+        return buildString {
+            append("该思考题目前通过核验 ${count(first.items, index)} 道，请再写 $ask 道。")
+            if (reasons.isNotEmpty()) append("上次被拒：").append(reasons).append("。请按这个原因改写，不要重复。")
+        }
+    }
+
+    /** Drop note sentences. A page that is mostly notes drops its remaining fragments too. */
+    private fun quizCandidates(excerpts: List<GuideExcerpt>): List<GuideExcerpt> {
+        val dropPages = excerpts.groupBy { it.book.id to it.anchor.pdfPage }
+            .filter { (_, items) ->
+                val notes = items.count { isFooterCitation(it.anchor.quoteAnchor) }
+                notes >= 3 && notes * 2 >= items.size
+            }.keys
+        return excerpts.filter {
+            (it.book.id to it.anchor.pdfPage) !in dropPages && !isFooterCitation(it.anchor.quoteAnchor)
+        }
+    }
+
     private fun isFooterCitation(quote: String): Boolean =
-        authorYearPage.containsMatchIn(quote) || cjkYearPage.containsMatchIn(quote)
+        authorYearPage.containsMatchIn(quote) || cjkYearPage.containsMatchIn(quote) || noteCue.containsMatchIn(quote)
+
+    private fun firstClause(why: String) =
+        why.trim().split(Regex("[。！？；.!?]")).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
 
     private fun unsupportedClaim(text: String, why: String, quotes: List<String>): Boolean {
         val claim = "$text $why"
@@ -449,6 +477,7 @@ internal object LiteratureQuiz {
     }
 
     private fun contradictsQuote(optionText: String, why: String, quotes: List<String>): Boolean {
+        if (leadingDenial.containsMatchIn(firstClause(why))) return true
         if (!denial.containsMatchIn(why)) return false
         val quoteTokens = quotes.flatMap { LiteraturePassages.tokens(it) }.toSet()
         return LiteraturePassages.tokens(optionText).count { it in quoteTokens } >= 2

@@ -145,7 +145,11 @@ class LiteratureQuizTest {
         val stem = "关于样地植物，哪一项更贴近正文记录？"
         val allowed = LiteratureQuiz.verify(
             pool,
-            choice(stem, wrongText = "材料只提到收藏策略。", wrongWhy = "原文没有提及这类论述。"),
+            choice(
+                stem,
+                wrongText = "材料只提到收藏策略。",
+                wrongWhy = "正文记录的是样地开花植物。原文没有提及收藏策略。",
+            ),
             ocr,
         )
         assertTrue(allowed.failures.isEmpty(), allowed.failures.joinToString { it.rule })
@@ -201,35 +205,88 @@ class LiteratureQuizTest {
             pageTextOcr(),
         )
         assertEquals("contradicts_source", contradictory.failures.single().rule)
-        val absent = LiteratureQuiz.verify(
+        val english = LiteratureQuiz.verify(
             listOf(excerpt("Plot one contained flowering plants during the survey.")),
-            choice(stem, wrongText = "按后来博物馆的标准。", wrongWhy = "原文没有这类论述。"),
+            choice(stem, wrongText = "以后来博物馆的分类方式为标准。", wrongWhy = "原文没有以后来博物馆为标准的论述。"),
             pageTextOcr(),
         )
-        assertTrue(absent.failures.isEmpty(), absent.failures.joinToString { "${it.rule}:${it.detail}" })
+        assertEquals("contradicts_source", english.failures.single().rule)
+        val bareWei = LiteratureQuiz.verify(
+            listOf(excerpt("Plot one contained flowering plants during the survey.")),
+            choice(stem, wrongWhy = "并未讨论后来的博物馆标准。"),
+            pageTextOcr(),
+        )
+        assertEquals("contradicts_source", bareWei.failures.single().rule)
+        val restated = LiteratureQuiz.verify(
+            listOf(excerpt("Plot one contained flowering plants during the survey.")),
+            choice(
+                stem,
+                wrongText = "按后来博物馆的标准。",
+                wrongWhy = "正文记录的是样地里的开花植物。原文没有以后来博物馆为标准的论述。",
+            ),
+            pageTextOcr(),
+        )
+        assertTrue(restated.failures.isEmpty(), restated.failures.joinToString { "${it.rule}:${it.detail}" })
+    }
+
+    @Test fun repairBecauseNamesWhyThePreviousItemWasRejected() {
+        val input = handInput()
+        val request = LiteratureQuiz.request(input)
+        val tooLong = LiteratureQuiz.verify(
+            request.pool,
+            choice(correctText = "甲".repeat(87)),
+            pageTextOcr(),
+        )
+        assertEquals("option_length", tooLong.failures.single().rule)
+        val repair = assertNotNull(LiteratureQuiz.repairRequest(input, tooLong))
+        val slots = repair.json.getValue("repair").jsonObject.getValue("slots").jsonArray.map { it.jsonObject }
+        val rejected = slots.first { it.getValue("questionIndex").jsonPrimitive.int == 0 }
+            .getValue("because").jsonPrimitive.content
+        assertTrue("option_length" in rejected && "80" in rejected && "上次被拒" in rejected, rejected)
+        val other = slots.first { it.getValue("questionIndex").jsonPrimitive.int == 1 }
+            .getValue("because").jsonPrimitive.content
+        assertTrue("上次被拒" !in other, other)
     }
 
     @Test fun footerNotesStayOutOfThePoolAndFailVerification() {
         val englishNote = "Earlier catalogues recorded the same plants (Hunter, 1989, p. 21)."
         val chineseNote = "编目保存需要继续花钱，这是对将来的一项投资（亨特，1989 年第 21 页）。"
+        val onWhomSee = "Several apprentices learned the same beds (on whom see Hunter, The Gardeners, 1989)."
+        val seeAlso = "See also the later catalogue of the same plants."
+        val seeLead = "See Hunter for the earlier list of the same beds."
+        val seeDiscussion = "See the discussion in the earlier estate papers."
+        val bibliographyFragment = "Hunter discusses those plants in the earlier catalogue."
         val body = "Plot one contained flowering plants during the survey."
         val books = listOf(
-            regionBook("paper-a", listOf(body, englishNote, chineseNote)),
-            regionBook("paper-b", listOf("Sample two showed faster growth under the shade treatment.")),
+            regionBook("paper-a", listOf(
+                body,
+                "Sample four showed faster growth under the open sky.",
+                "Plot five recorded flowering stems across the field.",
+                "Sample six showed steady growth during the dry season.",
+                englishNote,
+                chineseNote,
+                onWhomSee,
+            )),
+            regionBook("paper-b", listOf(seeAlso, seeLead, seeDiscussion, bibliographyFragment)),
             regionBook("paper-c", listOf("Plot three recorded flowering stems across the open field.")),
         )
         val extracted = books.flatMap { LiteraturePassages.extractCandidates(it) }.map { it.anchor.quoteAnchor }
         assertTrue(extracted.any { "(Hunter, 1989, p. 21)" in it }, extracted.joinToString("\n"))
         assertTrue(extracted.any { "第 21 页" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.any { "on whom see" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.any { "See also" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.any { "earlier catalogue" in it }, extracted.joinToString("\n"))
         val input = LiteratureInput(books, questions)
         val pool = LiteratureQuiz.request(input).pool.map { it.anchor.quoteAnchor }
-        assertTrue(pool.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it }, pool.joinToString("\n"))
+        assertTrue(pool.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it || "on whom see" in it || "See also" in it || "earlier catalogue" in it }, pool.joinToString("\n"))
         assertTrue(pool.any { "flowering plants" in it }, pool.joinToString("\n"))
         val ocr = pageTextOcr()
         val cited = LiteratureQuiz.verify(listOf(excerpt(englishNote)), choice(), ocr)
         assertEquals("footer_note", cited.failures.single().rule)
         val citedChinese = LiteratureQuiz.verify(listOf(excerpt(chineseNote)), choice(), ocr)
         assertEquals("footer_note", citedChinese.failures.single().rule)
+        val citedSee = LiteratureQuiz.verify(listOf(excerpt(onWhomSee)), choice(), ocr)
+        assertEquals("footer_note", citedSee.failures.single().rule)
     }
 
     private fun handInput(): LiteratureInput = LiteratureInput(

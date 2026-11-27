@@ -74,6 +74,8 @@ class LiteratureQuizServiceTest {
             assertTrue(system.contains("items") && system.contains("stem"), system)
             assertTrue("不要返回 repairs" in system && "不要叫 question" in system, system)
             assertTrue("页脚" in system && "每个判断" in system && "相反" in system, system)
+            assertTrue("8 到 180" in system && "2 到 80" in system && "4 到 160" in system, system)
+            assertTrue("上次为什么被拒" in system && "原文没有" in system, system)
             assertTrue(user.contains("replyShape") && user.contains("stem"), user)
         } finally { server.stop(0) }
     }

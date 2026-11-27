@@ -32,6 +32,7 @@ class AccountSettingsTest {
             for (dark in listOf(false, true)) {
                 val theme = if (dark) "dark" else "light"
                 var switching: Boolean? = null
+                var rollbacks = 0
                 runSkikoComposeUiTest(size = Size(680f, 760f), density = Density(1f)) {
                     var enhanced by mutableStateOf(false)
                     setContent {
@@ -47,7 +48,7 @@ class AccountSettingsTest {
                                         { result = "已经是最新版本" }, reports, { reports = it }) }
                                 },
                                 LocalSettingsDirectoryOverride provides Path.of(System.getProperty("user.home"), "Coach", "books"),
-                            ) { HostSettings(directory = home, onClose = {}) }
+                            ) { HostSettings(directory = home, onRollback = { rollbacks++ }, onClose = {}) }
                         }
                     }
                     waitForIdle()
@@ -70,6 +71,9 @@ class AccountSettingsTest {
                     val reports = onNodeWithContentDescription("问题上报提醒").performScrollTo()
                     reports.assertIsOn().performClick()
                     reports.assertIsOff()
+                    onAllNodesWithText("回到上一版").assertCountEquals(1)
+                    onNodeWithTag("settings-rollback").performScrollTo().performClick()
+                    runOnIdle { assertEquals(1, rollbacks) }
                     capture("data")
                 }
             }

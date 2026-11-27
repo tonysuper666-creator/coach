@@ -18,6 +18,34 @@ function Write-SmokeReservation([string]$File, $Record) {
     Move-Item -LiteralPath "$File.tmp" -Destination $File -Force
 }
 
+function Get-SmokeProcessStartTicks($Process) {
+    if (-not $Process) { return 0L }
+    try {
+        $st = $Process.StartTime
+        if ($null -ne $st) { return ([datetime]$st).ToUniversalTime().Ticks }
+    } catch { }
+    return 0L
+}
+
+function Get-SmokeProcessState([int]$ProcessId, [long]$StartTimeTicks = 0L) {
+    if ($ProcessId -le 0) { return [pscustomobject]@{ State = 'exited'; Process = $null } }
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $proc) { return [pscustomobject]@{ State = 'exited'; Process = $null } }
+    if ($StartTimeTicks -le 0L) { return [pscustomobject]@{ State = 'unverified'; Process = $proc } }
+    $observedTicks = Get-SmokeProcessStartTicks $proc
+    if ($observedTicks -le 0L) {
+        # The process may exit right between Get-Process and reading StartTime.
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ State = 'exited'; Process = $null }
+        }
+        return [pscustomobject]@{ State = 'unverified'; Process = $proc }
+    }
+    if ($observedTicks -ne $StartTimeTicks) {
+        return [pscustomobject]@{ State = 'exited'; Process = $null }
+    }
+    return [pscustomobject]@{ State = 'alive'; Process = $proc }
+}
+
 function Enter-SmokeMemory(
     [string]$StateDir = 'D:/agent/state/coach-smoke-memory',
     [ValidateRange(1, [long]::MaxValue)][long]$BudgetBytes = 2GB,
@@ -26,6 +54,8 @@ function Enter-SmokeMemory(
 ) {
     New-Item -ItemType Directory -Force $StateDir | Out-Null
     $owner = Get-Process -Id $PID
+    $ownerTicks = Get-SmokeProcessStartTicks $owner
+    if ($ownerTicks -le 0L) { throw 'SMOKE_MEMORY: could not read current process StartTime' }
     $file = Join-Path $StateDir "$PID.json"
     $mutex = [Threading.Mutex]::new($false, (Get-SmokeMemoryMutexName $StateDir))
     $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -40,27 +70,34 @@ function Enter-SmokeMemory(
                 $pending = 0L; $ahead = @()
                 foreach ($entry in @(Get-ChildItem -LiteralPath $StateDir -Filter '*.json')) {
                     $r = Get-Content -LiteralPath $entry.FullName -Raw | ConvertFrom-Json
-                    $p = Get-Process -Id $r.ownerPid -ErrorAction SilentlyContinue
-                    if (!$p -or $p.StartTime.ToUniversalTime().Ticks -ne $r.ownerStarted) {
-                        Remove-Item -LiteralPath $entry.FullName
+                    $ownerPid = if ($r -and $null -ne $r.ownerPid) { [int]$r.ownerPid } else { 0 }
+                    $ownerStarted = if ($r -and $null -ne $r.ownerStarted) { [long]$r.ownerStarted } else { 0L }
+                    $ownerCheck = Get-SmokeProcessState $ownerPid $ownerStarted
+                    if ($ownerCheck.State -eq 'exited') {
+                        Remove-Item -LiteralPath $entry.FullName -ErrorAction SilentlyContinue
                         continue
                     }
                     $used = 0L
-                    if ($r.clientPid) {
-                        $client = Get-Process -Id $r.clientPid -ErrorAction SilentlyContinue
-                        if ($client -and $client.StartTime.ToUniversalTime().Ticks -eq $r.clientStarted) {
-                            $used = $client.WorkingSet64
+                    $clientPid = if ($r -and $null -ne $r.clientPid) { [int]$r.clientPid } else { 0 }
+                    $clientStarted = if ($r -and $null -ne $r.clientStarted) { [long]$r.clientStarted } else { 0L }
+                    if ($ownerCheck.State -eq 'alive' -and $clientPid -gt 0 -and $clientStarted -gt 0L) {
+                        $clientCheck = Get-SmokeProcessState $clientPid $clientStarted
+                        if ($clientCheck.State -eq 'alive' -and $clientCheck.Process) {
+                            try {
+                                $ws = $clientCheck.Process.WorkingSet64
+                                if ($null -ne $ws) { $used = [long]$ws }
+                            } catch { }
                         }
                     }
                     # Available RAM already excludes the live client's RSS. Reserve
                     # only its remaining allowance, including simultaneous startups.
                     $pending += [math]::Max(0L, [long]$r.budgetBytes - $used)
-                    $ahead += [int]$r.ownerPid
+                    $ahead += $ownerPid
                 }
                 $free = [long](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory * 1KB
                 if ($free - $pending - $BudgetBytes -ge $KeepFreeBytes) {
                     Write-SmokeReservation $file @{
-                        ownerPid=$PID; ownerStarted=$owner.StartTime.ToUniversalTime().Ticks;
+                        ownerPid=$PID; ownerStarted=$ownerTicks;
                         budgetBytes=$BudgetBytes; clientPid=0; clientStarted=0}
                     return $file
                 }
@@ -87,11 +124,15 @@ function Set-SmokeMemoryClient([string]$Lease, [int]$ClientPid) {
         catch [Threading.AbandonedMutexException] { $held = $true }
         if (!$held) { throw 'SMOKE_MEMORY: client registration lock timed out' }
         $r = Get-Content -LiteralPath $Lease -Raw | ConvertFrom-Json
-        if ($r.ownerPid -ne $PID -or $r.ownerStarted -ne (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks) {
+        $selfTicks = Get-SmokeProcessStartTicks (Get-Process -Id $PID)
+        if ($r.ownerPid -ne $PID -or $selfTicks -le 0L -or $r.ownerStarted -ne $selfTicks) {
             throw 'SMOKE_MEMORY: reservation belongs to another worker'
         }
-        $r.clientPid = $client.Id; $r.clientStarted = $client.StartTime.ToUniversalTime().Ticks
-        Write-SmokeReservation $Lease $r
+        $clientTicks = Get-SmokeProcessStartTicks $client
+        if ($clientTicks -gt 0L) {
+            $r.clientPid = $client.Id; $r.clientStarted = $clientTicks
+            Write-SmokeReservation $Lease $r
+        }
     } finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
 }
 

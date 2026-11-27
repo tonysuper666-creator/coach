@@ -73,11 +73,121 @@ try {
     $firstExit = [DateTime](Get-Content (Join-Path $state 'first.release'))
     $secondEnter = [DateTime](Get-Content (Join-Path $state 'second.enter'))
     Check ($secondEnter -ge $firstExit -and @(Get-ChildItem $state -Filter '*.json').Count -eq 0) 'queued process resumes after release and both reservations are removed'
-    Write-Host "SMOKE_MEMORY $checks/8"
+
+    # Unreadable or null StartTime must not throw InvokeMethodOnNull or discard live protection.
+    function New-SpySmokeProc([int]$ProcId, $StartTime, [long]$WorkingSet = 0L, [switch]$Unreadable) {
+        $proc = [pscustomobject]@{ Id = $ProcId; WorkingSet64 = $WorkingSet }
+        if ($Unreadable) { $proc | Add-Member ScriptProperty StartTime { throw 'Access is denied' } }
+        else { $proc | Add-Member NoteProperty StartTime $StartTime }
+        return $proc
+    }
+    $tRef = [datetime]::SpecifyKind([datetime]'2026-11-27T00:00:00', [DateTimeKind]::Utc)
+    $mockState = Join-Path $state 'mock-start-time'
+    New-Item -ItemType Directory -Force $mockState | Out-Null
+    $script:MockSmoke = $null
+    function Invoke-MockAdmissionCase([string]$CaseName, [scriptblock]$ProcLookup, [hashtable]$Record, [long]$BudgetBytes, [bool]$ExpectAdmit, [bool]$ExpectEntryKept) {
+        Get-ChildItem -LiteralPath $mockState -Filter '*.json' | Remove-Item -Force -ErrorAction SilentlyContinue
+        $entryPath = Join-Path $mockState 'peer.json'
+        $Record | ConvertTo-Json | Set-Content -LiteralPath $entryPath -Encoding UTF8
+        $script:MockSmoke = @{ lookup = $ProcLookup; calls = 0 }
+        function global:Get-CimInstance([string]$ClassName) {
+            return [pscustomobject]@{ FreePhysicalMemory = [uint64](10 * 1024 * 1024) }
+        }
+        function global:Get-Process([int]$Id, [string]$ErrorAction) {
+            if ($Id -eq $PID) { return (Microsoft.PowerShell.Management\Get-Process -Id $PID) }
+            $script:MockSmoke.calls++
+            return (& $script:MockSmoke.lookup $Id $script:MockSmoke)
+        }
+        $admitted = $false; $deniedMsg = ''; $caseLease = $null
+        try {
+            $caseLease = Enter-SmokeMemory -StateDir $mockState -BudgetBytes $BudgetBytes -KeepFreeBytes 3GB -TimeoutSec 0
+            $admitted = $true
+        } catch {
+            $deniedMsg = $_.Exception.Message
+        } finally {
+            if ($caseLease) { Exit-SmokeMemory $caseLease }
+            Remove-Item Function:\Get-CimInstance, Function:\Get-Process -ErrorAction SilentlyContinue
+        }
+        $entryExists = Test-Path -LiteralPath $entryPath
+        $ok = ($admitted -eq $ExpectAdmit) -and ($entryExists -eq $ExpectEntryKept) -and ($ExpectAdmit -or $deniedMsg -like 'SMOKE_MEMORY: insufficient RAM*')
+        Check $CaseName $ok "admitted=$admitted/$ExpectAdmit entryExists=$entryExists/$ExpectEntryKept err=$deniedMsg"
+    }
+    $workerRec = @{ ownerPid = 42424; ownerStarted = $tRef.Ticks; budgetBytes = [long]8GB; clientPid = 0; clientStarted = 0 }
+    Invoke-MockAdmissionCase 'worker start time null preserves reservation' { param($id, $s) if ($id -eq 42424) { New-SpySmokeProc 42424 $null } } $workerRec 1GB $false $true
+    Invoke-MockAdmissionCase 'worker start time throw preserves reservation' { param($id, $s) if ($id -eq 42424) { New-SpySmokeProc 42424 $null -Unreadable } } $workerRec 1GB $false $true
+    Invoke-MockAdmissionCase 'worker start time normal preserves reservation' { param($id, $s) if ($id -eq 42424) { New-SpySmokeProc 42424 $tRef } } $workerRec 1GB $false $true
+
+    $clientRec = @{ ownerPid = 42424; ownerStarted = $tRef.Ticks; budgetBytes = [long]6GB; clientPid = 42425; clientStarted = $tRef.Ticks }
+    Invoke-MockAdmissionCase 'client start time null keeps full budget' {
+        param($id, $s)
+        if ($id -eq 42424) { return (New-SpySmokeProc 42424 $tRef) }
+        if ($id -eq 42425) { return (New-SpySmokeProc 42425 $null -WorkingSet 2GB) }
+    } $clientRec 2GB $false $true
+    Invoke-MockAdmissionCase 'client start time throw keeps full budget' {
+        param($id, $s)
+        if ($id -eq 42424) { return (New-SpySmokeProc 42424 $tRef) }
+        if ($id -eq 42425) { return (New-SpySmokeProc 42425 $null -WorkingSet 2GB -Unreadable) }
+    } $clientRec 2GB $false $true
+    Invoke-MockAdmissionCase 'client start time normal deducts working set' {
+        param($id, $s)
+        if ($id -eq 42424) { return (New-SpySmokeProc 42424 $tRef) }
+        if ($id -eq 42425) { return (New-SpySmokeProc 42425 $tRef -WorkingSet 2GB) }
+    } $clientRec 2GB $true $true
+
+    # Real exiting child process: stale Process handle yields 0L, and concurrent sampling exit prunes and admits.
+    $raceChild = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 2"' -PassThru -WindowStyle Hidden
+    $raceId = $raceChild.Id
+    $raceTicks = Get-SmokeProcessStartTicks $raceChild
+    $raceStale = Microsoft.PowerShell.Management\Get-Process -Id $raceId -ErrorAction SilentlyContinue
+    $raceGone = $raceChild.WaitForExit(20000)
+    $raceChild.Dispose(); $raceChild = $null; [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    Check 'exited process handle yields 0 ticks without throwing' ($raceTicks -gt 0L -and $raceGone -and $null -ne $raceStale -and (Get-SmokeProcessStartTicks $raceStale) -eq 0L) "ticks=$raceTicks gone=$raceGone"
+    Invoke-MockAdmissionCase 'worker exiting during sampling is pruned and admits' {
+        param($id, $s)
+        if ($id -eq 42424) {
+            if ($s.calls -eq 1) { return $raceStale }
+            return $null
+        }
+    } @{ ownerPid = 42424; ownerStarted = $raceTicks; budgetBytes = [long]8GB; clientPid = 0; clientStarted = 0 } 1GB $true $false
+
+    $exitingState = Join-Path $state 'concurrent-exit'
+    New-Item -ItemType Directory -Force $exitingState | Out-Null
+    $exitingScript = Join-Path $exitingState 'exiting-peer.ps1'
+    @'
+param($Source, $State)
+$ErrorActionPreference = 'Stop'
+. $Source
+$self = Get-Process -Id $PID
+$ticks = Get-SmokeProcessStartTicks $self
+Write-SmokeReservation (Join-Path $State "$PID.json") @{
+    ownerPid = $PID; ownerStarted = $ticks;
+    budgetBytes = [long]::MaxValue; clientPid = 0; clientStarted = 0
+}
+Start-Sleep -Seconds 2
+'@ | Set-Content -LiteralPath $exitingScript -Encoding UTF8
+    $exitingArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -File "{0}" -Source "{1}" -State "{2}"' -f
+        $exitingScript, (Join-Path $PSScriptRoot 'Smoke-Memory.ps1'), $exitingState
+    $exitingProc = Start-Process powershell.exe -ArgumentList $exitingArgs -WindowStyle Hidden -PassThru
+    $null = $exitingProc.Handle
+    $children += $exitingProc
+    Wait-File (Join-Path $exitingState "$($exitingProc.Id).json")
+    $admittedAfterExit = $false
+    try {
+        $lease = Enter-SmokeMemory -StateDir $exitingState -BudgetBytes 1MB -TimeoutSec 20
+        $admittedAfterExit = $true
+        Exit-SmokeMemory $lease; $lease = $null
+    } finally {
+        if ($lease) { Exit-SmokeMemory $lease; $lease = $null }
+    }
+    if (-not $exitingProc.WaitForExit(20000)) { throw 'Exiting peer child did not finish in time' }
+    Check 'concurrent exiting worker unblocks queued admission cleanly' ($admittedAfterExit -and @(Get-ChildItem -LiteralPath $exitingState -Filter '*.json').Count -eq 0) "admitted=$admittedAfterExit"
+    Write-Host "SMOKE_MEMORY $checks/17"
 } finally {
     Exit-SmokeMemory $lease
     foreach ($p in $children) {
         $live = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-        if ($live -and $live.StartTime -eq $p.StartTime) { Stop-Process -Id $p.Id -Force }
+        $liveTicks = Get-SmokeProcessStartTicks $live
+        $pTicks = Get-SmokeProcessStartTicks $p
+        if ($live -and $liveTicks -gt 0L -and $liveTicks -eq $pTicks) { Stop-Process -Id $p.Id -Force }
     }
 }

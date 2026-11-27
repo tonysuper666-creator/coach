@@ -81,36 +81,43 @@ internal object FirstOpenPlanner {
     fun openingGroup(book: Textbook): ChapterSectionGroup? {
         if (book.lessons.isEmpty()) return null
         val bodyPage = runCatching { book.bodyStart.importPage }.getOrDefault(1)
-        val index = book.lessons.indexOfFirst { lesson ->
+        val hasProse = { lesson: BookLesson -> lesson.blocks.any { !it.heading && it.text.isNotBlank() } }
+        val inBody = book.lessons.indices.filter { i ->
+            val lesson = book.lessons[i]
             lesson.blocks.isNotEmpty() &&
                 lesson.lastPage >= bodyPage &&
                 !ChapterCompanionGrouping.isExerciseSection(lesson.title) &&
-                lesson.blocks.any { !it.heading && it.text.isNotBlank() }
-        }.let { found ->
-            if (found >= 0) found
-            else book.lessons.indexOfFirst { it.blocks.any { block -> !block.heading && block.text.isNotBlank() } }
+                hasProse(lesson)
         }
-        if (index < 0) return null
-        val chosenLesson = book.lessons[index]
-        val group = ChapterCompanionGrouping.groupForSection(book, index)
-        val first = if (group != null) {
-            ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
-                ?.takeIf { g -> g.sections.any { sec -> sec.blocks.any { !it.heading && it.text.isNotBlank() } } }
+        // Front matter that runs into the body page belongs to no chapter; try the next section instead of
+        // sending the preface as the opening.
+        val candidates = (inBody.sortedBy { book.lessons[it].firstPage < bodyPage } +
+            book.lessons.indices.filter { hasProse(book.lessons[it]) }).distinct()
+        for (index in candidates) {
+            val group = ChapterCompanionGrouping.groupForSection(book, index) ?: continue
+            val chosenLesson = book.lessons[index]
+            val first = ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
+                ?.takeIf { g -> g.sections.any(hasProse) }
                 ?: group.copy(
                     firstPage = chosenLesson.firstPage,
                     lastPage = chosenLesson.lastPage,
                     sections = listOf(chosenLesson),
                 )
-        } else {
-            ChapterSectionGroup(
+            trim(first, OPENING_CHARS)?.let { return it }
+        }
+        // No section sits inside a chapter (a book without an outline): ask about the first prose section alone.
+        for (index in candidates) {
+            val chosenLesson = book.lessons[index]
+            val alone = ChapterSectionGroup(
                 chapterId = chosenLesson.id,
                 chapterTitle = chosenLesson.title,
                 sections = listOf(chosenLesson),
                 firstPage = chosenLesson.firstPage,
                 lastPage = chosenLesson.lastPage,
             )
+            trim(alone, OPENING_CHARS)?.let { return it }
         }
-        return trim(first, OPENING_CHARS)
+        return null
     }
 
     fun questionOf(pack: BookCompanionPack): BookCompanionQuiz? =

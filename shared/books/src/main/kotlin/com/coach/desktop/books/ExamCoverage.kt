@@ -35,6 +35,8 @@ internal data class CoverageReport(
         put("heldOutPoints", heldOutPoints)
         put("covered", covered)
         put("coverage", rate)
+        put("neverGenerated", uncovered.count { it.reason == ExamCoverage.NEVER_GENERATED })
+        put("droppedByCheck", uncovered.count { it.reason == ExamCoverage.QUESTION_DROPPED })
         put("uncovered", buildJsonArray {
             uncovered.forEach { gap ->
                 add(buildJsonObject {
@@ -53,6 +55,7 @@ internal data class CoverageReport(
 internal object ExamCoverage {
     const val TEXTBOOK_SILENT = "教材没讲"
     const val POINT_MISSED = "考点没识别出"
+    const val NEVER_GENERATED = "从未生成"
     const val QUESTION_DROPPED = "识别了但题被核对丢掉"
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -78,6 +81,7 @@ internal object ExamCoverage {
                 val reason = when {
                     !taught -> TEXTBOOK_SILENT
                     !known -> POINT_MISSED
+                    item == null -> NEVER_GENERATED
                     else -> QUESTION_DROPPED
                 }
                 uncovered += CoverageGap(name, reason)

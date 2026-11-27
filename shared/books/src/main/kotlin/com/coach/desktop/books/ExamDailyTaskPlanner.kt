@@ -10,12 +10,15 @@ import java.time.temporal.ChronoUnit
  */
 internal enum class ExamTaskTiming { UNSET, UPCOMING, EXAM_DAY, PAST }
 
+internal enum class QuestionGap { NONE, NEVER_GENERATED, DROPPED }
+
 internal data class ExamPointWork(
     val id: String,
     val title: String,
     val mastered: Boolean,
     val wrongQuestions: Int = 0,
     val bankQuestions: Int = 0,
+    val questionGap: QuestionGap = QuestionGap.NONE,
 )
 
 internal data class ExamTaskPin(val pointId: String, val date: LocalDate)

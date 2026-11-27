@@ -115,19 +115,7 @@ internal object CourseStore {
                         updated_at INTEGER NOT NULL
                     )""",
                 )
-                sql.execute(
-                    """CREATE TABLE IF NOT EXISTS course_topic_sources(
-                        topic_id TEXT NOT NULL REFERENCES course_topics(topic_id) ON DELETE CASCADE,
-                        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-                        toc_node_id TEXT,
-                        start_page INTEGER NOT NULL,
-                        end_page INTEGER NOT NULL,
-                        source_role TEXT NOT NULL,
-                        user_locked INTEGER NOT NULL DEFAULT 0,
-                        scope_note TEXT NOT NULL DEFAULT '',
-                        PRIMARY KEY(topic_id, book_id, start_page, end_page)
-                    )""",
-                )
+                sql.execute(BookSchemaMigration.courseTopicSourcesDdl())
             }
         }
         CourseVisionCacheStore.ensureSchema(db)

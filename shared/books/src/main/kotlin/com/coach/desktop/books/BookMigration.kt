@@ -72,7 +72,7 @@ internal object BookSchemaMigration {
     /** TON-1833: persistent per-account remote unbind (`PENDING_DELETE`), `book_pending_deletes`, and `books.import_account_key`. */
     const val V7_SCHEMA_VERSION = 7
     const val V8_SCHEMA_VERSION = 8
-    const val CURRENT_SCHEMA_VERSION = 9
+    const val CURRENT_SCHEMA_VERSION = 10
     const val V1_BACKUP_FILENAME = "library.sqlite.v1.bak"
     const val V2_BACKUP_FILENAME = "library.sqlite.v2.bak"
     const val V3_BACKUP_FILENAME = "library.sqlite.v3.bak"
@@ -155,6 +155,22 @@ internal object BookSchemaMigration {
             PRIMARY KEY(book, lesson, mode)
         )""".trimIndent()
 
+    fun courseTopicSourcesDdl(table: String = "course_topic_sources") = """CREATE TABLE IF NOT EXISTS $table(
+            topic_id TEXT REFERENCES course_topics(topic_id) ON DELETE CASCADE,
+            book_id TEXT REFERENCES books(id) ON DELETE CASCADE,
+            toc_node_id TEXT,
+            start_page INTEGER NOT NULL,
+            end_page INTEGER NOT NULL,
+            source_role TEXT NOT NULL,
+            user_locked INTEGER NOT NULL DEFAULT 0,
+            scope_note TEXT NOT NULL DEFAULT '',
+            retired_topic_id TEXT,
+            retired_book_id TEXT,
+            CHECK ((topic_id IS NOT NULL AND book_id IS NOT NULL AND retired_topic_id IS NULL AND retired_book_id IS NULL)
+                OR (topic_id IS NULL AND book_id IS NULL AND retired_topic_id IS NOT NULL AND retired_book_id IS NOT NULL)),
+            PRIMARY KEY(topic_id, book_id, start_page, end_page)
+        )""".trimIndent()
+
     private val V3_TABLES = listOf(
         """CREATE TABLE IF NOT EXISTS book_chapter_progress(
             book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
@@ -184,17 +200,7 @@ internal object BookSchemaMigration {
             updated_at INTEGER NOT NULL
         )""".trimIndent(),
         "CREATE INDEX IF NOT EXISTS idx_course_topics_order ON course_topics(collection_id, ord)",
-        """CREATE TABLE IF NOT EXISTS course_topic_sources(
-            topic_id TEXT NOT NULL REFERENCES course_topics(topic_id) ON DELETE CASCADE,
-            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-            toc_node_id TEXT,
-            start_page INTEGER NOT NULL,
-            end_page INTEGER NOT NULL,
-            source_role TEXT NOT NULL,
-            user_locked INTEGER NOT NULL DEFAULT 0,
-            scope_note TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY(topic_id, book_id, start_page, end_page)
-        )""".trimIndent(),
+        courseTopicSourcesDdl(),
         """CREATE TABLE IF NOT EXISTS concept_entities(
             concept_id TEXT PRIMARY KEY,
             collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
@@ -504,13 +510,15 @@ internal object BookSchemaMigration {
                     currentVersion < V6_SCHEMA_VERSION -> directory.resolve(V5_BACKUP_FILENAME)
                     currentVersion < V7_SCHEMA_VERSION -> directory.resolve(V6_BACKUP_FILENAME)
                     currentVersion < V8_SCHEMA_VERSION -> directory.resolve("library.sqlite.v7.bak")
-                    else -> directory.resolve("library.sqlite.v8.bak")
+                    currentVersion == 8 -> directory.resolve("library.sqlite.v8.bak")
+                    else -> directory.resolve("library.sqlite.v9.bak")
                 }
                 if (upgradingExisting) {
                     runCatching { probe.createStatement().use { it.execute("PRAGMA wal_checkpoint(TRUNCATE)") } }
                 }
                 schemaComplete = currentVersion >= CURRENT_SCHEMA_VERSION &&
                     REQUIRED_V7_TABLES.all { it in existingTables } &&
+                    "retired_topic_id" in tableColumns(probe, "course_topic_sources") &&
                     "book_ask_drafts" in existingTables &&
                     tableColumns(probe, "book_ask_turns").containsAll(listOf("answer_status", "write_id")) &&
                     "show_standalone" in tableColumns(probe, "books") &&
@@ -558,6 +566,7 @@ internal object BookSchemaMigration {
                     db.createStatement().use { sql ->
                         for (ddl in V3_TABLES) sql.execute(ddl)
                     }
+                    upgradeCourseTopicSources(db)
                     db.createStatement().use { sql ->
                         for (ddl in V4_TABLES) sql.execute(ddl)
                     }
@@ -645,6 +654,34 @@ internal object BookSchemaMigration {
         ensureColumn(db, "collection_materials", "user_locked", "INTEGER NOT NULL DEFAULT 0")
         ensureColumn(db, "collection_materials", "authority_rank", "INTEGER NOT NULL DEFAULT 2")
         ensureColumn(db, "collection_materials", "source_hash", "TEXT")
+    }
+
+    /** Older writers removed topics/books without running their cascades. Keep those source ranges,
+     * locks and notes under their original keys, separate from the links shown on live topics. */
+    private fun upgradeCourseTopicSources(db: Connection) {
+        if ("retired_topic_id" in tableColumns(db, "course_topic_sources")) return
+        db.createStatement().use { sql ->
+            val schemaObjects = sql.executeQuery("""SELECT sql FROM sqlite_master
+                WHERE tbl_name='course_topic_sources' AND type IN ('index','trigger') AND sql IS NOT NULL""").use { rows ->
+                buildList { while (rows.next()) add(rows.getString(1)) }
+            }
+            sql.execute(courseTopicSourcesDdl("course_topic_sources_v10"))
+            val live = "t.topic_id IS NOT NULL AND b.id IS NOT NULL"
+            sql.executeUpdate("""INSERT INTO course_topic_sources_v10
+                (rowid,topic_id,book_id,toc_node_id,start_page,end_page,source_role,user_locked,scope_note,retired_topic_id,retired_book_id)
+                SELECT s.rowid, CASE WHEN $live THEN s.topic_id END, CASE WHEN $live THEN s.book_id END,
+                    s.toc_node_id,s.start_page,s.end_page,s.source_role,s.user_locked,s.scope_note,
+                    CASE WHEN NOT ($live) THEN s.topic_id END, CASE WHEN NOT ($live) THEN s.book_id END
+                FROM course_topic_sources s LEFT JOIN course_topics t ON t.topic_id=s.topic_id
+                LEFT JOIN books b ON b.id=s.book_id""")
+            // Let any previously installed journal capture tombstones with the original non-null keys.
+            sql.executeUpdate("""DELETE FROM course_topic_sources WHERE rowid IN
+                (SELECT rowid FROM course_topic_sources_v10 WHERE retired_topic_id IS NOT NULL)""")
+            sql.execute("DROP TABLE course_topic_sources")
+            sql.execute("ALTER TABLE course_topic_sources_v10 RENAME TO course_topic_sources")
+            for (statement in schemaObjects) sql.execute(statement)
+            check(sql.executeQuery("PRAGMA foreign_key_check(course_topic_sources)").use { !it.next() })
+        }
     }
 
     private fun upgradeUploadQueueToV6(db: Connection) {

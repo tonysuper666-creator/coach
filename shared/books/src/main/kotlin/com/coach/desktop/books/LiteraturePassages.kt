@@ -145,6 +145,7 @@ internal object LiteraturePassages {
             }
 
     fun bodySentence(s: String): Boolean = s.length in 6..650 &&
+        !LiteratureScaffoldNoise.rejectsSentence(s) &&
         !hasControlOrBrokenChar(s) &&
         end.containsMatchIn(s) &&
         !publisher.containsMatchIn(s) &&
@@ -200,6 +201,7 @@ internal object LiteraturePassages {
             if (isFrontMatterCover(page)) continue
             if (backMatter) continue
             val pageLines = page.guideRegions.flatMap { it.text.lines() }
+            if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) continue
             if (page.number > notesOpen && isEndnotePage(pageLines)) {
                 backMatter = true
                 continue

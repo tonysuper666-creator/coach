@@ -805,19 +805,31 @@ function Get-LineClick($line) {
     if ($b.X2 -lt $b.X1) { return $null }
     [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = [int]$b.Y; X1 = $b.X1; X2 = $b.X2; Y1 = $b.Y1; Y2 = $b.Y2 }
 }
-# 伴读页签在抽屉顶同一行。OCR 会把它们拆开，选中的「提问」有时整颗认丢，正文里也会出现「讲解」。
-# 认最靠上的一行：左边是短「讲解」，右边同一行有「批注」。认得到「提问」时它必须夹在两者中间；
-# 认不到就不挡这一行。长句里的「提问」和正文「讲解」都不是页签。
-function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18) {
+# 伴读页签在抽屉顶同一行。OCR 会把它们拆开，选中的「提问」有时整颗认丢，正文与菜单说明也会出现「讲解 / 批注」。
+# 只认预期区域（宽屏右栏顶或窄窗底抽屉顶）同一行上的独立标签：左边是「讲解」，右边同一行有「批注」，
+# 认得到「提问」时必须夹在两者中间；含「批注」的菜单说明、整串粘连词和正文长句都不算页签。
+function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18, [int]$winW = 0, [int]$winH = 0) {
     $order = @('讲解', '提问', '批注')
     if ($label -notin $order) { return $null }
     $cands = New-Object System.Collections.ArrayList
     foreach ($l in @($lines)) {
-        $compact = $l.Text -replace '\s', ''
+        $trimmed = ([string]$l.Text).Trim()
+        $compact = $trimmed -replace '\s', ''
         if (-not $compact) { continue }
-        $present = @($order | Where-Object { $compact.Contains($_) })
+        $present = @()
+        if ($compact -match '^(?:讲解|提问|批注)$') {
+            $present = @($compact)
+        } else {
+            $tokens = @($trimmed -split '\s+' | Where-Object { $_ })
+            if ($tokens.Count -ge 2) {
+                $matched = @($order | Where-Object { $_ -in $tokens })
+                $extra = (($tokens | Where-Object { $_ -notin @('讲解', '提问', '批注', '浮层', '并排', '×', 'x', 'X') }) -join '')
+                if ($matched.Count -ge 1 -and $extra.Length -le 2) {
+                    $present = $matched
+                }
+            }
+        }
         if (-not $present.Count) { continue }
-        if ($compact.Length -gt 8 -and $present.Count -lt 2) { continue }
         foreach ($name in $present) {
             $hit = Find-Text @($l) $name
             if (-not $hit) { continue }
@@ -837,10 +849,68 @@ function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18) {
             $between = @($asks | Where-Object { $_.X -gt $explain[0].X -and $_.X -lt $notes[0].X })
             if (-not $between.Count) { continue }
         }
+        if ($winW -gt 0 -and $winH -gt 0) {
+            $rowY = $explain[0].Y
+            $inSideDrawerTop = ($winW -ge 1000 -and $rowY -lt [int]([Math]::Max(90, $winH * 0.28)) -and $explain[0].X -ge [int]($winW * 0.50))
+            $inBottomDrawerTop = ($rowY -ge [int]($winH * 0.30) -and $rowY -le [int]($winH * 0.85) -and $explain[0].X -lt [int]($winW * 0.65))
+            if (-not ($inSideDrawerTop -or $inBottomDrawerTop)) { continue }
+        }
         $picked = @($row | Where-Object { $_.Label -eq $label } | Sort-Object X | Select-Object -First 1)
         if ($picked.Count) { return $picked[0] }
     }
     return $null
+}
+# 阅读器顶栏右半区的独立「伴读」抽屉开关：去掉首尾空白后仅匹配 ^伴读$，排除「伴读：…」学法项与左半区/正文误命中。
+function Find-ReaderCompanionToggle($lines, [int]$winW = 0, [int]$winH = 0) {
+    $hits = New-Object System.Collections.ArrayList
+    foreach ($l in @($lines)) {
+        $trimmed = ([string]$l.Text).Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed -match '^伴读[：:]') { continue }
+        if ($trimmed -notmatch '^伴读$') { continue }
+        $click = Get-LineClick $l
+        if (-not $click) { continue }
+        if ($winH -gt 0 -and $click.Y -ge [int]([Math]::Max(80, $winH * 0.20))) { continue }
+        if ($winW -gt 0 -and $click.X -lt [int]($winW * 0.50)) { continue }
+        [void]$hits.Add($click)
+    }
+    if (-not $hits.Count) { return $null }
+    return @($hits | Sort-Object Y, @{ Expression = { $_.X }; Descending = $true })[0]
+}
+# 打开伴读抽屉：先在预期区域核对同一页签行上的独立标签，未开时只点顶栏右半区独立「伴读」开关。
+function Ensure-CompanionDrawerOpen(
+    [int]$step,
+    [int]$winW,
+    [int]$winH,
+    [int]$tries = 3,
+    [string]$missTag = 'explain-tab0',
+    [string]$openTagPrefix = 'explain-tab'
+) {
+    $lines = Show-ReaderTop $step 'top'
+    if (-not $lines) { $lines = Shot $step $missTag }
+    $tab = Find-CompanionTabLabel $lines '讲解' 18 $winW $winH
+    $opened = 0
+    while (-not $tab -and $opened -lt $tries) {
+        $open = Find-ReaderCompanionToggle $lines $winW $winH
+        if ($open) {
+            Note "步骤$step 伴读抽屉是收起的，先点顶栏「伴读」把它打开"
+            Hover $open.X $open.Y; Start-Sleep -Milliseconds 400
+            $null = Click-At $open.X $open.Y
+            Start-Sleep -Seconds 1
+            $shotTag = if ($tries -eq 1) { $openTagPrefix } else { "$openTagPrefix$opened" }
+            $lines = Shot $step $shotTag
+        } else {
+            Start-Sleep -Milliseconds 800
+            $lines = Show-ReaderTop $step "$openTagPrefix-top$opened"
+            if (-not $lines) {
+                $shotTag = if ($tries -eq 1) { $openTagPrefix } else { "$openTagPrefix$opened" }
+                $lines = Shot $step $shotTag
+            }
+        }
+        $tab = Find-CompanionTabLabel $lines '讲解' 18 $winW $winH
+        $opened++
+    }
+    [pscustomobject]@{ Tab = $tab; Lines = $lines }
 }
 # 跳页框里的数字紧挨在「前往」左边。认不出返回 $null（调用方仍可提交，交给页码断言）。
 # 读到截断数字时调用方不得按回车。
@@ -1236,7 +1306,8 @@ try {
     } else {
         # 「⋯」是顶栏最后一颗按钮，紧挨「伴读 / 收起」右边；OCR 不一定认得出这个字形，就按「伴读」右侧落点点。
         $more = Has $lines @('⋯', '…', '...')
-        $comp = Has $lines @('伴读', '收起')
+        $comp = Find-ReaderCompanionToggle $lines $winW $winH
+        if (-not $comp) { $comp = Find-Text $lines '收起' }
         $mx = $null; $my = $null
         $band = [int]($winH * 0.2)
         if ($more -and $more.X -gt [int]($winW * 0.7) -and $more.Y -lt $band) { $mx = [int]$more.X; $my = [int]$more.Y }
@@ -1739,22 +1810,9 @@ try {
         $scrollX = $midX; $scrollY = [int]($winH * 0.72)
         # 抽屉页签：讲解 / 提问 / 批注，排在抽屉头最左边。④ 点「出处」跳到原文页时顶栏会隐去，
         # 帧里可能一条页签都没有：先沿顶边把顶栏叫出来，再点顶栏右边的「伴读」把抽屉叫回来。
-        $lines = Show-ReaderTop 5 'top'
-        if (-not $lines) { $lines = Shot 5 'explain-tab0' }
-        $tab = Has $lines @('提问', '批注', '讲解')
-        $opened = 0
-        while (-not $tab -and $opened -lt 3) {
-            $open = Find-Text $lines '伴读'
-            if ($open) {
-                Note '步骤5 伴读抽屉是收起的，先点顶栏「伴读」把它打开'
-                Hover $open.X $open.Y; Start-Sleep -Milliseconds 400
-                $null = Click-At $open.X $open.Y
-                Start-Sleep -Seconds 1
-                $lines = Shot 5 "explain-tab$opened"
-                $tab = Has $lines @('提问', '批注', '讲解')
-            } else { Start-Sleep -Milliseconds 800; $lines = Shot 5 "explain-tab$opened" }
-            $opened++
-        }
+        $drawer5 = Ensure-CompanionDrawerOpen 5 $winW $winH -tries 3 -missTag 'explain-tab0' -openTagPrefix 'explain-tab'
+        $lines = $drawer5.Lines
+        $tab = $drawer5.Tab
         if (-not $tab) { Fail 5 '点开顶栏「伴读」后抽屉头里仍读不到「讲解 / 提问 / 批注」页签（见 5-explain-tab*.png）' }
         # 抽屉会记住上次停的页签（第 7 步在「提问」上留过草稿），所以必须显式点回「讲解」。
         # 正文和提问线程里也有「讲解」「讲的是」，不能拿它们当页签。点抽屉顶那一行的「讲解」：
@@ -1764,7 +1822,7 @@ try {
         $askPlaceholder = '问这句的意思'
         $switched = $false
         foreach ($try in 1..3) {
-            $hit = Find-CompanionTabLabel $lines '讲解'
+            $hit = Find-CompanionTabLabel $lines '讲解' 18 $winW $winH
             if (-not $hit) { Fail 5 '抽屉头里读到了页签字，但没在抽屉顶认到和「批注」同一行的「讲解」（见 5-explain-tab*.png）' }
             $tabX = [int]$hit.X; $tabY = [int]$hit.Y
             Note "步骤5 第 $try 次点「讲解」页签 ($tabX,$tabY)"
@@ -1777,7 +1835,7 @@ try {
             Start-Sleep -Seconds 1
             $lines = Shot 5 "explain-tab-retry$try"
             if (-not (Has $lines @($askPlaceholder))) { $switched = $true; break }
-            $again = Find-CompanionTabLabel $lines '讲解'
+            $again = Find-CompanionTabLabel $lines '讲解' 18 $winW $winH
             if (-not $again) { Fail 5 '点了「讲解」仍停在「提问」，新一帧也没再认到抽屉顶的「讲解」（见 5-explain-tab*.png）' }
             $tabX = [Math]::Max(16, [int]$again.X - 8); $tabY = [int]$again.Y
             Note "步骤5 同一落点仍停在「提问」，按新帧往左补点 ($tabX,$tabY)"
@@ -1948,24 +2006,15 @@ try {
         $winW = [int]($lr6.R - $lr6.L); $winH = [int]($lr6.B - $lr6.T)
         $midX = [int]($winW / 2); $hoverY = [int]($winH - 10)
         $tabX6 = 30
-        $lines = Show-ReaderTop 6 'top'
-        if (-not $lines) { $lines = Shot 6 'top0' }
-        # ⑤ 之后抽屉一般还开着；要是收起了（⑤ 失败时），先点顶栏「伴读」把它打开。
-        $tab6 = Has $lines @('提问', '批注', '讲解')
-        if (-not $tab6) {
-            $open6 = Find-Text $lines '伴读'
-            if ($open6) {
-                Hover $open6.X $open6.Y; Start-Sleep -Milliseconds 400
-                $null = Click-At $open6.X $open6.Y; Start-Sleep -Seconds 1
-                $lines = Shot 6 'drawer'
-                $tab6 = Has $lines @('提问', '批注', '讲解')
-            }
-        }
+        # ⑤ 之后抽屉一般还开着；要是收起了（⑤ 失败或曾为读页号收起时），先点顶栏「伴读」把它打开。
+        $drawer6 = Ensure-CompanionDrawerOpen 6 $winW $winH -tries 1 -missTag 'top0' -openTagPrefix 'drawer'
+        $lines = $drawer6.Lines
+        $tab6 = $drawer6.Tab
         if (-not $tab6) { Fail 6 '伴读抽屉打不开，没法做「读前自测」（见 6-top*.png / 6-drawer.png）' }
         $tabY6 = [int]$tab6.Y
         # 抽屉会记住上次停的页签：先确认在「讲解」（模块条只在讲解页上）。
         if (Has $lines @('问这句的意思')) {
-            $ex6 = Find-Text $lines '讲解'
+            $ex6 = Find-CompanionTabLabel $lines '讲解' 18 $winW $winH
             if ($ex6 -and [Math]::Abs($ex6.Y - $tabY6) -le 24) { $tabX6 = [int]$ex6.X }
             else { $tabX6 = [int]$tab6.X1 - 30 }
             Click-At $tabX6 $tabY6; Start-Sleep -Seconds 1

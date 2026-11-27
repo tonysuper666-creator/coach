@@ -359,4 +359,67 @@ class ExamCoverageTest {
         assertEquals(listOf("Moral hazard", "Risk aversion"), report.coveredPoints)
         assertEquals(emptyList(), report.uncovered)
     }
+
+    @Test
+    fun genericPointNamesAndCommonWordsNeverCountAsCovered() {
+        val syntheticExam = """
+            SYNTHETIC UNIVERSITY
+            ECON99999 Synthetic Midterm Examination
+            Time Allowed: 60 Minutes
+
+            1. Discuss the empirical findings of the Northern Rural Policy Experiment.
+            2. Explain how the Gamma model uses a production function to choose inputs.
+            3. Discuss how Care and University factors interact in general practice.
+            4. Explain the Policy Experiment in general terms.
+            Point: Policy Experiment
+            5. Explain Care in administrative notes.
+            Point: Care
+            6. Explain Demand Elasticity for a normal good.
+        """.trimIndent()
+
+        val questions = HeldOutDecomposer.questionsFromDocument(syntheticExam)
+        assertEquals(6, questions.size)
+
+        val textbook = """
+            Northern Rural Policy Experiment: Regional subsidy trial altering clinic visits.
+            Policy Experiment: General overview of regional policy trials.
+            Alpha-beta function: Links input hours to total harvest.
+            Function: General relationship between two quantities.
+            Care: General notes on maintenance.
+            University: Campus administration notes.
+            Demand elasticity: Buyers respond to price changes.
+        """.trimIndent()
+
+        val identified = listOf(
+            "Policy Experiment",
+            "Alpha-beta function",
+            "Function",
+            "Care",
+            "University",
+            "Demand elasticity",
+        )
+        val bank = listOf(
+            CoverageBankPoint("Policy Experiment", choices = 3, essay = true),
+            CoverageBankPoint("Alpha-beta function", choices = 3, essay = true),
+            CoverageBankPoint("Function", choices = 3, essay = true),
+            CoverageBankPoint("Care", choices = 3, essay = true),
+            CoverageBankPoint("University", choices = 3, essay = true),
+            CoverageBankPoint("Demand elasticity", choices = 3, essay = false),
+        )
+
+        val report = ExamCoverage.evaluate(questions, identified, bank, textbook)
+        assertEquals(6, report.heldOutPoints)
+        assertEquals(1, report.covered)
+        assertEquals(listOf("Demand elasticity"), report.coveredPoints)
+        assertEquals(
+            listOf(
+                "Northern Rural Policy Experiment" to ExamCoverage.POINT_MISSED,
+                "未识别考点 #1" to ExamCoverage.POINT_MISSED,
+                "未识别考点 #2" to ExamCoverage.POINT_MISSED,
+                "Policy Experiment" to ExamCoverage.POINT_MISSED,
+                "Care" to ExamCoverage.POINT_MISSED,
+            ),
+            report.uncovered.map { it.name to it.reason },
+        )
+    }
 }

@@ -63,6 +63,116 @@ internal object ExamCoverage {
     const val QUESTION_DROPPED = "识别了但题被核对丢掉"
 
     private val json = Json { ignoreUnknownKeys = true }
+    private val cjkChar = Regex("""[\u4E00-\u9FFF]""")
+    private val romanNumeral = Regex("""^[ivxlcdm]+$""", RegexOption.IGNORE_CASE)
+    private val cjkGenericPoints = setOf(
+        "考点", "模型", "理论", "实验", "方法", "分析", "函数", "曲线", "概念", "问题", "市场", "大学", "政策",
+    )
+    private val umbrellaHeadNouns = setOf(
+        "experiment", "experiments", "study", "studies", "trial", "trials", "survey", "surveys",
+        "model", "models", "theory", "theories", "hypothesis", "hypotheses",
+        "policy", "policies", "program", "programs", "programme", "programmes",
+        "project", "projects", "plan", "plans", "scheme", "schemes", "system", "systems",
+        "act", "acts", "law", "laws", "reform", "reforms",
+        "case", "cases", "example", "examples", "analysis", "analyses",
+        "approach", "approaches", "method", "methods", "framework", "frameworks",
+        "research", "review", "test", "tests", "report", "reports",
+        "measure", "measures", "data", "evidence",
+        "topic", "topics", "concept", "concepts", "issue", "issues",
+        "problem", "problems", "question", "questions",
+    )
+    private val genericPhraseModifiers = setOf(
+        "insurance", "health", "medical", "clinical", "healthcare",
+        "policy", "economic", "economics", "financial", "fiscal", "monetary",
+        "social", "public", "private", "general", "simple", "basic",
+        "main", "major", "minor", "standard", "normal", "common", "typical",
+        "natural", "empirical", "theoretical", "experimental",
+        "randomized", "randomised", "field", "laboratory", "lab",
+        "national", "local", "regional", "rural", "urban", "global", "international",
+        "federal", "state", "government", "care", "welfare", "tax",
+        "market", "research", "case", "hospital", "patient", "physician", "doctor",
+        "education", "labor", "labour", "income", "trade",
+        "price", "cost", "risk", "choice", "decision",
+        "behavior", "behaviour", "incentive", "information",
+        "development", "growth", "short", "long", "new", "old",
+        "early", "late", "modern", "classical", "traditional", "alternative",
+        "optimal", "linear", "static", "dynamic", "partial", "full",
+        "complete", "direct", "indirect", "annual", "first", "second", "third",
+    )
+    private val genericSingleWords = umbrellaHeadNouns + genericPhraseModifiers + HeldOutDecomposer.skipWords +
+        HeldOutDecomposer.boilerplateWords + HeldOutDecomposer.glueWordSet + setOf(
+            "university", "universities", "college", "colleges", "school", "schools",
+            "department", "departments", "faculty", "faculties", "institute", "institutes",
+            "office", "offices", "board", "boards", "academy", "press", "journal", "journals",
+            "author", "authors", "lecturer", "professor", "course", "courses",
+            "lecture", "lectures", "chapter", "chapters", "section", "sections",
+            "part", "parts", "unit", "units", "page", "pages", "note", "notes",
+            "source", "sources", "table", "tables", "figure", "figures",
+            "chart", "charts", "graph", "graphs", "box", "boxes", "panel", "panels",
+            "diagram", "diagrams", "exhibit", "exhibits", "appendix", "appendices",
+            "paper", "papers", "exam", "exams", "examination", "examinations",
+            "midterm", "final", "quiz", "answer", "answers", "solution", "solutions",
+            "result", "results", "finding", "findings", "outcome", "outcomes",
+            "definition", "definitions", "theorem", "theorems", "lemma", "lemmas",
+            "proposition", "propositions", "corollary", "equation", "equations",
+            "formula", "formulas", "function", "functions", "curve", "curves",
+            "line", "lines", "slope", "slopes", "intercept", "intercepts",
+            "mechanism", "mechanisms", "process", "processes", "structure", "structures",
+            "pattern", "patterns", "trend", "trends", "relationship", "relationships",
+            "relation", "relations", "comparison", "comparisons", "difference", "differences",
+            "change", "changes", "effect", "effects", "impact", "impacts",
+            "cause", "causes", "reason", "reasons", "factor", "factors",
+            "variable", "variables", "parameter", "parameters", "constant", "constants",
+            "term", "terms", "index", "indices", "indexes", "ratio", "ratios",
+            "rate", "rates", "share", "shares", "level", "levels", "degree", "degrees",
+            "type", "types", "kind", "kinds", "form", "forms", "category", "categories",
+            "group", "groups", "class", "classes", "set", "sets", "sample", "samples",
+            "population", "populations", "distribution", "distributions",
+            "average", "averages", "mean", "means", "median", "variance", "deviation",
+            "range", "margin", "margins", "threshold", "thresholds", "limit", "limits",
+            "bound", "bounds", "constraint", "constraints", "objective", "objectives",
+            "goal", "goals", "metric", "metrics", "score", "scores", "value", "values",
+            "amount", "amounts", "total", "totals", "number", "numbers",
+            "quantity", "quantities", "size", "sizes", "scale", "weight", "weights",
+            "time", "times", "period", "periods", "year", "years", "month", "months",
+            "week", "weeks", "day", "days", "age", "ages", "stage", "stages",
+            "phase", "phases", "step", "steps", "order", "rank", "status",
+            "condition", "conditions", "situation", "situations", "context", "setting",
+            "environment", "regulation", "regulations", "mandate", "mandates",
+            "institution", "institutions", "organization", "organizations",
+            "markets", "economy", "uncertainty", "preference", "preferences",
+            "decisions", "incentives", "selection", "hazard", "demand", "supply",
+            "prices", "costs", "benefits", "profit", "profits", "loss", "losses",
+            "gain", "gains", "return", "returns", "wealth", "wage", "wages",
+            "earnings", "spending", "expenditure", "budget", "taxes", "subsidy", "subsidies",
+            "grant", "grants", "transfer", "transfers", "payment", "payments",
+            "coverage", "access", "quality", "efficiency", "equity", "equality",
+            "inequality", "poverty", "training", "employment", "unemployment",
+            "work", "worker", "workers", "job", "jobs", "firm", "firms",
+            "company", "companies", "industry", "industries", "sector", "sectors",
+            "area", "areas", "region", "regions", "country", "countries",
+            "nation", "nations", "city", "cities", "clinics", "doctors",
+            "physicians", "patients", "person", "people", "individual", "individuals",
+            "household", "households", "family", "families", "child", "children",
+            "adult", "adults", "woman", "women", "man", "men",
+            "consumer", "consumers", "producer", "producers", "buyer", "buyers",
+            "seller", "sellers", "student", "students", "candidate", "candidates",
+            "governments", "agency", "agencies", "service", "services",
+            "good", "goods", "product", "products", "treatment", "treatments",
+            "disease", "diseases", "illness", "illnesses", "mortality", "morbidity",
+            "survival", "life", "death", "knowledge", "signal", "signals",
+            "contract", "contracts", "equilibrium", "competition",
+            "production", "consumption", "allocation", "investment",
+            "output", "input", "inputs", "capital", "credit", "debt",
+            "bank", "banks", "savings", "control", "controls", "bias",
+            "error", "errors", "noise", "moral", "adverse",
+            "extension", "extensions", "application", "applications",
+            "implication", "implications", "discussion", "motivation", "intuition",
+            "empirics", "recap", "agenda", "roadmap", "takeaways", "remarks",
+            "readings", "review", "enrollment", "explanation", "explanations",
+            "interpretation", "interpretations", "conclusion", "conclusions",
+            "introduction", "background", "overview", "summary", "outline",
+        )
 
     fun evaluate(
         questions: List<String>,
@@ -81,6 +191,10 @@ internal object ExamCoverage {
                 continue
             }
             val name = point.name
+            if (isGenericPoint(name)) {
+                uncovered += CoverageGap(name, POINT_MISSED)
+                continue
+            }
             val taught = termIn(name, textbookNorm, textbookSpaced)
             val known = identified.any { samePoint(name, it) }
             val item = bestBankPoint(name, bank)
@@ -169,16 +283,76 @@ internal object ExamCoverage {
     }
 
     private fun normalizedPointKey(name: String): String =
-        CourseExamPoints.normalize(name).replace('-', ' ')
+        CourseExamPoints.normalize(name).replace('-', ' ').replace('–', ' ').replace('—', ' ').replace(Regex("""\s+"""), " ").trim()
+
+    private fun contentTokensOf(norm: String): List<String> =
+        norm.split(' ').filter { it.isNotEmpty() && it !in HeldOutDecomposer.glueWordSet && it !in HeldOutDecomposer.skipWords }
+
+    fun isUppercaseAcronym(raw: String): Boolean {
+        val trimmed = raw.trim().trim('(', ')')
+        return trimmed.length in 2..6 &&
+            trimmed.any(Char::isUpperCase) &&
+            trimmed.all { it.isUpperCase() || it.isDigit() } &&
+            !romanNumeral.matches(trimmed) &&
+            trimmed.lowercase() !in genericSingleWords
+    }
+
+    fun isGenericSingleWord(token: String): Boolean = token in genericSingleWords
+
+    /** Rejects single common words and broad umbrella names so they cannot match or count as covered on their own. */
+    fun isGenericPoint(raw: String): Boolean {
+        val trimmed = raw.trim()
+        val norm = normalizedPointKey(trimmed)
+        if (norm.isBlank()) return true
+        if (cjkChar.containsMatchIn(norm)) {
+            return norm in cjkGenericPoints
+        }
+        val tokens = norm.split(' ').filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return true
+        val contentTokens = contentTokensOf(norm)
+        if (contentTokens.isEmpty()) return true
+        if (contentTokens.size == 1) {
+            return !isUppercaseAcronym(trimmed) && contentTokens[0] in genericSingleWords
+        }
+        val firstContent = contentTokens.first()
+        val lastContent = contentTokens.last()
+        val tailGeneric = lastContent in umbrellaHeadNouns &&
+            contentTokens.dropLast(1).all { it in genericPhraseModifiers }
+        val headGeneric = firstContent in umbrellaHeadNouns &&
+            contentTokens.drop(1).all { it in genericPhraseModifiers }
+        return tailGeneric || headGeneric
+    }
 
     private fun samePoint(left: String, right: String): Boolean {
+        if (isGenericPoint(left) || isGenericPoint(right)) return false
         val a = normalizedPointKey(left)
         val b = normalizedPointKey(right)
         if (a.isBlank() || b.isBlank()) return false
         if (a == b) return true
+        val (shortRaw, longRaw) = if (a.length <= b.length) left to right else right to left
         val (short, long) = if (a.length <= b.length) a to b else b to a
+        if (cjkChar.containsMatchIn(short) || cjkChar.containsMatchIn(long)) {
+            if (short.length < 2) return false
+            return CourseExamPoints.termPattern(short).containsMatchIn(long)
+        }
+        val shortTokens = contentTokensOf(short)
+        val longTokens = contentTokensOf(long)
+        if (shortTokens.isEmpty() || longTokens.isEmpty()) return false
+        if (shortTokens.size == 1) {
+            if (isUppercaseAcronym(shortRaw)) {
+                val acronym = shortRaw.trim().trim('(', ')')
+                return "($acronym)" in longRaw || (longTokens.size <= 2 && CourseExamPoints.termPattern(short).containsMatchIn(long))
+            }
+            return false
+        }
         if (short.length < 4) return false
-        return CourseExamPoints.termPattern(short).containsMatchIn(long)
+        if (!CourseExamPoints.termPattern(short).containsMatchIn(long)) return false
+        if (shortTokens.size * 3 < longTokens.size * 2) return false
+        val extraTokens = longTokens.filter { it !in shortTokens }
+        if (shortTokens.all { it in genericSingleWords } && extraTokens.any { it !in genericSingleWords }) {
+            return false
+        }
+        return true
     }
 
     private fun JsonObject.str(key: String): String = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -234,12 +408,13 @@ internal object HeldOutDecomposer {
         """(?:^|[.;]\s+)(?:The\s+|An?\s+)?([A-Za-z][A-Za-z0-9 -]{2,48})\s+(?:is\s+defined\s+as|refers\s+to|is\s+called|is\s+known\s+as)\b""",
     )
     private val capitalRun = Regex("""\b[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*(?:\s+[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*){1,5}\b""")
-    private val romanNumeral = Regex("""^[ivxlcdm]+$""", RegexOption.IGNORE_CASE)
     private val boilerplate = setOf("contents", "outline", "summary", "references", "overview", "目录", "小结", "参考文献")
+    val boilerplateWords: Set<String> get() = boilerplate
     private val glueWords = setOf(
         "of", "in", "on", "at", "to", "for", "and", "or", "the", "a", "an", "with", "by", "as",
         "is", "are", "was", "were", "be", "vs", "via", "per",
     )
+    val glueWordSet: Set<String> get() = glueWords
     private val skip = setOf(
         "explain", "discuss", "compare", "contrast", "define", "calculate", "describe", "carefully",
         "what", "why", "how", "does", "do", "can", "could", "would", "should", "the", "and", "for",
@@ -254,6 +429,7 @@ internal object HeldOutDecomposer {
         "chart", "panel", "exhibit", "appendix", "option", "choice", "section", "part", "marks",
         "please", "following", "below", "above", "true", "false", "correct", "incorrect",
     )
+    val skipWords: Set<String> get() = skip
 
     private enum class QuestionStyle { EXPLICIT_Q, DOT, PAREN }
 
@@ -616,7 +792,7 @@ internal object HeldOutDecomposer {
         // Question stems open with Explain/Discuss/…. Those words are not the point name.
         val titled = capitalRun.findAll(body)
             .map { stripLeadingSkip(it.value) }
-            .filter { it.length in 8..80 }
+            .filter { it.length in 8..80 && !ExamCoverage.isGenericPoint(it) }
             .maxByOrNull { it.length }
         if (titled != null) return clean(titled)
         return null
@@ -631,10 +807,11 @@ internal object HeldOutDecomposer {
             if (candidate.any { it in "。！？!?；;." } || candidate.none(Char::isLetter)) return
             val norm = CourseExamPoints.normalize(candidate).replace('-', ' ')
             if (norm.length < 2 || norm in boilerplate || norm in skip) return
+            if (ExamCoverage.isGenericPoint(candidate)) return
             val words = norm.split(' ').filter { it.isNotEmpty() }
             if (words.isEmpty() || words.size > 6) return
             if (words.size == 1 && norm.all { it in 'a'..'z' || it in '0'..'9' }) {
-                val isAcronym = candidate.length in 3..5 && candidate.all { it.isUpperCase() || it.isDigit() } && !romanNumeral.matches(candidate)
+                val isAcronym = ExamCoverage.isUppercaseAcronym(candidate)
                 if (!isAcronym && norm.length < 4) return
             }
             terms.putIfAbsent(norm, candidate)
@@ -672,11 +849,10 @@ internal object HeldOutDecomposer {
             val variants = if (strippedParen.length >= 2 && strippedParen != trimmed) listOf(trimmed, strippedParen) else listOf(trimmed)
             for (variant in variants) {
                 val norm = CourseExamPoints.normalize(variant).replace('-', ' ')
-                if (norm.length < 2 || norm in skip || norm in boilerplate || !seen.add(norm)) continue
+                if (norm.length < 2 || norm in skip || norm in boilerplate || ExamCoverage.isGenericPoint(variant) || !seen.add(norm)) continue
                 val tokens = norm.split(' ').filter { it.isNotEmpty() }
                 if (tokens.isEmpty()) continue
-                val isAcronym = tokens.size == 1 && variant.length in 3..5 &&
-                    variant.all { it.isUpperCase() || it.isDigit() } && !romanNumeral.matches(variant)
+                val isAcronym = tokens.size == 1 && ExamCoverage.isUppercaseAcronym(variant)
                 if (tokens.size == 1 && !isAcronym && norm.all { it in 'a'..'z' || it in '0'..'9' } && norm.length < 4) continue
                 if (tokens.all { it in skip || it in glueWords }) continue
 
@@ -691,7 +867,7 @@ internal object HeldOutDecomposer {
                     (token.length >= 4 || token.any { c -> c !in 'a'..'z' && c !in '0'..'9' }) &&
                         token !in skip && token !in glueWords
                 }
-                val contentMatchers = if (contentTokens.size >= 2) {
+                val contentMatchers = if (contentTokens.size >= 2 && contentTokens.any { !ExamCoverage.isGenericSingleWord(it) }) {
                     contentTokens.map { token -> tokenPrefilter(token) to buildPhraseRegex(listOf(token), token) }
                 } else {
                     emptyList()

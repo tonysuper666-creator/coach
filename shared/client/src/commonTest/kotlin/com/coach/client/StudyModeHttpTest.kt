@@ -87,4 +87,51 @@ class StudyModeHttpTest {
             client.close()
         }
     }
+
+    @Test
+    fun withBookMapBatchPollPollsPendingStagesAndRecoversTransientTimeout() = runBlocking {
+        val notices = mutableListOf<String>()
+        var attempts = 0
+        val reply = withBookMapBatchPoll(maxPolls = 10, onProgress = { notices += it }) {
+            attempts += 1
+            when (attempts) {
+                1 -> MockReply(
+                    buildJsonObject {
+                        put("pending", true)
+                        put("stage", "chapters")
+                        put("completedChunks", 1)
+                        put("totalChunks", 3)
+                        put("retryAfterMs", 500)
+                    },
+                    null,
+                    statusCode = 200,
+                )
+                2 -> MockReply(
+                    buildJsonObject {
+                        put("pending", true)
+                        put("stage", "graph")
+                        put("completedChunks", 3)
+                        put("totalChunks", 3)
+                        put("retryAfterMs", 500)
+                    },
+                    null,
+                    statusCode = 200,
+                )
+                3 -> MockReply(null, BOOK_MAP_BATCH_TIMEOUT_TEXT, retryable = true, code = "offline")
+                else -> MockReply(
+                    buildJsonObject {
+                        put("bookId", "bk-1")
+                        put("chapterCount", 14)
+                    },
+                    null,
+                    statusCode = 200,
+                )
+            }
+        }
+        assertEquals(4, attempts)
+        assertEquals(14, reply.body?.get("chapterCount")?.jsonPrimitive?.intOrNull)
+        assertTrue(notices.any { "1 / 3" in it }, notices.toString())
+        assertTrue(notices.any { "跨章脉络" in it }, notices.toString())
+        assertTrue(notices.any { "后台运行" in it }, notices.toString())
+    }
 }

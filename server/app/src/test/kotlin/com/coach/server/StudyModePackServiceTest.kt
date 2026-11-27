@@ -1,5 +1,6 @@
 package com.coach.server
 
+import com.coach.ai.BatchPending
 import com.coach.ai.BridgeClient
 import com.coach.core.LedgerActor
 import com.coach.domain.LedgerJson
@@ -11,8 +12,10 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -707,6 +710,185 @@ class StudyModePackServiceTest {
             assertTrue(ledger.entriesForBook("friend-book").isNotEmpty(), "owner book map must still be recorded")
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun epubAnchorGateMatchesWrappedLinesCurlyQuotesEmDashEmitsOffsetsAndBackfillsMissingClaims() = runBlocking(Dispatchers.IO) {
+        val wealthP23 = """# CHAPTER V.
+
+
+
+
+OF THE REAL AND NOMINAL PRICE OF COMMODITIES, OR OF THEIR PRICE IN LABOUR, AND
+THEIR PRICE IN MONEY.
+
+
+
+
+
+
+Every man is rich or poor according to the degree in which he can afford to
+enjoy the necessaries, conveniencies, and amusements of human life. But after
+the division of labour has once thoroughly taken place, it is but a very small
+part of these with which a man’s own labour can supply him."""
+
+        val originP33 = """Finally, then, varieties have the same general characters as species, for they
+cannot be distinguished from species,—except, firstly, by the discovery
+of intermediate linking forms, and the occurrence of such links cannot affect
+the actual characters of the forms which they connect; and except, secondly, by
+a certain amount of
+
+difference, for two forms, if differing very little, are generally ranked as
+varieties."""
+
+        val epubPages = listOf(StudyPageInput(23, wealthP23), StudyPageInput(33, originP33))
+
+        // 1. Verify hard-wrapped EPUB quote + curly apostrophe + em-dash spacing snap to exact raw UTF-16 spans,
+        //    and heading-to-body mashup is rejected.
+        val payload = LedgerJson.parseToJsonElement(
+            """{
+                "coreClaims":[
+                    {"claim":"劳动衡量真实财富","importance":"CORE","pdfPage":23,"quoteAnchor":"part of these with which a man's own labour can supply him"},
+                    {"claim":"变种与物种连续性","importance":"CORE","pdfPage":33,"quoteAnchor":"cannot be distinguished from species, - except, firstly, by the discovery"},
+                    {"claim":"误拼接标题与正文","importance":"CORE","pdfPage":23,"quoteAnchor":"THEIR PRICE IN MONEY. Every man is rich or poor"}
+                ]
+            }""",
+        ).jsonObject
+
+        val (verified, stats, _) = StudyModeAnchorGate.verifyAndRepair(
+            payload = payload,
+            pages = epubPages,
+            repairTransport = null,
+            bookId = "epub-1",
+            chapterNum = 5,
+            friend = null,
+            device = null,
+        )
+        val kept = verified["coreClaims"]!!.jsonArray
+        assertEquals(2, kept.size, "Two valid EPUB quotes kept; heading-to-body mashup rejected")
+        assertEquals(1, stats.dropped)
+
+        val c0 = kept[0].jsonObject
+        val s0 = c0["startUtf16"]!!.jsonPrimitive.intOrNull!!
+        val e0 = c0["endUtf16"]!!.jsonPrimitive.intOrNull!!
+        assertTrue(s0 in 0 until e0)
+        assertEquals(wealthP23.substring(s0, e0), c0["quoteAnchor"]!!.jsonPrimitive.content)
+
+        val c1 = kept[1].jsonObject
+        val s1 = c1["startUtf16"]!!.jsonPrimitive.intOrNull!!
+        val e1 = c1["endUtf16"]!!.jsonPrimitive.intOrNull!!
+        assertTrue(s1 in 0 until e1)
+        assertEquals(originP33.substring(s1, e1), c1["quoteAnchor"]!!.jsonPrimitive.content)
+
+        // 2. Verify prompt formatter keeps heading separated from prose (never collapses \n\n\n into a single space).
+        val formatted = StudyModeAnchorGate.formatPageExcerptForPrompt(wealthP23, 1400)
+        assertTrue("\n" in formatted, "Paragraph/heading breaks must remain separated in prompt excerpts")
+        assertFalse("MONEY. Every man" in formatted, "Heading and body paragraph must not be merged onto one line")
+
+        // 3. Verify asyncPending returns non-blocking pending states for chunks -> graph -> complete,
+        //    and backfills a verified clickable claim when the model emits empty coreClaims for a chapter.
+        val pollStep = AtomicInteger(0)
+        val noopStream = object : StudyModeStreamTransport {
+            override fun streamGenerate(systemPrompt: String, userPrompt: String, maxTokens: Int, friend: String?, device: String?, onDelta: (String, Long) -> Unit): StudyModeTransportReply =
+                error("not used")
+        }
+        val pendingTransport = object : StudyModeBatchTransport {
+            override fun complete(task: String, jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int, useBatchApi: Boolean, friend: String?, device: String?): StudyModeTransportReply =
+                error("asyncPending must use completeOrPending")
+
+            override fun completeOrPending(task: String, jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int, useBatchApi: Boolean, friend: String?, device: String?): StudyModeTransportReply {
+                val step = pollStep.get()
+                if ("Synthesize a whole-book" in systemPrompt) {
+                    if (step < 2) throw BatchPending(8_000L)
+                    return StudyModeTransportReply(
+                        text = """{"thematicClusters":[{"clusterId":"c1","title":"价值与分工","themeSummary":"劳动决定价值","chapterNums":[1,2,3,4,5,6,7]}],"dependencyEdges":[],"fastSkimOrder40Min":[{"chapterNum":5,"minutes":5,"focus":"劳动价值"}],"masterGlossary":[]}""",
+                        routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                        model = BridgeClient.HAIKU,
+                        inputTokens = 100,
+                        outputTokens = 80,
+                        firstTokenMs = 10L,
+                        elapsedMs = 20L,
+                    )
+                }
+                val isSecondChunk = "CHAPTER 7:" in userPrompt
+                if (step == 0 && isSecondChunk) throw BatchPending(12_000L)
+                val nums = Regex("CHAPTER (\\d+):").findAll(userPrompt).map { it.groupValues[1].toInt() }.toList()
+                val chaptersJson = buildJsonArray {
+                    nums.forEach { n ->
+                        add(
+                            buildJsonObject {
+                                put("chapterNum", n)
+                                put("chapterTitle", "Chapter $n")
+                                put("chapterRole", "CORE")
+                                put("oneLiner", "第 $n 章核心主题")
+                                put("estimatedMinutes", 15)
+                                put("readingDepth", "CORE_SKIM")
+                                // Simulate Ch.3 returning empty coreClaims (e.g. dropped or omitted)
+                                put("coreClaims", buildJsonArray {})
+                            },
+                        )
+                    }
+                }
+                return StudyModeTransportReply(
+                    text = buildJsonObject { put("chapters", chaptersJson) }.toString(),
+                    routeChannel = CompanionRouteChannel.HAIKU_BATCH,
+                    model = BridgeClient.HAIKU,
+                    inputTokens = 100,
+                    outputTokens = 80,
+                    firstTokenMs = 10L,
+                    elapsedMs = 20L,
+                )
+            }
+        }
+        val service = StudyModePackService(noopStream, pendingTransport)
+        val chapters7 = (1..7).map { n ->
+            BookMapChapterInput(
+                chapterNum = n,
+                chapterTitle = "Chapter $n",
+                pages = listOf(StudyPageInput(n * 10 + 3, if (n == 3) originP33 else wealthP23)),
+                sections = listOf(StudySectionInput("ch-$n", "Chapter $n", n * 10 + 3, n * 10 + 8)),
+            )
+        }
+        val batchReq = BookMapBatchRequest(
+            bookId = "epub-async",
+            bookTitle = "Wealth and Origin",
+            detailLevel = ServerDetailLevel.BRIEF,
+            explainLang = ServerExplainLang.BILINGUAL,
+            chapters = chapters7,
+            useBatchApi = true,
+            bypassCache = true,
+            asyncPending = true,
+        )
+
+        val poll1 = service.generateBookMapBatch(batchReq)
+        assertEquals(true, poll1["pending"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals("chapters", poll1["stage"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(1, poll1["completedChunks"]?.jsonPrimitive?.intOrNull)
+        assertEquals(2, poll1["totalChunks"]?.jsonPrimitive?.intOrNull)
+
+        pollStep.set(1)
+        val poll2 = service.generateBookMapBatch(batchReq)
+        assertEquals(true, poll2["pending"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals("graph", poll2["stage"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(2, poll2["completedChunks"]?.jsonPrimitive?.intOrNull)
+
+        pollStep.set(2)
+        val done = service.generateBookMapBatch(batchReq)
+        assertEquals(null, done["pending"]?.jsonPrimitive?.booleanOrNull)
+        val doneChapters = done["chapters"]!!.jsonArray
+        assertEquals(7, doneChapters.size)
+        for (chEl in doneChapters) {
+            val ch = chEl.jsonObject
+            val claims = ch["coreClaims"]!!.jsonArray
+            assertTrue(claims.isNotEmpty(), "Every chapter must have at least one clickable coreClaim: $ch")
+            val cl = claims[0].jsonObject
+            val start = cl["startUtf16"]!!.jsonPrimitive.intOrNull!!
+            val end = cl["endUtf16"]!!.jsonPrimitive.intOrNull!!
+            val pg = cl["pdfPage"]!!.jsonPrimitive.intOrNull!!
+            val expectedPageText = chapters7.first { it.chapterNum == ch["chapterNum"]!!.jsonPrimitive.intOrNull }.pages.first { it.pdfPage == pg }.text
+            assertTrue(start in 0 until end)
+            assertEquals(expectedPageText.substring(start, end), cl["quoteAnchor"]!!.jsonPrimitive.content)
         }
     }
 }

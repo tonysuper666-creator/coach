@@ -1969,16 +1969,21 @@ internal fun TextbookReader(
                                     targetPage.text.substring(anchor.startUtf16, anchor.endUtf16) == anchor.quoteAnchor
                                 ) {
                                     BookPassage(book.id, anchor.pdfPage, anchor.startUtf16, anchor.endUtf16, anchor.quoteAnchor)
-                                } else if (targetPage != null && anchor.quoteAnchor.isNotBlank()) {
-                                    val gate = SentenceCitationGate.verifyOrSnapAnchor(anchor.quoteAnchor, targetPage.text)
-                                    if (gate.verified && gate.startUtf16 in 0 until gate.endUtf16 && gate.endUtf16 <= targetPage.text.length) {
-                                        BookPassage(
-                                            book.id,
-                                            anchor.pdfPage,
-                                            gate.startUtf16,
-                                            gate.endUtf16,
-                                            targetPage.text.substring(gate.startUtf16, gate.endUtf16),
-                                        )
+                                } else if (anchor.quoteAnchor.isNotBlank()) {
+                                    val resolved = resolveStudyModeAnchor(
+                                        book = book,
+                                        claimedPage = anchor.pdfPage,
+                                        quoteAnchor = anchor.quoteAnchor,
+                                        hintedStartUtf16 = anchor.startUtf16,
+                                        hintedEndUtf16 = anchor.endUtf16,
+                                    )
+                                    val resolvedPage = book.page(resolved.pdfPage)
+                                    if (resolvedPage != null &&
+                                        resolved.startUtf16 in 0 until resolved.endUtf16 &&
+                                        resolved.endUtf16 <= resolvedPage.text.length &&
+                                        resolvedPage.text.substring(resolved.startUtf16, resolved.endUtf16) == resolved.quoteAnchor
+                                    ) {
+                                        BookPassage(book.id, resolved.pdfPage, resolved.startUtf16, resolved.endUtf16, resolved.quoteAnchor)
                                     } else null
                                 } else null
                                 if (exactPassage != null) {

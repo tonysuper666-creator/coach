@@ -461,6 +461,7 @@ internal fun ModeDistinctCompanionSurface(
     modeError: String? = null,
     bookMapMeta: WholeBookMapMeta? = null,
     bookMapBatchLoading: Boolean = false,
+    bookMapBatchStatus: String? = null,
     onRequestBookMapBatch: (() -> Unit)? = null,
     onRetryModePack: (() -> Unit)? = null,
 ) {
@@ -495,6 +496,7 @@ internal fun ModeDistinctCompanionSurface(
         bookMapPack = bookMapPack,
         bookMapMeta = bookMapMeta,
         bookMapBatchLoading = bookMapBatchLoading,
+        bookMapBatchStatus = bookMapBatchStatus,
         draft = draft,
         onUpdateDraft = onUpdateDraft,
         onOpenAnchor = onOpenAnchor,
@@ -534,13 +536,27 @@ internal fun ModeDistinctCompanionSurface(
                     Text("各节角色分工", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
                     bookMapPack.sectionArchitecture.forEachIndexed { roleIdx, role ->
                         val targetPage = resolveBookMapSectionPage(role, roleIdx, chapterGroup, bookMapPack)
+                        val roleAnchor = remember(book.id, targetPage, role.quoteAnchor, role.startUtf16, role.endUtf16, chapterGroup.firstPage, chapterGroup.lastPage) {
+                            if (role.quoteAnchor.isNotBlank()) {
+                                resolveStudyModeAnchor(
+                                    book = book,
+                                    claimedPage = targetPage,
+                                    quoteAnchor = role.quoteAnchor,
+                                    chapterPageRange = chapterGroup.firstPage..chapterGroup.lastPage,
+                                    hintedStartUtf16 = role.startUtf16,
+                                    hintedEndUtf16 = role.endUtf16,
+                                ).takeIf { it.startUtf16 in 0 until it.endUtf16 }
+                            } else null
+                        }
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(CoachV7.Radius.s))
                                 .background(colors.surface2)
                                 .border(1.dp, colors.borderSubtle, RoundedCornerShape(CoachV7.Radius.s))
-                                .clickable { onJumpPage(targetPage) }
+                                .clickable {
+                                    if (roleAnchor != null) onOpenAnchor(roleAnchor) else onJumpPage(targetPage)
+                                }
                                 .padding(10.dp)
                                 .testTag("book-map-section-$roleIdx"),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -978,10 +994,13 @@ internal fun ModeDistinctCompanionSurface(
 
 @Composable
 internal fun LiveReadThroughOverviewCard(
+    book: Textbook,
+    chapterGroup: ChapterSectionGroup? = null,
     pack: ReadThroughModePack,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
 ) {
     val colors = CoachTheme.colors
+    val chapterRange = chapterGroup?.let { it.firstPage..it.lastPage }
     PaperCard(Modifier.fillMaxWidth().testTag("live-read-through-card"), color = colors.surface2, contentPadding = PaddingValues(12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (pack.learningArc.isNotBlank()) {
@@ -995,8 +1014,11 @@ internal fun LiveReadThroughOverviewCard(
                     Text(sec.plainExplanation, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                     if (sec.formulaNote.isNotBlank()) CoachCardMeta("公式核对：${sec.formulaNote}")
                     if (sec.quoteAnchor.isNotBlank()) {
-                        V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(sec.pdfPage, sec.quoteAnchor, 0, 0, sec.quoteAnchor)) }) {
-                            Text("回原文 p.${sec.pdfPage} 核对原句")
+                        val resolvedAnchor = remember(book.id, sec.pdfPage, sec.quoteAnchor, chapterRange) {
+                            resolveStudyModeAnchor(book, sec.pdfPage, sec.quoteAnchor, chapterRange)
+                        }
+                        V7TextButton(onClick = { onOpenAnchor(resolvedAnchor) }) {
+                            Text("回原文 p.${resolvedAnchor.pdfPage} 核对原句")
                         }
                     }
                 }
@@ -1020,6 +1042,7 @@ private fun LiveModeStatusAndExtraDeck(
     bookMapPack: BookMapOnePagerPack?,
     bookMapMeta: WholeBookMapMeta?,
     bookMapBatchLoading: Boolean,
+    bookMapBatchStatus: String? = null,
     draft: ChapterPracticeDraft,
     onUpdateDraft: ((ChapterPracticeDraft) -> ChapterPracticeDraft) -> Unit,
     onOpenAnchor: (BookCompanionAnchor) -> Unit,
@@ -1074,14 +1097,29 @@ private fun LiveModeStatusAndExtraDeck(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (claims.isNotEmpty()) {
                             Text("核心论断与原文锚点（${bookMapPack?.estimatedMinutes ?: 20} 分钟建议）", style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary)
-                            for (c in claims.take(4)) {
+                            claims.take(4).forEachIndexed { claimIdx, c ->
                                 val claimPage = c.pdfPage.takeIf { it in chapterGroup.firstPage..chapterGroup.lastPage }
                                     ?: chapterGroup.firstPage.coerceAtLeast(1)
+                                val resolvedAnchor = remember(book.id, claimPage, c.quoteAnchor, c.startUtf16, c.endUtf16, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                    if (c.quoteAnchor.isNotBlank()) {
+                                        resolveStudyModeAnchor(
+                                            book = book,
+                                            claimedPage = claimPage,
+                                            quoteAnchor = c.quoteAnchor,
+                                            chapterPageRange = chapterGroup.firstPage..chapterGroup.lastPage,
+                                            hintedStartUtf16 = c.startUtf16,
+                                            hintedEndUtf16 = c.endUtf16,
+                                        )
+                                    } else null
+                                }
                                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text("• [${c.importance}] ${c.claim}", style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
-                                    if (c.quoteAnchor.isNotBlank()) {
-                                        V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(claimPage, c.quoteAnchor, 0, 0, c.quoteAnchor)) }) {
-                                            Text("定位第 $claimPage 页原句")
+                                    if (resolvedAnchor != null) {
+                                        V7TextButton(
+                                            onClick = { onOpenAnchor(resolvedAnchor) },
+                                            modifier = Modifier.testTag("book-map-claim-jump-$claimIdx"),
+                                        ) {
+                                            Text("定位第 ${resolvedAnchor.pdfPage} 页原句")
                                         }
                                     }
                                 }
@@ -1118,7 +1156,7 @@ private fun LiveModeStatusAndExtraDeck(
                             ) {
                                 Text(
                                     when {
-                                        bookMapBatchLoading -> "正在整书批量整理（24 章一页纸）…"
+                                        bookMapBatchLoading -> bookMapBatchStatus ?: "正在整理整本书全章一页纸与速览地图…"
                                         offline -> "生成整本书全章一页纸与速览地图（需要联网）"
                                         else -> "生成整本书全章一页纸与速览地图"
                                     },
@@ -1149,8 +1187,11 @@ private fun LiveModeStatusAndExtraDeck(
                                     Text("${f.name}: ${f.formulaLatex}", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)
                                     if (f.coefficientNote.isNotBlank()) CoachCardMeta("系数防错：${f.coefficientNote}")
                                     if (f.quoteAnchor.isNotBlank()) {
-                                        V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(f.pdfPage, f.quoteAnchor, 0, 0, f.quoteAnchor)) }) {
-                                            Text("核对原书 p.${f.pdfPage}")
+                                        val resolvedFormula = remember(book.id, f.pdfPage, f.quoteAnchor, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                            resolveStudyModeAnchor(book, f.pdfPage, f.quoteAnchor, chapterGroup.firstPage..chapterGroup.lastPage)
+                                        }
+                                        V7TextButton(onClick = { onOpenAnchor(resolvedFormula) }) {
+                                            Text("核对原书 p.${resolvedFormula.pdfPage}")
                                         }
                                     }
                                 }
@@ -1270,8 +1311,11 @@ private fun LiveModeStatusAndExtraDeck(
                                     CoachCardMeta("✓ 已掌握（$jumpLabel）：${g.passSkipNote}")
                                 } else if (missed) {
                                     CoachCardMeta("纠偏：${g.missRemediation}")
-                                    V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(targetPage, g.quoteAnchor, 0, 0, g.quoteAnchor)) }) {
-                                        Text("答错/待补直达 p.$targetPage 补读原段")
+                                    val resolvedGate = remember(book.id, targetPage, g.quoteAnchor, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                        resolveStudyModeAnchor(book, targetPage, g.quoteAnchor, chapterGroup.firstPage..chapterGroup.lastPage)
+                                    }
+                                    V7TextButton(onClick = { onOpenAnchor(resolvedGate) }) {
+                                        Text("答错/待补直达 p.${resolvedGate.pdfPage} 补读原段")
                                     }
                                 }
                             }
@@ -1321,13 +1365,19 @@ private fun LiveModeStatusAndExtraDeck(
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     if (p.exerciseQuoteAnchor.isNotBlank()) {
-                                        V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(p.exercisePdfPage, p.exerciseQuoteAnchor, 0, 0, p.exerciseQuoteAnchor)) }) {
-                                            Text("看原题 p.${p.exercisePdfPage}")
+                                        val resolvedEx = remember(book.id, p.exercisePdfPage, p.exerciseQuoteAnchor, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                            resolveStudyModeAnchor(book, p.exercisePdfPage, p.exerciseQuoteAnchor, chapterGroup.firstPage..chapterGroup.lastPage)
+                                        }
+                                        V7TextButton(onClick = { onOpenAnchor(resolvedEx) }) {
+                                            Text("看原题 p.${resolvedEx.pdfPage}")
                                         }
                                     }
                                     if (p.quoteAnchor.isNotBlank()) {
-                                        V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(p.bodyPdfPage, p.quoteAnchor, 0, 0, p.quoteAnchor)) }) {
-                                            Text("回查正文 p.${p.bodyPdfPage}")
+                                        val resolvedBody = remember(book.id, p.bodyPdfPage, p.quoteAnchor, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                            resolveStudyModeAnchor(book, p.bodyPdfPage, p.quoteAnchor, chapterGroup.firstPage..chapterGroup.lastPage)
+                                        }
+                                        V7TextButton(onClick = { onOpenAnchor(resolvedBody) }) {
+                                            Text("回查正文 p.${resolvedBody.pdfPage}")
                                         }
                                     }
                                 }
@@ -1351,11 +1401,14 @@ private fun LiveModeStatusAndExtraDeck(
                             Text(qPack.directConclusion, style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
                         }
                         for (hit in qPack.evidenceHits.take(4)) {
+                            val resolvedHit = remember(book.id, hit.bodyJumpPage, hit.quoteAnchor, chapterGroup.firstPage, chapterGroup.lastPage) {
+                                resolveStudyModeAnchor(book, hit.bodyJumpPage, hit.quoteAnchor, chapterGroup.firstPage..chapterGroup.lastPage)
+                            }
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("• p.${hit.bodyJumpPage}: ${hit.howItAnswersQuestion}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                                Text("• p.${resolvedHit.pdfPage}: ${hit.howItAnswersQuestion}", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                                 if (hit.limitOrCounterpoint.isNotBlank()) CoachCardMeta("边界条件：${hit.limitOrCounterpoint}")
-                                V7TextButton(onClick = { onOpenAnchor(BookCompanionAnchor(hit.bodyJumpPage, hit.quoteAnchor, 0, 0, hit.quoteAnchor)) }) {
-                                    Text("直达 p.${hit.bodyJumpPage} 核对原句")
+                                V7TextButton(onClick = { onOpenAnchor(resolvedHit) }) {
+                                    Text("直达 p.${resolvedHit.pdfPage} 核对原句")
                                 }
                             }
                         }

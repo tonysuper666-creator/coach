@@ -103,6 +103,7 @@ const val FREE_GRANT_EXHAUSTED_TEXT = "这个月的免费额度用完了"
 /** TON-740: the server is briefly full (503 `unavailable` with `retryAfterSec`); the client says so and retries by itself. */
 const val SERVICE_BUSY_CODE = "service_busy"
 const val SERVICE_BUSY_TEXT = "人多，几秒后自动重试"
+const val BOOK_MAP_BATCH_TIMEOUT_TEXT = "全书地图生成等待超时，请重试。"
 
 private fun busyReply(retryAfterMs: Long) =
     MockReply(null, SERVICE_BUSY_TEXT, retryable = true, statusCode = 503, code = SERVICE_BUSY_CODE, retryAfterMs = retryAfterMs)
@@ -124,6 +125,54 @@ suspend fun withBusyRetry(
         kotlinx.coroutines.delay((reply.retryAfterMs ?: 5_000L).coerceIn(1_000L, 30_000L))
         if (!stillCurrent()) return reply
         reply = request()
+    }
+    return reply
+}
+
+/**
+ * Polls an asynchronous whole-book map batch job when the server returns `{"pending": true, ...}`,
+ * and retries bounded transient timeouts so long books (e.g. 14–32+ chapter EPUBs) never fail on a single 300s socket wait.
+ */
+suspend fun withBookMapBatchPoll(
+    maxPolls: Int = 60,
+    maxTimeoutRetries: Int = 2,
+    stillCurrent: suspend () -> Boolean = { true },
+    onProgress: (String) -> Unit = {},
+    request: suspend () -> MockReply,
+): MockReply {
+    var reply = withBusyRetry(stillCurrent = stillCurrent, onBusy = onProgress, request = request)
+    var timeoutRetries = 0
+    repeat(maxPolls) {
+        if (!stillCurrent()) return reply
+        val body = reply.body
+        val isPending = body?.get("pending")?.let { (it as? JsonPrimitive)?.booleanOrNull } == true
+        if (isPending && body != null) {
+            val stage = body["stage"]?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+            val done = body["completedChunks"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: 0
+            val total = body["totalChunks"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: 0
+            val notice = when {
+                stage == "graph" -> "全书地图正在汇整跨章脉络，请稍候…"
+                total > 0 -> "全书地图后台整理中（已完成 $done / $total 批），请稍候…"
+                else -> "全书地图正在后台整理，请稍候…"
+            }
+            onProgress(notice)
+            val waitMs = (body["retryAfterMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+                ?.coerceIn(500L, 20_000L) ?: 10_000L
+            kotlinx.coroutines.delay(waitMs)
+            if (!stillCurrent()) return reply
+            reply = withBusyRetry(stillCurrent = stillCurrent, onBusy = onProgress, request = request)
+            return@repeat
+        }
+        val isTimeout = body == null && reply.error == BOOK_MAP_BATCH_TIMEOUT_TEXT
+        if (isTimeout && timeoutRetries < maxTimeoutRetries) {
+            timeoutRetries += 1
+            onProgress("全书地图批处理仍在后台运行，正在重新获取结果…")
+            kotlinx.coroutines.delay(3_000L)
+            if (!stillCurrent()) return reply
+            reply = withBusyRetry(stillCurrent = stillCurrent, onBusy = onProgress, request = request)
+            return@repeat
+        }
+        return reply
     }
     return reply
 }
@@ -730,13 +779,13 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         MockReply(null, "需要联网才能使用，可先查看本地章节结构。", retryable = true, code = "offline")
     }
 
-    /** 2.0-MODES-2: 整本书 24 章一页纸 Batch 管线（全书地图）。 */
+    /** 2.0-MODES-2: 整本书全章一页纸 Batch 管线（全书地图）。 */
     suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): MockReply =
         postCourseEndpoint(
             "api/books/${bookId.encodeURLPathPart()}/book-map/batch",
             input,
             timeoutMs = 300_000L,
-            timeoutMsg = "全书地图生成等待超时，请重试。",
+            timeoutMsg = BOOK_MAP_BATCH_TIMEOUT_TEXT,
             busyRetry = true,
         )
 

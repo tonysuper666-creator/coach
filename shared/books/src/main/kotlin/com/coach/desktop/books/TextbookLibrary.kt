@@ -2098,6 +2098,22 @@ internal class TextbookLibrary(
      * Keep this OCR transcript local to the guide so existing highlights retain their original offsets. */
     fun literatureBook(bookId: String): Textbook {
         val source = book(bookId)
+        if (source.format == "epub") {
+            require(source.indexState == "READY") { "请等待 EPUB 导入完成。" }
+            val notes = LiteratureEpubText.noteTexts(original(bookId, "epub"))
+            val epubPages = source.pages.map { page ->
+                val regions = LiteratureEpubText.clean(page.text, notes)
+                page.copy(text = regions.joinToString("\n\n") { it.text }, textLayout = null, guideRegions = regions)
+            }
+            val epubMeta = LiteratureMetadata.extract(
+                pdf = null,
+                bookId = source.id,
+                storedTitle = source.title,
+                sourceFilename = sourceFilename(bookId),
+                firstPagesText = epubPages.take(2).map { it.text },
+            )
+            return source.copy(pages = epubPages, literatureMeta = epubMeta)
+        }
         require(source.format == "pdf" && source.indexState == "READY" && !source.hasPendingOcr) { "请等待 PDF 导入和扫描页识别完成。" }
         val filename = sourceFilename(bookId)
         val file = original(bookId, "pdf").toFile()

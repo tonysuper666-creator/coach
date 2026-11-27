@@ -191,7 +191,7 @@ internal object LiteratureMetadata {
         val rawStem = (sourceFilename ?: storedTitle)
             .substringAfterLast('/')
             .substringAfterLast('\\')
-            .replace(Regex("""(?i)\.pdf$"""), "")
+            .replace(Regex("""(?i)\.(?:pdf|epub)$"""), "")
             .trim()
         val fileStem = rawStem.replace('_', ' ').replace(Regex("""\s+"""), " ").trim()
         val strippedStem = fileStem.replace(coursePrefix, "").trim().ifEmpty { fileStem }

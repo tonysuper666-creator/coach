@@ -22,7 +22,7 @@ internal fun LiteratureGuidePane(
     onBack: () -> Unit,
     onSource: (GuideExcerpt) -> Unit,
 ) {
-    val materials = detail.materials.filter { it.format.equals("pdf", true) }
+    val materials = detail.materials.filter { it.format.equals("pdf", true) || it.format.equals("epub", true) }
     val scope = rememberCoroutineScope()
     var selected by remember(detail.courseId) { mutableStateOf(materials.takeIf { it.size in 3..5 }?.map { it.bookId }.orEmpty()) }
     val paperMetas = remember(detail.courseId) { mutableStateMapOf<String, LiteraturePaperMeta>() }
@@ -72,10 +72,13 @@ internal fun LiteratureGuidePane(
             }
 
             val ocr = CachingOcrVerifier(object : LiteratureOcrVerifier {
+                // EPUB 是文字版，不需要 OCR：用已清洗的页文本核对引文。
                 override fun ocrPageText(book: Textbook, pdfPage: Int): String =
-                    library.ocrPdfPageForGuide(book.id, pdfPage)
+                    if (book.format == "epub") book.page(pdfPage)?.text.orEmpty()
+                    else library.ocrPdfPageForGuide(book.id, pdfPage)
                 override fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? =
-                    library.ocrPdfQuoteCropForGuide(book.id, pdfPage, quote)
+                    if (book.format == "epub") null
+                    else library.ocrPdfQuoteCropForGuide(book.id, pdfPage, quote)
             })
             val passes = mutableListOf<GuidePassDiagnostic>()
 
@@ -189,7 +192,7 @@ internal fun LiteratureGuidePane(
             val current = guide
             if (current == null) {
                 Text("本周文献一页纸", style = MaterialTheme.typography.headlineSmall)
-                Text("选 3–5 篇 PDF，核对作者、年份与标题后生成。只将选中文献的片段和思考题发送给学习服务。")
+                Text("选 3–5 份 PDF 或 EPUB，核对作者、年份与标题后生成。只将选中文献的片段和思考题发送给学习服务。")
                 materials.forEach { m ->
                     val checked = m.bookId in selected
                     val meta = paperMetas[m.bookId] ?: LiteraturePaperMeta(
@@ -261,7 +264,7 @@ internal fun LiteratureGuidePane(
                     Text("生成或打开一页纸")
                 }
                 if (prompts.size > 7) Text("一次最多放 7 个思考题。")
-                if (materials.size < 3) Text("请先回课程页补充 PDF 材料。")
+                if (materials.size < 3) Text("请先回课程页补充 PDF 或 EPUB 材料。")
                 if (notice.isNotEmpty()) Text(notice, modifier = Modifier.testTag("guide-notice"))
                 if (failures.isNotEmpty()) {
                     Column(
@@ -318,7 +321,7 @@ internal fun LiteratureGuidePane(
                                         onClick = { onSource(src) },
                                         modifier = Modifier.testTag("guide-answer-source-${src.book.id}-${src.anchor.pdfPage}"),
                                     ) {
-                                        Text("${tag}PDF 第 ${src.anchor.pdfPage} 页", style = MaterialTheme.typography.labelSmall)
+                                        Text("${tag}${if (src.book.format == "epub") "" else "PDF "}第 ${src.anchor.pdfPage} 页", style = MaterialTheme.typography.labelSmall)
                                     }
                                 }
                             }
@@ -336,8 +339,8 @@ private fun GuideSource(source: GuideExcerpt, showQuote: Boolean, onSource: (Gui
         onClick = { onSource(source) },
         modifier = Modifier.testTag("guide-source-${source.anchor.pdfPage}"),
     ) {
-        val label = if (showQuote) "PDF 第 ${source.anchor.pdfPage} 页　“${source.anchor.quoteAnchor}”"
-        else "PDF 第 ${source.anchor.pdfPage} 页"
+        val label = if (showQuote) "${if (source.book.format == "epub") "" else "PDF "}第 ${source.anchor.pdfPage} 页　“${source.anchor.quoteAnchor}”"
+        else "${if (source.book.format == "epub") "" else "PDF "}第 ${source.anchor.pdfPage} 页"
         Text(label, style = MaterialTheme.typography.bodySmall)
     }
 }

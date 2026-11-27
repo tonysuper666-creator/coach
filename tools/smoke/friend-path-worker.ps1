@@ -1115,6 +1115,18 @@ function Find-Step6PretestState($lines, [int]$winW, [int]$winH, $fallbackStrip =
     $opt = if ($above.Count -gt 0) { $above[-1] } else { $null }
     [pscustomobject]@{ Submit = $sb; Strip = $curStrip; Option = $opt }
 }
+# 读前自测题卡出来了没有：先认题号行「第 i / N 题」（OCR 偶把「题」认成繁写「題」）。
+# 题号字小，11-27 07:51 那帧整卡都在、题号却一行没认出来：这时同一帧有「这题是猜的」，
+# 且按 Find-Step6PretestState 认得出模块条、提交和它上面的选项，也算题卡就绪。返回认到的那一行，没就绪返回 $null。
+function Find-Step6QuestionCard($lines, [int]$winW, [int]$winH, $fallbackStrip = $null) {
+    $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
+    if ($q) { return $q }
+    $guess = $lines | Where-Object { ($_.Text -replace '\s', '') -match '这题是猜的' } | Select-Object -First 1
+    if (-not $guess) { return $null }
+    $st = Find-Step6PretestState $lines $winW $winH $fallbackStrip
+    if ($st.Submit -and $st.Strip -and $st.Option) { return $st.Option }
+    return $null
+}
 # 跳页框里的数字紧挨在「前往」左边。认不出返回 $null（调用方仍可提交，交给页码断言）。
 # 读到截断数字时调用方不得按回车。
 function Get-JumpFieldText($lines) {
@@ -2269,12 +2281,12 @@ try {
             $lines = Shot 6 $(if ($stTry -eq 1) { 'pretest' } else { "pretest-click$stTry" })
             if (($lines | Where-Object { ($_.Text -replace '\s', '') -match '读前自测|^第\d+[/／]\d+[题題]|本章暂无读前自测' } | Select-Object -First 1)) { break }
         }
-        # 等题目卡：题号行「第 i / N 题」（Windows OCR 偶把简写「题」认成繁写「題」）；空卡直接写「本章暂无读前自测题。」。
+        # 等题目卡：题号行，或题号没认出来但答题控件齐全（见 Find-Step6QuestionCard）；空卡直接写「本章暂无读前自测题。」。
         $deadline = (Get-Date).AddSeconds(60); $q = $null
         while ((Get-Date) -lt $deadline -and -not $q) {
             $lines = $script:Last
-            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
-            if ($q) { break }
+            $q = Find-Step6QuestionCard $lines $winW $winH $strip
+            if ($q) { Note "步骤6 题卡就绪：$($q.Text)"; break }
             # 伴读包没拿到时同一句话顶在模块下面（和第 ⑤ 步同一个 ExplainTrouble.UNREACHABLE）：
             # 这不是「界面变了」，是客户端没收到 JSON（门没转发 companion/chapter 时回的是 nginx 404 页）。
             $why6 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '连不上' } | Select-Object -First 1

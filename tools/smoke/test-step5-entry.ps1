@@ -1,4 +1,4 @@
-﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「导入文件」补点、第 7 步三下的状态确认（退出码：0 = 全部通过）。
+﻿# 离线回归：第 5 步入口那三下的重试闭环、弹窗内定位、第 2 步「导入文件」补点、第 7 步三下的状态确认、第 6 步题卡就绪（退出码：0 = 全部通过）。
 #  - 状态没变才算没点成：Done 一成立就停手，不重复点；
 #  - 位置找不到就不再拿旧坐标点第二下（否则会点在弹窗关掉之后的页面上）；
 #  - 「边看边学」只认弹窗里和「看书」「做题学」并排的那个 chip，不认书架右栏那一行；
@@ -748,6 +748,43 @@ Check 'step6-pretest-uses-current-strip-after-scroll' ([bool]$state6Scrolled.Str
 $pretestNoStripFrame = @($pretestScrolledFrame | Where-Object { $_.Text -notin @('要点', '自测', '推导') })
 $state6NoStrip = Find-Step6PretestState $pretestNoStripFrame 2160 1350 $staleStrip
 Check 'step6-pretest-ignores-stale-strip-below-submit' ([bool]$state6NoStrip.Submit -and [bool]$state6NoStrip.Option -and $state6NoStrip.Option.Text -eq 'B. 最后一项') "opt=$($state6NoStrip.Option.Text)"
+
+# 50. 步骤 6 题卡就绪：题号行认不出（11-27 07:51 那帧）但同帧「这题是猜的」+ 模块条 + 选项 + 提交齐全也算；
+#     只有下面「用自己的话说」那张卡的「提交」、没有「这题是猜的」时不算（不能把它当题卡去点）。
+$cardNoNumber = @(
+    (New-Line '要点' 1650 654 48 20),
+    (New-Line '自测' 1710 654 48 20),
+    (New-Line '推导' 1770 654 48 20),
+    (New-Line '占位题干第一行' 1620 720 300 24),
+    (New-Line 'A. 甲' 1620 820 140 24),
+    (New-Line 'B. 乙' 1620 886 140 24),
+    (New-Line 'C. 丙' 1620 952 140 24),
+    (New-Line 'D. 丁' 1620 1007 140 24),
+    (New-Line '这题是猜的' 1620 1082 120 24),
+    (New-Line '提交' 2020 1082 64 24),
+    (New-Line '这一章，用自己的话说' 1620 1160 260 24)
+)
+$card6 = Find-Step6QuestionCard $cardNoNumber 2160 1350 $null
+Check 'step6-card-ready-without-question-number' ([bool]$card6 -and $card6.Text -eq 'D. 丁') "card=$($card6.Text)"
+$cardWithNumber = @((New-Line '第 1 / 3 题' 1620 690 120 22)) + $cardNoNumber
+$card6n = Find-Step6QuestionCard $cardWithNumber 2160 1350 $null
+Check 'step6-card-ready-by-question-number' ([bool]$card6n -and $card6n.Text -eq '第 1 / 3 题') "card=$($card6n.Text)"
+$ownWordsOnly = @(
+    (New-Line '要点' 1650 654 48 20),
+    (New-Line '自测' 1710 654 48 20),
+    (New-Line '读前·先做几道' 1620 720 200 24),
+    (New-Line '这一章，用自己的话说' 1620 1160 260 24),
+    (New-Line '占位输入提示' 1620 1220 260 24),
+    (New-Line '提交' 2020 1258 64 24)
+)
+Check 'step6-card-not-ready-on-own-words-submit' ($null -eq (Find-Step6QuestionCard $ownWordsOnly 2160 1350 $null)) 'own-words submit accepted as question card'
+$guessNoOption = @(
+    (New-Line '要点' 1650 654 48 20),
+    (New-Line '自测' 1710 654 48 20),
+    (New-Line '这题是猜的' 1620 700 120 24),
+    (New-Line '提交' 2020 700 64 24)
+)
+Check 'step6-card-not-ready-without-option' ($null -eq (Find-Step6QuestionCard $guessNoOption 2160 1350 $null)) 'accepted with no option above submit'
 
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"

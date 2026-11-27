@@ -303,4 +303,60 @@ class ExamCoverageTest {
         assertEquals(5, reversedReport.covered)
         assertEquals(identified.toSet(), combinedReport.coveredPoints.toSet())
     }
+
+    @Test
+    fun stripsEndOfPaperInstructionsAndMatchesSpecificPopulatedBankPoint() {
+        val paperWithTailNotes = """
+            The University of Test
+            ECON99999 December 2025 Examination
+            Time Allowed: 2 hours
+            Notes for Candidates:
+            1. Write your examination number on the front cover.
+            2. Calculators are not permitted in this examination.
+
+            1. Discuss Moral Hazard in health insurance contracts.
+            2. Explain Risk Aversion in household portfolio choice.
+
+            Examinations Office
+            The University of Test 2025
+            Notes
+            1. Check that this paper has 4 pages.
+            2. You must remain seated until the invigilator collects your script.
+            3. Write your candidate number on every answer booklet.
+            4. Dictionaries are not permitted.
+            5. Mobile phones must be switched off.
+            6. Place bags at the front of the examination room.
+            7. Rough work must be done in the answer booklet.
+            8. Do not remove any paper from the hall.
+            9. Stop writing immediately when told to stop.
+            10. Hand in your separate answer sheet before leaving.
+            11. Unfair means will be reported to the Board of Examiners.
+            12. Use black ink or blue ballpoint pen only.
+            13. Write legibly on both sides of each page.
+            14. Read all instructions carefully before leaving.
+        """.trimIndent()
+
+        val questions = HeldOutDecomposer.questionsFromDocument(paperWithTailNotes)
+        assertEquals(2, questions.size)
+        assertFalse(questions.any { "Examinations Office" in it || "University" in it || "candidate number" in it })
+
+        val identified = listOf("Moral", "Moral hazard", "Risk", "Risk aversion")
+        val bank = listOf(
+            // Shorter 0-question entries appear BEFORE the specific populated points.
+            CoverageBankPoint("Moral", choices = 0, essay = false),
+            CoverageBankPoint("Risk", choices = 0, essay = false),
+            CoverageBankPoint("Moral hazard", choices = 3, essay = false),
+            CoverageBankPoint("Risk aversion", choices = 2, essay = true),
+        )
+        val textbook = """
+            Moral hazard: Hidden action after a contract is signed.
+            Risk aversion: Preference for a certain payoff over a risky lottery.
+        """.trimIndent()
+
+        val report = ExamCoverage.evaluate(questions, identified, bank, textbook)
+        assertEquals(2, report.heldOutPoints)
+        assertEquals(2, report.covered)
+        assertEquals(listOf("Moral hazard", "Risk aversion"), report.coveredPoints)
+        assertEquals(emptyList(), report.uncovered)
+    }
 }

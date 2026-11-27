@@ -72,9 +72,11 @@ class LiteratureComparisonService(private val bridge: BridgeClient) {
 {"rows":[{"bookId":"对应bookId","claim":{"text":"主张","ref":0},"method":{"text":"方法或证据","ref":1},"concepts":[{"text":"关键概念","ref":2}],"relations":[{"otherBookId":"另一篇bookId","kind":"support","text":"两篇如何相关","ref":3}]}],"outline":[{"thesis":"论点","supports":[{"bookId":"...","ref":0}],"opposes":[{"bookId":"...","ref":1}]}]}
 要求：
 1. rows 严格对应输入的每一篇 bookId，每篇恰好一项。claim 是该篇主张，method 是方法或证据，concepts 是关键概念，relations 是它和组里其他篇的关系。
-2. kind 只能是 support（支持）、refute（反驳）或 supplement（补充）。otherBookId 必须是组里的另一篇。
+2. kind 只能是 support（支持）、refute（反驳）或 supplement（补充）。otherBookId 必须是组里的另一篇。kind 必须能从本行所引的那一句直接看出来；看不出来就不要写这条关系。
 3. outline 给出 3 到 6 个论点。supports 列出支持该论点的文献，opposes 列出反对的文献。
-4. 每个 ref 必须是本次 blocks 里的整数，并且属于该 bookId 的片段。
-5. text 和 thesis 用自己的话，不超过 80 字，不要抄 blocks 里的原句。没有依据就不要编。"""
+4. 主张、方法、概念和关系的 ref 都必须是本次 blocks 里的整数，而且必须是本行这一篇（rows 里的 bookId）自己的片段。关系格不要改引 otherBookId 那一篇。
+5. 提纲里每个支持方的 ref 属于 supports 里写的那一篇。每个反对方的 ref 必须属于反对者自己的那一篇，不要引别人转述它的句子。
+6. 同一对文献两个方向的 kind 要一致：一边写成支持，另一边也写成支持；一边写成反驳，另一边也写成反驳。不要一边写成支持、另一边写成反驳。
+7. text 和 thesis 用自己的话，不超过 80 字，不要抄 blocks 里的原句。没有依据就不要编。某一篇没有可用正文句时，不要用半句或注释充数。"""
     }
 }

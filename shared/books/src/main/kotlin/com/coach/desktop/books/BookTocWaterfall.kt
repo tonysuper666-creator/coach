@@ -390,8 +390,9 @@ internal object BookTocWaterfall {
             // A printed contents page often lists details at chapter depth. Prefer the
             // physical openings when the inferred major destinations largely disagree.
             val chapterStarts = tocNodes.filter { it.kind == TocNodeKind.CHAPTER }.map { it.startPage }
+            val unmatched = openings.mapTo(mutableSetOf()) { it.page }
             val supported = openings.isEmpty() || chapterStarts.count { start ->
-                openings.any { kotlin.math.abs(it.page - start) <= 1 }
+                unmatched.remove(start) || unmatched.remove(start - 1) || unmatched.remove(start + 1)
             } * 2 > chapterStarts.size
             if (conf >= 0.85 && supported) {
                 val refinedRoles = refinePageRolesWithToc(pages, initialRoles, tocNodes, byPage, nativeBodyStart = nativeBodyStart)

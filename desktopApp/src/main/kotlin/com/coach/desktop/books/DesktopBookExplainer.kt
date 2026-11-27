@@ -278,7 +278,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                     markRevoked()
                     CourseServerCallResult(null, ExplainTrouble.revoked(sableLogin), trouble)
                 }
-                body == null -> CourseServerCallResult(null, ExplainTrouble.message(trouble, reply.error), trouble)
+                body == null -> CourseServerCallResult(null, ExplainTrouble.message(trouble, reply.error), trouble, reply.code)
                 else -> CourseServerCallResult(body, null)
             }
         } catch (cancelled: CancellationException) {

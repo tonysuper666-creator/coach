@@ -45,6 +45,16 @@ interface CourseAlignTransport {
         batchKey: String,
         maxTokens: Int = 3200,
     ): CourseAlignReply
+
+    /** Friends use their own Bridge route and quota. Transports without one refuse instead of spending the owner's. */
+    suspend fun alignCourseForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        batchKey: String,
+        maxTokens: Int = 3200,
+        friend: String,
+        device: String,
+    ): CourseAlignReply = throw FriendServiceError()
 }
 
 /**
@@ -58,22 +68,47 @@ class SonnetBridgeAlignTransport(
         userPrompt: String,
         batchKey: String,
         maxTokens: Int,
+    ): CourseAlignReply = plan(systemPrompt, userPrompt, maxTokens, friend = null, device = null)
+
+    override suspend fun alignCourseForFriend(
+        systemPrompt: String,
+        userPrompt: String,
+        batchKey: String,
+        maxTokens: Int,
+        friend: String,
+        device: String,
+    ): CourseAlignReply = plan(systemPrompt, userPrompt, maxTokens, friend, device)
+
+    private suspend fun plan(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        friend: String?,
+        device: String?,
     ): CourseAlignReply = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
         val result = bridge.chat(
             ChatRequest(
-                task = "COURSE_PLAN",
+                task = if (friend != null) "READER_SELECTION" else "COURSE_PLAN",
                 model = BridgeClient.CLAUDE,
                 system = systemPrompt,
                 user = userPrompt,
                 stream = false,
                 background = false,
                 maxTokens = maxTokens,
+                friendId = friend?.let(::friendId),
+                friendDevice = if (friend != null) device else null,
             ),
         )
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         when (result) {
-            is BridgeResult.Failure -> throw IllegalStateException("课程自动对齐失败：${result.reason}")
+            is BridgeResult.Failure -> {
+                if (friend != null) {
+                    val quota = result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
+                    throw FriendServiceError(quota ?: "unavailable")
+                }
+                throw IllegalStateException("课程自动对齐失败：${result.reason}")
+            }
             is BridgeResult.Success -> CourseAlignReply(
                 text = result.text,
                 routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
@@ -152,7 +187,7 @@ class CourseAlignmentPipeline(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun align(input: JsonObject): JsonObject {
+    suspend fun align(input: JsonObject, friend: String? = null, device: String? = null): JsonObject {
         val courseId = (input["courseId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val courseTitle = (input["courseTitle"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val materials = (input["materials"] as? JsonArray) ?: buildJsonArray {}
@@ -203,12 +238,23 @@ class CourseAlignmentPipeline(
             put("textbookChapters", JsonArray(chapters))
         }.toString()
 
-        val reply = transport.alignCourse(
-            systemPrompt = systemPrompt,
-            userPrompt = userPrompt,
-            batchKey = "course-align-$courseId",
-        )
-        tokenLedger?.record(
+        val reply = if (friend != null) {
+            transport.alignCourseForFriend(
+                systemPrompt = systemPrompt,
+                userPrompt = userPrompt,
+                batchKey = "course-align-$courseId",
+                friend = friend,
+                device = device.orEmpty(),
+            )
+        } else {
+            transport.alignCourse(
+                systemPrompt = systemPrompt,
+                userPrompt = userPrompt,
+                batchKey = "course-align-$courseId",
+            )
+        }
+        // The owner's AI-call table only records the owner's calls; the friend's usage is kept by the Bridge.
+        if (friend == null) tokenLedger?.record(
             TokenLedgerEntry(
                 bookId = courseId.ifBlank { "course" },
                 chapterId = "align",
@@ -266,7 +312,12 @@ class CourseTopicSynthesisPipeline(
         cacheScope: String = "owner",
         bypassCache: Boolean = false,
         currentCheck: suspend () -> Boolean = { true },
+        friend: String? = null,
+        device: String? = null,
     ): JsonObject = coroutineScope {
+        // A friend's calls use their own Bridge route and quota and never land in the owner's AI-call table.
+        val activeTransport = if (friend != null) FriendScopedBatchTransport(transport, friend, device.orEmpty()) else transport
+        val ownerLedger = tokenLedger.takeIf { friend == null }
         val courseId = (input["courseId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val topicId = (input["topicId"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val topicTitle = (input["topicTitle"] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -342,7 +393,7 @@ class CourseTopicSynthesisPipeline(
                             }
                         })
                     }.toString()
-                    val reply = transport.generateSection(
+                    val reply = activeTransport.generateSection(
                         systemPrompt = """
                             请从以下多源课程块提取本专题要点、交叉印证线索及精确逐字引用。
                             每条 citation 必须给出 bookId、page、startUtf16、endUtf16、quote（必须逐字复制原文连续片段，课堂转写请附带 timestampLabel）。
@@ -353,7 +404,7 @@ class CourseTopicSynthesisPipeline(
                         batchKey = "course-map-$topicId-$chunkIdx",
                         maxTokens = 8_000,
                     )
-                    tokenLedger?.record(
+                    ownerLedger?.record(
                         TokenLedgerEntry(
                             bookId = courseId.ifBlank { topicId },
                             chapterId = topicId,
@@ -407,14 +458,14 @@ class CourseTopicSynthesisPipeline(
             输出 JSON 字段：summary, authorityNotice, examFocus, keyPoints, discrepancies, practicePrompt, mathAssertions, citations。
         """.trimIndent()
 
-        val reduceReply = transport.generateSection(
+        val reduceReply = activeTransport.generateSection(
             systemPrompt = reduceSystem,
             userPrompt = reducePrompt,
             task = "course_topic_reduce",
             batchKey = "course-reduce-$topicId",
             maxTokens = 8_000,
         )
-        tokenLedger?.record(
+        ownerLedger?.record(
             TokenLedgerEntry(
                 bookId = courseId.ifBlank { topicId },
                 chapterId = topicId,
@@ -480,7 +531,7 @@ class CourseTopicSynthesisPipeline(
         var combinedAssertions = collectCombinedMathAssertions(activeReduced)
         var mathAudit = CourseQualityGates.auditMathAssertions(combinedAssertions)
         if (combinedAssertions.isNotEmpty() && !mathAudit.passed) {
-            val repairReply = transport.generateSection(
+            val repairReply = activeTransport.generateSection(
                 systemPrompt = "以下数学表达式或数值结论未通过独立 2 位小数校验，请修正 mathAssertions 与对应说明后严格返回 JSON。",
                 userPrompt = buildJsonObject {
                     put("topicId", topicId)
@@ -491,7 +542,7 @@ class CourseTopicSynthesisPipeline(
                 batchKey = "course-math-repair-$topicId",
                 maxTokens = 6_000,
             )
-            tokenLedger?.record(
+            ownerLedger?.record(
                 TokenLedgerEntry(
                     bookId = courseId.ifBlank { topicId },
                     chapterId = topicId,

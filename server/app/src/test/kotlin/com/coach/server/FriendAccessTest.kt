@@ -29,6 +29,9 @@ class FriendAccessTest {
         fun engine(public: Boolean) = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), friends = friends, publicOnly = public)
             libraryExplainRoutes(actor, reader, friends = friends)
+            practiceGradeRoutes(actor, friends = friends)
+            booklistAlignmentRoutes(actor, friends = friends)
+            courseMockRoutes(actor, friends = friends)
         }.apply { start(false) }
         val owner = engine(false)
         val public = engine(true)
@@ -115,23 +118,54 @@ class FriendAccessTest {
         assertEquals(401, exchange().statusCode())
     }
 
-    @Test fun twentyForbiddenPathsHaveEmpty404EvenWithoutAuthenticationAndFriendsCannotUseOwnerPort() = Harness().use { h ->
+    @Test fun twentyForbiddenPathsStaySilentToAnonymousAndOwnerOnlyOnesTellFriendsWhyAsJson() = Harness().use { h ->
         val a = h.pair("甲")
         val paths = listOf("/v1/ws", "/v1/hello", "/v1/commands", "/v1/devices", "/v1/pairing-code", "/v1/usage",
             "/v1/courses/x/snapshot", "/v1/courses/x/today", "/v1/courses/x/sources", "/v1/courses/x/pool",
             "/v1/courses/x/essays", "/v1/prewarm", "/v1/reader", "/v1/library", "/v1/health", "/health",
             "/v1/%64evices", "/v1/%70airing-code", "/v1/library/explain/", "/v1/public/status/../devices")
+        val unknown = setOf("/v1/devices", "/v1/pairing-code", "/v1/reader", "/v1/library", "/v1/health", "/health",
+            "/v1/%64evices", "/v1/%70airing-code", "/v1/library/explain/", "/v1/public/status/../devices")
         for (path in paths) {
             val method = if (path.contains("commands") || path.contains("pairing-code") || path.contains("prewarm")) "POST" else "GET"
-            for (credential in listOf(null, a, h.ownerCredential)) {
+            for (credential in listOf(null, h.ownerCredential)) {
                 val response = h.request(path, method, credential)
                 assertEquals(404, response.statusCode(), path); assertEquals("", response.body(), path)
             }
-            assertEquals(404, h.request(path, method, a, private = true).statusCode(), path)
+            for (private in listOf(false, true)) {
+                val response = h.request(path, method, a, private = private)
+                if (path in unknown) {
+                    assertEquals(404, response.statusCode(), path); assertEquals("", response.body(), path)
+                } else {
+                    assertEquals(403, response.statusCode(), path)
+                    assertEquals("owner_only", parse(response).str("code"), path)
+                }
+            }
         }
         assertEquals(404, h.request("/v1/public/status", credential = h.ownerCredential).statusCode())
         assertEquals(200, h.request("/v1/hello", credential = h.ownerCredential, private = true).statusCode())
-        println("FRIEND_BOUNDARY=20 paths x 3 public identities + owner listener; all denied")
+        println("FRIEND_BOUNDARY=20 paths: anonymous/owner on public 404; friend 403 owner_only on 10, 404 on 10")
+    }
+
+    @Test fun studyFeaturesAddedAfterTwoPointTwoAreReachableOnThePublicListener() = Harness().use { h ->
+        val a = h.pair("乙")
+        val opened = listOf("/v1/library/practice/grade-and-diagnose", "/v1/library/practice/chapter-open-question",
+            "/v1/library/course/align", "/v1/library/course/topic-pack", "/v1/library/course/vision",
+            "/v1/library/course/mock/generate", "/v1/library/booklist/align", "/v1/library/concepts/sayings")
+        for (path in opened) {
+            assertEquals(401, h.request(path, "POST", body = "{}").statusCode(), path)
+            val response = h.request(path, "POST", a, "{}")
+            assertTrue(response.statusCode() != 404 && response.statusCode() != 401, "$path -> ${response.statusCode()}")
+            parse(response)
+        }
+        for ((path, method) in listOf("/v1/library/course/exam-point-drill" to "POST", "/v1/library/companion/ledger?bookId=x" to "GET")) {
+            val body = if (method == "POST") "{}" else ""
+            assertEquals(404, h.request(path, method, body = body).statusCode(), path)
+            val response = h.request(path, method, a, body)
+            assertEquals(403, response.statusCode(), path)
+            assertEquals("owner_only", parse(response).str("code"), path)
+        }
+        println("PUBLIC_OPENED=${opened.size} anonymous 401, friend JSON; OWNER_ONLY=2 friend 403 owner_only")
     }
 
     @Test fun friendsHaveSeparateImportsAnswersAuditsAndNoOwnerLedgerCallsAndRevocationIsImmediate() = runBlocking {

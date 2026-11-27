@@ -58,7 +58,7 @@ internal fun Route.courseRoutes(
                     val allowed = actor.execute { authorize(device, bearer) && friendName(device) == friend }
                     if (!allowed) throw MockError(HttpStatusCode.Conflict, "设备授权已失效，无法对齐课程。")
                 }
-                val body = pipeline.align(input)
+                val body = pipeline.align(input, friend, device)
                 if (friend != null) withContext(Dispatchers.IO) {
                     try { friends!!.record(friend, device, requestId, "complete", body, diagnostics) }
                     catch (_: Exception) { throw FriendServiceError() }
@@ -147,6 +147,8 @@ internal fun Route.courseRoutes(
                         cacheScope = cacheScope,
                         bypassCache = bypassCache,
                         currentCheck = current,
+                        friend = friend,
+                        device = device,
                     )
                 }
                 val grounded = guide || comparison
@@ -190,7 +192,7 @@ internal fun Route.courseRoutes(
         call.withReaderConnection {
             if (call.attributes.getOrNull(observedFriend) != null) {
                 call.respondText(
-                    buildJsonObject { put("error", "考点出题只在自己的电脑上做。") }.toString(),
+                    buildJsonObject { put("code", "owner_only"); put("error", "考点出题只在自己的电脑上做。") }.toString(),
                     ContentType.Application.Json,
                     HttpStatusCode.Forbidden,
                 )

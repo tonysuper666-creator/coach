@@ -47,13 +47,18 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
-        if (publicOnly && !friendPath(call)) {
+        // PublicApiTable decides: open to signed-in accounts, owner only, or unknown.
+        val gate = publicApiGate(call)
+        // The public listener says nothing to anonymous callers about paths a signed-in account cannot use.
+        val silent = publicOnly && gate != PublicApiGate.OPEN
+        if (publicOnly && gate == PublicApiGate.UNKNOWN) {
             call.respondText("", status=HttpStatusCode.NotFound); finish(); return@intercept
         }
         // Pairing is the only unauthenticated operation, and only this exact POST.
         val pairing = call.request.path() == "/v1/pair" && call.request.httpMethod == HttpMethod.Post
         if (call.request.queryParameters.names().any { it.lowercase() in setOf("token", "access_token", "authorization", "code") }) {
-            call.respondText("Unauthorized", status=HttpStatusCode.Unauthorized)
+            if (silent) call.respondText("", status=HttpStatusCode.NotFound)
+            else call.respondText("Unauthorized", status=HttpStatusCode.Unauthorized)
             finish()
             return@intercept
         }
@@ -65,12 +70,13 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val identity = if (device == null || token == null || call.request.headers.getAll("Authorization")?.size != 1) null
                 else actor.execute { if (authorize(device, token)) Pair(device, friendName(device)) else null }
             if (identity == null) {
-                call.respondText("Unauthorized",status=HttpStatusCode.Unauthorized)
+                if (silent) call.respondText("", status=HttpStatusCode.NotFound)
+                else call.respondText("Unauthorized",status=HttpStatusCode.Unauthorized)
                 finish()
                 return@intercept
             }
             val friend = identity.second
-            if ((publicOnly && friend == null) || (friend != null && !friendPath(call))) {
+            if ((publicOnly && friend == null) || (friend != null && gate == PublicApiGate.UNKNOWN)) {
                 call.respondText("", status=HttpStatusCode.NotFound); finish(); return@intercept
             }
             if (friend != null && com.coach.store.isSableFriend(friend)) {
@@ -79,6 +85,10 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                 if (status != HttpStatusCode.OK) {
                     call.respond(status); finish(); return@intercept
                 }
+            }
+            // A signed-in friend learns why, as JSON, instead of an empty 404; the client explains or hides the entry.
+            if (friend != null && gate == PublicApiGate.OWNER_ONLY) {
+                call.respondOwnerOnly(); finish(); return@intercept
             }
             call.attributes.put(observedDevice, identity.first)
             if (friend != null) call.attributes.put(observedFriend, friend)

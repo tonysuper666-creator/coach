@@ -45,7 +45,9 @@ class BooklistSemanticAligner(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun align(input: JsonObject): JsonObject {
+    suspend fun align(input: JsonObject, friend: String? = null, device: String? = null): JsonObject {
+        // A friend's calls go through their own Bridge route and quota, never into the owner's AI-call table.
+        val active = if (friend != null) FriendScopedBatchTransport(transport, friend, device.orEmpty()) else transport
         val collectionTitle = (input["collectionTitle"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().take(120)
         val candidates = (input["candidates"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.take(96)
         if (candidates.isEmpty()) {
@@ -79,7 +81,7 @@ class BooklistSemanticAligner(
                         val batchKey = "booklist-align-${sha256("$collectionTitle|$batchIdx|$userPayload".toByteArray(Charsets.UTF_8)).take(16)}"
 
                         val reply = runCatching {
-                            transport.generateSection(
+                            active.generateSection(
                                 systemPrompt = systemPrompt,
                                 userPrompt = userPayload,
                                 task = "booklist_concept_align",
@@ -87,7 +89,7 @@ class BooklistSemanticAligner(
                                 maxTokens = 2_400,
                             )
                         }.getOrNull() ?: return@withPermit null
-                        ledger?.record(
+                        if (friend == null) ledger?.record(
                             TokenLedgerEntry(
                                 bookId = "booklist:${sha256(collectionTitle.toByteArray(Charsets.UTF_8)).take(12)}",
                                 chapterId = "align-batch-$batchIdx",
@@ -203,7 +205,7 @@ fun Application.booklistAlignmentRoutes(
                     }
                     if (size > 262_144) throw MockError(HttpStatusCode.PayloadTooLarge, "书单对齐请求过大。")
                     val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
-                    val reply = activeAligner.align(input)
+                    val reply = activeAligner.align(input, friend, device)
                     call.respondText(reply.toString(), ContentType.Application.Json)
                 } catch (e: FriendServiceError) {
                     call.respondText(e.body.toString(), ContentType.Application.Json, e.status)

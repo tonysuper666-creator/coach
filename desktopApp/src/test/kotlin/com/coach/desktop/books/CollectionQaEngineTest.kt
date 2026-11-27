@@ -122,6 +122,17 @@ class CollectionQaEngineTest {
                     it.bookId == link.bookId && it.page == link.page && link.quoteAnchor in it.text
                 })
             }
+            // Semantic refusals, including an old server's empty answer, carry no retry-page links.
+            for (response in listOf(
+                buildJsonObject { put("sentences", buildJsonArray {}) },
+                buildJsonObject { put("insufficientEvidence", true) },
+            )) {
+                val refusal = CollectionQaEngine.ask(
+                    lib, courseId, "在 Rothschild-Stiglitz 模型里，为什么混同均衡永远不可能存在？",
+                    remoteAsk = { CourseServerCallResult(body = response, error = null) },
+                ).exceptionOrNull() as CollectionQaException
+                assertTrue(refusal.fallbackPages.isEmpty())
+            }
 
             // 3. End-to-end engine strips fabricated citations & maps valid UTF-16 passage offsets
             val targetBlock = conflictBundle.blocks.first { it.bookId == bookText.id }

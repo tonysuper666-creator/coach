@@ -40,6 +40,35 @@ import kotlin.test.assertTrue
 class CollectionQaServiceTest {
 
     @Test
+    fun insufficientEvidenceDropsEvenAnExactQuoteAndModelConflict() = runBlocking {
+        val phrase = "Copper louvers direct the breeze."
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?,
+                                     maxTokens: Int): CollectionQaTransportReply {
+                assertTrue("insufficientEvidence" in systemPrompt)
+                val output = buildJsonObject {
+                    put("insufficientEvidence", true)
+                    put("sentences", buildJsonArray { add(json("claim" to "The speed is unknown.", "blockId" to "B1", "quoteAnchor" to phrase)) })
+                    put("hasMaterialConflict", true)
+                    put("conflictSummaryZh", "Conflicting materials.")
+                }
+                return CollectionQaTransportReply(output.toString(), "fixture", 10, 10, 1, 2)
+            }
+        }
+        val result = CollectionQaService(transport).ask(buildJsonObject {
+            put("collectionId", "shelf")
+            put("question", "How fast was the wind?")
+            put("blocks", buildJsonArray {
+                add(json("blockId" to "B1", "bookId" to "book", "docLabel" to "House", "page" to 1, "text" to phrase))
+            })
+        })
+        assertTrue(result.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        assertTrue(result.getValue("sentences").jsonArray.isEmpty())
+        assertTrue(result.getValue("conflicts").jsonArray.isEmpty())
+        assertFalse(result.getValue("hasMaterialConflict").jsonPrimitive.boolean)
+    }
+
+    @Test
     fun readBooklistAnswerResolvesTwoIndependentPageCitations() = runBlocking {
         val pages = listOf("Green shutters keep the room cool.", "Copper louvers direct the breeze.")
         val transport = object : CollectionQaTransport {

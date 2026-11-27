@@ -1,5 +1,8 @@
 package com.coach.desktop.books
 
+import java.text.BreakIterator
+import java.util.Locale
+
 internal enum class QuestionMode(val label: String) { NONE("不出"), CHOICE("选择"), SHORT_ANSWER("简答") }
 internal enum class LearningPath(val label: String) {
     READ("看书"), READ_AND_LEARN("边看边学"), QUESTION_FIRST("做题学");
@@ -244,7 +247,26 @@ internal object StudyCoachCourse {
     }
 
     /** 离线或尚未生成导读时的节末三行小结兜底。 */
-    fun localSectionSummary(lesson: BookLesson): List<String> {
+    fun localSectionSummary(lesson: BookLesson, format: String): List<String> {
+        if (format == "pdf") {
+            val iterator = BreakIterator.getSentenceInstance(Locale.ROOT)
+            val prose = buildList {
+                for (block in lesson.blocks.filter { it.isBodyParagraph }) {
+                    val paragraph = LiteratureTextNorm.normalize(block.text)
+                    iterator.setText(paragraph)
+                    var start = iterator.first()
+                    var end = iterator.next()
+                    while (end != BreakIterator.DONE) {
+                        val sentence = paragraph.substring(start, end).trim()
+                        if (LiteraturePassages.bodySentence(sentence)) add(sentence)
+                        start = end
+                        end = iterator.next()
+                    }
+                }
+            }.distinct()
+            // Prefer short complete sentences that fit the card, in their original order.
+            return prose.withIndex().sortedBy { it.value.length }.take(3).sortedBy { it.index }.map { it.value }
+        }
         val sentences = lesson.text.split(sentenceSplitRegex)
             .map { it.trim() }
             .filter { it.length >= 10 }

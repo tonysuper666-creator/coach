@@ -635,7 +635,8 @@ internal fun SingleBookCompanionPanel(
                         val points = pack?.keyPoints.orEmpty().filter { it.sectionId == summarySection.id }.map { it.summary }
                         SectionEndSummaryCard(
                             section = summarySection,
-                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection) },
+                            summaryLines = points.ifEmpty { StudyCoachCourse.localSectionSummary(summarySection, book.format) },
+                            summaryMaxLines = if (book.format == "pdf" && points.isEmpty()) Int.MAX_VALUE else 2,
                             practices = questions.map { (_, q) -> Practice(q.stem, q.anchor?.quoteAnchor.orEmpty(), q.correctOption, q.options) },
                             answers = questions.mapIndexedNotNull { i, (_, q) ->
                                 draft.practiceSelections[q.id]?.takeIf { q.id in draft.practiceSubmitted }?.let {

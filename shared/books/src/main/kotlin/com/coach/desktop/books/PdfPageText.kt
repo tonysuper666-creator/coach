@@ -45,7 +45,7 @@ internal data class PdfPageText(
 
 /** Reusable single-thread stripper for plain UTF-16 PDF page text without allocating per-glyph/line metadata. */
 internal class ReusablePlainPdfTextExtractor {
-    private val stripper = BookPdfStripper().apply {
+    private val stripper = ReadingOrderStripper().apply {
         sortByPosition = true
         paragraphEnd = "\n\n"
     }
@@ -62,6 +62,14 @@ internal class ReusablePlainPdfTextExtractor {
 /** One extraction pass, with exactly the text and cleaning used by TextbookExtraction. */
 internal object PdfPageTextExtraction {
     fun extract(document: BookPdfDocument, page: Int): PdfPageText = extract(document, page, null)
+
+    fun extractMatching(document: BookPdfDocument, page: BookPage): PdfPageText? {
+        val current = extract(document, page.number)
+        if (current.unit.text == page.text) return current
+        // Lazily index highlights on older imports using the order in which their offsets were saved.
+        return PositionStripper(page.number, current.frame, null, useReadingOrder = false)
+            .extract(document).takeIf { it.unit.text == page.text }
+    }
 
     fun extractPlainText(document: BookPdfDocument, page: Int): String {
         require(page in 1..document.numberOfPages)
@@ -118,7 +126,7 @@ internal object PdfPageTextExtraction {
     }
 
     private class PositionStripper(private val page: Int, private val frame: PdfPageFrame,
-        private val inkPadding: Double?) : BookPdfStripper() {
+        private val inkPadding: Double?, useReadingOrder: Boolean = true) : ReadingOrderStripper(useReadingOrder) {
         private val raw = StringWriter()
         private data class Span(val start: Int, val end: Int, val bounds: ReaderRect)
         private val spans = mutableListOf<Span>()
@@ -245,7 +253,7 @@ internal object PdfPageTextExtraction {
     private class FastTypographyStripper(
         private val page: Int,
         private val pageHeight: Double,
-    ) : BookPdfStripper() {
+    ) : ReadingOrderStripper() {
         private val raw = StringWriter()
         private data class Segment(
             val text: String,
@@ -257,6 +265,7 @@ internal object PdfPageTextExtraction {
             val bold: Boolean,
         )
         private val segments = mutableListOf<Segment>()
+        private val articleLines = mutableListOf<PageLineTypography>()
         private val boldFontCache = IdentityHashMap<Any, Boolean>()
 
         init {
@@ -283,8 +292,13 @@ internal object PdfPageTextExtraction {
         fun extract(document: BookPdfDocument): FastPdfPageText {
             writeText(document, raw)
             val clean = TextbookExtraction.clean(raw.toString())
-            val lines = buildTypographyLines()
-            return FastPdfPageText(clean, lines)
+            return FastPdfPageText(clean, articleLines)
+        }
+
+        override fun endArticle() {
+            articleLines += buildTypographyLines()
+            segments.clear()
+            super.endArticle()
         }
 
         override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
@@ -306,7 +320,8 @@ internal object PdfPageTextExtraction {
                 if (x1 > maxX) maxX = x1
                 ySum += pos.yDirAdj.toDouble()
                 hSum += pos.heightDir.toDouble()
-                val pt = pos.fontSizeInPt.toDouble().let { if (it.isFinite() && it > 0.0) it else pos.heightDir.toDouble() }
+                // Publishers often select a 1 pt font and scale it using the text matrix.
+                val pt = pos.yScale.toDouble().let { if (it.isFinite() && it > 0.0) it else pos.heightDir.toDouble() }
                 if (pt.isFinite() && pt > 0.0) {
                     ptSum += pt
                     ptCount++

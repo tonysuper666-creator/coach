@@ -24,5 +24,12 @@ internal fun extractBookPdfOutline(pdf: BookPdfDocument): List<BookOutlineItem> 
     }
 
     walk(root.firstChild, 1)
+    // Journal PDFs often wrap every section in one bookmark named after the paper.
+    val first = result.firstOrNull()
+    if (first != null && first.page == 1 && first.level == 1 &&
+        first.title.equals(pdf.documentInformation?.title?.trim(), ignoreCase = true) &&
+        result.count { it.level == 1 } == 1 && result.count { it.level == 2 } >= 2) {
+        return result.drop(1).map { it.copy(level = it.level - 1) }
+    }
     return result
 }

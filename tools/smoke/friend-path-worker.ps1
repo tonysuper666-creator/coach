@@ -1533,18 +1533,36 @@ try {
     Pass 1 '客户端窗口出现，2.0 首页可见'
 
     # ② 导入一本书
-    $firstOpen = $homeEntry -eq '放进一本书'
-    if ($InstalledExe -and -not $firstOpen) {
-        foreach ($attempt in 1..4) {
-            $homeFrame = Shot 2 "import-home$attempt"
+    # 云端同步可以在步骤 1 之后替换整个首页。每次尝试都按当前帧选入口；
+    # 首题标记以真正打开选书框的入口为准，不沿用步骤 1 的快照。
+    $firstOpen = $false; $opened = $false
+    foreach ($attempt in 1..4) {
+        $homeFrame = Shot 2 "import-home$attempt"
+        $entry = Get-HomeImportLabel $homeFrame
+        if (-not $entry) { Start-Sleep -Seconds 2; continue }
+        $isFirst = $entry -eq '放进一本书'
+        if ($InstalledExe -and -not $isFirst) {
             Open-Step2ImportMenu $homeFrame $attempt
-            Start-Sleep -Milliseconds 850
-            if ((Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero) { break }
+        } else {
+            $target = if ($isFirst) { Find-Exact $homeFrame $entry } else { Find-Text $homeFrame $entry }
+            if (-not $target) { Start-Sleep -Seconds 2; continue }
+            $pressed = Click-At $target.X $target.Y -BeforePress {
+                $current = Shot 2 "import-confirm$attempt"
+                $same = if ($isFirst) { Find-Exact $current $entry } else { Find-Text $current $entry }
+                return [bool]($same -and (Get-HomeImportLabel $current) -eq $entry -and
+                    $target.X -ge $same.X1 -and $target.X -le $same.X2 -and
+                    $target.Y -ge $same.Y1 -and $target.Y -le $same.Y2)
+            }
+            if (-not $pressed) { continue }
         }
-        if ((Find-AppWindowByTitle '导入文件') -eq [IntPtr]::Zero) { Fail 2 '顶栏导入菜单未打开原生选书对话框（见 2-import-home*.png / 2-import-menu*.png）' }
-    } else {
-        Click-Until-Dialog 2 $homeEntry { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero } -exact $firstOpen
+        $until = (Get-Date).AddSeconds(6)
+        do {
+            if ((Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero) { $opened = $true; $firstOpen = $isFirst; break }
+            Start-Sleep -Milliseconds 400
+        } while ((Get-Date) -lt $until)
+        if ($opened) { break }
     }
+    if (-not $opened) { Fail 2 '当前首页入口未打开原生选书对话框（见 2-import-home*.png / 2-import-confirm*.png / 2-import-menu*.png）' }
     if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
     if ($firstOpen) { Complete-FirstTaste }
     # 导入通常先打开阅读器。还要回首页验证本地书卡，课程和书单可能把它推到首屏以下。

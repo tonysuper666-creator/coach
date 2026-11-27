@@ -31,7 +31,7 @@ function Fail($step, $why) { throw "Step $step - $why" }
 function Pass($step, $why) { [void]$script:passes.Add($step) }
 function Find-AppWindowByTitle($prefix) { if ($script:view -eq 'picker' -and $prefix -eq $dialogTitle) { return [IntPtr]1 }; [IntPtr]::Zero }
 function Open-Step2ImportMenu($lines,$attempt) {
-    if ($route -ne 'installedShelf' -or -not (Test-Step2Home $lines)) { throw 'Unexpected import menu' }
+    if ($route -notin @('installedShelf', 'syncShelf') -or -not (Test-Step2Home $lines)) { throw 'Unexpected import menu' }
     [void]$script:clicks.Add('menu')
     $script:view = 'picker'
 }
@@ -54,7 +54,8 @@ function Scroll-At($x,$y,[int]$n) {
     if ($script:view -eq 'question' -and $n -lt 0) { $script:view = 'options' }
     if ($script:view -eq 'explanation' -and $n -lt 0) { $script:view = 'next' }
 }
-function Click-At($x,$y) {
+function Click-At($x,$y,[scriptblock]$BeforePress) {
+    if ($BeforePress -and -not (& $BeforePress)) { return $false }
     [void]$script:clicks.Add("$script:view@$y")
     switch ("$script:view@$y") {
         'home@210' { $script:view = 'picker' }
@@ -64,12 +65,16 @@ function Click-At($x,$y) {
         'reader@70' { $script:view = 'shelf' }
         default { throw "Unexpected click at $script:view@$y" }
     }
+    return $true
 }
 function Shot($step,$tag) {
+    if ($route -eq 'syncShelf' -and $step -eq 2 -and
+        (($fault -eq 'duringConfirm' -and $tag -like 'import-confirm*') -or
+         ($fault -ne 'duringConfirm' -and $tag -like 'import-home*'))) { $script:synced = $true }
     $script:Last = @(switch ($script:view) {
         home {
-            if ($route -eq 'first') { Row '放进一本书，马上做第一道题。' 60; Row '放 进 一 本 书' 200 }
-            elseif ($route -eq 'installedShelf') { Row 'LearningCoach' 50; Row '设置' 50 700; Row '我的库' 120 }
+            if ($route -eq 'first' -or ($route -eq 'syncShelf' -and -not $script:synced)) { Row '放进一本书，马上做第一道题。' 60; Row '放 进 一 本 书' 200 }
+            elseif ($route -in @('installedShelf', 'syncShelf')) { Row 'LearningCoach' 50; Row '设置' 50 700; Row '我的库' 120 }
             elseif ($route -eq 'existing') { Row '上次停在第 2 页' 60; Row '导入文件' 200 }
             elseif ($route -eq '1.1.1') { Row '书架' 60; Row '上传教材' 200 }
             else { Row '为一门课备考' 60; Row '导入文件' 200 }
@@ -105,6 +110,7 @@ function Replay($route, $fault, $expectedFailure, [switch]$Installed) {
     $dialogTitle = if ($route -eq '1.1.1') { '上传教材' } else { '导入文件' }
     $script:clock = [datetime]::UtcNow
     $script:view = 'home'
+    $script:synced = $false
     $script:clicks = New-Object Collections.ArrayList
     $script:passes = New-Object Collections.ArrayList
     $failure = ''
@@ -113,7 +119,7 @@ function Replay($route, $fault, $expectedFailure, [switch]$Installed) {
         if ($failure -notlike "*$expectedFailure*" -or ($script:passes -join ',') -ne '1') { throw "$route/$fault : $failure (view=$script:view clicks=$script:clicks)" }
     } else {
         if ($failure -or ($script:passes -join ',') -ne '1,2') { throw "$route/$fault : $failure (view=$script:view clicks=$script:clicks)" }
-        $expected = if ($route -eq 'first') { 'home@210,options@250,selected@300,next@300,reader@70' } elseif ($route -eq '1.1.1') { 'home@210' } elseif ($route -eq 'installedShelf') { 'menu,reader@70' } else { 'home@210,reader@70' }
+        $expected = if ($route -eq 'first') { 'home@210,options@250,selected@300,next@300,reader@70' } elseif ($route -eq '1.1.1') { 'home@210' } elseif ($route -in @('installedShelf', 'syncShelf')) { 'menu,reader@70' } else { 'home@210,reader@70' }
         if (($script:clicks -join ',') -ne $expected) { throw "$route wrong clicks: $script:clicks" }
     }
     "PASS $route $fault (installed=$([bool]$Installed))"
@@ -123,6 +129,8 @@ if ($AfterPickerOcr) { $offlineHomeText = Get-Content -LiteralPath $AfterPickerO
 Replay first '' ''
 Replay first '' '' -Installed
 Replay installedShelf '' '' -Installed
+Replay syncShelf '' '' -Installed
+Replay syncShelf duringConfirm '' -Installed
 Replay first wrongBook '没有在首页确认目标书名和同卡进度' -Installed
 Replay existing '' ''
 Replay legacyImport '' ''

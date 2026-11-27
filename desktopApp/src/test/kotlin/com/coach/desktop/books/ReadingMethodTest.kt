@@ -412,6 +412,53 @@ class ReadingMethodTest {
         assertFalse(pages[0].text.contains("\n第二章"))
     }
 
+    private fun bareBook(pages: List<BookPage>) = Textbook(
+        id = "t",
+        title = "T",
+        format = "pdf",
+        pages = pages,
+        structure = BookStructure(
+            pageRoles = emptyMap(),
+            sections = emptyList(),
+            source = HeadingSource.FALLBACK_LENGTH.name,
+            tocNodes = emptyList(),
+        ),
+    )
+
+    @Test
+    fun openStaxStyleExerciseHeadingsAreCountedAcrossTheWholeBook() {
+        val filler = "Some ordinary prose about society and groups that goes on for a while."
+        val pages = (1..120).map { n ->
+            val head = when {
+                n % 3 == 0 && n > 60 -> "Self-Check Questions"
+                n == 30 -> "Section Quiz"
+                n == 42 -> "Critical Thinking Questions"
+                n == 54 -> "Review Questions"
+                n == 60 -> "Homework"
+                else -> null
+            }
+            BookPage(n, listOfNotNull(filler, head, filler).joinToString('\u000A'.toString()))
+        }
+        val signals = ReadingMethodSignalsReader.fromBook(bareBook(pages))
+        assertTrue(signals.exerciseSections == 24, "got ${signals.exerciseSections}")
+        val choice = ReadingMethodSelector.choose(signals)
+        assertFalse(choice.reason.contains("没有章末题"))
+        assertFalse(choice.reason.contains("看不出"))
+        assertTrue(choice.reason.contains("${signals.exerciseSections} 处章末练习"))
+    }
+
+    @Test
+    fun ocrFinishedScanIsNotCalledUnreadAndOcrNoiseIsNotFormula() {
+        val noisy = "In the beginning the species = varied; a = b ≈ c ∑ the natural selection of forms and many other words here."
+        val pages = (1..60).map { BookPage(it, noisy, ocr = true) }
+        val signals = ReadingMethodSignalsReader.fromBook(bareBook(pages))
+        assertFalse(signals.thinText)
+        assertEquals(0, signals.formulaMarks)
+        val choice = ReadingMethodSelector.choose(signals)
+        assertFalse(choice.reason.contains("正文还没认出"))
+        assertFalse(choice.reason.contains("有公式"))
+    }
+
     @Test
     fun scannedPdfReasonCitesPagesInsteadOfTheGenericSentence() {
         val book = Textbook(

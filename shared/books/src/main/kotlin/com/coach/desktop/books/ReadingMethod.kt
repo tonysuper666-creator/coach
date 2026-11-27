@@ -60,6 +60,8 @@ internal data class ReadingMethodSignals(
     val numberedChapters: Int = 0,
     /** PDF whose sampled pages are mostly unread or recognized only by OCR, with no chapter skeleton. */
     val thinText: Boolean = false,
+    /** Scanned PDF whose pages are mostly recognized by OCR already, so the text is usable. */
+    val ocrDone: Boolean = false,
 )
 
 internal data class ReadingMethodChoice(val method: ReadingMethod, val reason: String)
@@ -93,6 +95,9 @@ internal object ReadingMethodSelector {
     private fun groundedDuring(signals: ReadingMethodSignals): String {
         val noExercises = signals.exerciseSections == 0
         val fewFormulas = signals.formulaMarks < FORMULA_MARKS_FOR_TEXTBOOK
+        if (!noExercises) {
+            return "这本书有 ${signals.exerciseSections} 处章末练习，公式不多。读到一节停下来用自己的话说，章末再做题。"
+        }
         if (signals.lecture && noExercises) {
             val pages = if (signals.pageCount > 0) "共 ${signals.pageCount} 页，" else ""
             return "这是讲义，${pages}没有章末题。读完一节停一下，用自己的话说这一节的要点。"
@@ -130,6 +135,9 @@ internal object ReadingMethodSelector {
         }
         if (signals.thinText && signals.chapterCount < 2 && noExercises && signals.pageCount > 0) {
             return "这是扫描版，共 ${signals.pageCount} 页，正文还没认出。读到一节就停一下，用自己的话说刚刚读到的意思。"
+        }
+        if (signals.ocrDone && signals.pageCount > 0) {
+            return "这是扫描版，共 ${signals.pageCount} 页，正文已经认出来了，没有章末题。读到一节就停一下，用自己的话说刚刚读到的意思。"
         }
         return "这本看不出成套的习题和公式，读到一节就停下来，用自己的话说。"
     }
@@ -344,13 +352,14 @@ internal data class ReadingMethodBookState(
 internal object ReadingMethodSignalsReader {
     /** A heading that is the exercise section itself, not a title that merely contains the word. */
     private val exerciseHeading = Regex(
-        """(?i)^(?:\d+(?:\.\d+)*[\s.:：、]+)?(?:chapter\s+(?:[0-9ivxlc]+\s+)?)?(?:exercises?|problems?|review\s+questions?|study\s+questions?|homework|习题|练习题|思考题|复习题|章末练习)(?:\s*[:：.\-–—].{0,48})?$""",
+        """(?i)^(?:\d+(?:\.\d+)*[\s.:：、]+)?(?:chapter\s+(?:[0-9ivxlc]+\s+)?)?(?:(?:section\s+|chapter\s+)?(?:self[\s-]?check|self[\s-]?test|review|critical\s+thinking|personal\s+application|discussion|short\s+answer|practice|bringing\s+it\s+together)\s+(?:questions?|exercises?|problems?|homework)|(?:section|chapter)\s+(?:quiz|review|test)|chapter\s+review|exercises?|problems?|review\s+questions?|study\s+questions?|short\s+answers?|homework|practice|自测题|章节测验|章末测验|测验|作业题|作业|习题|练习题|思考题|复习题|章末练习)(?:\s*[:：.\-–—].{0,48})?$""",
     )
     private val answerHeading = Regex(
         """(?i)^(?:\d+(?:\.\d+)*[\s.:：、]+)?(?:answers?(?:\s+to(?:\s+the)?(?:\s+(?:exercises?|problems?|questions?))?)?|solutions?(?:\s+to(?:\s+the)?(?:\s+(?:exercises?|problems?))?)?|answer\s+key|习题答案|参考答案|练习答案)$""",
     )
     private val numberedProblem = Regex("""^(?:\(\d{1,2}\)|\d{1,2}[.)])\s+\S.{6,}""")
     private val formulaMark = Regex("""公式|equation|formula|[=∑∫≤≥≈≠]""", RegexOption.IGNORE_CASE)
+    private val formulaWord = Regex("""公式|equation|formula""", RegexOption.IGNORE_CASE)
     private val historyCue = Regex("""(?i)history|historical|dynasty|历史|战争""")
     private val argumentCue = Regex("""(?i)treatise|essay|discourse|inquiry|论著|学说""")
     private val literatureCue = Regex("""(?i)novel|poem|poetry|fiction|小说|散文|杂文""")
@@ -376,10 +385,11 @@ internal object ReadingMethodSignalsReader {
         var seen = 0
         for (page in book.pages) {
             if (page.number < bodyStart) continue
-            if (seen >= 40 || formulaMarks >= 12) break
-            seen++
-            formulaMarks += formulaMark.findAll(page.text).count()
-            formulaMarks += page.illustrations.count { it.kind == PageVisualKind.FORMULA }
+            if (seen < 40 && formulaMarks < 12) {
+                seen++
+                formulaMarks += (if (page.ocr) formulaWord else formulaMark).findAll(page.text).count()
+                formulaMarks += page.illustrations.count { it.kind == PageVisualKind.FORMULA }
+            }
             if (page.number in covered) continue
             var heading = false
             var numbered = 0
@@ -416,14 +426,14 @@ internal object ReadingMethodSignalsReader {
             grounded = true,
             numberedChapters = numberedChapters,
             thinText = thinPdfText(book),
+            ocrDone = book.format.equals("pdf", ignoreCase = true) && book.pages.isNotEmpty() &&
+                book.pages.count { it.ocr } * 2 >= book.pages.size,
         )
     }
 
     /** First 24 PDF pages: fewer than a quarter have 20 non-space characters, or most pages came from OCR. */
     private fun thinPdfText(book: Textbook): Boolean {
         if (!book.format.equals("pdf", ignoreCase = true) || book.pages.isEmpty()) return false
-        val mostlyOcr = book.pages.count { it.ocr } * 2 >= book.pages.size
-        if (mostlyOcr) return true
         val probe = book.pages.take(24)
         if (probe.size < 3) return false
         val readable = probe.count { page -> page.text.count { !it.isWhitespace() } >= 20 }

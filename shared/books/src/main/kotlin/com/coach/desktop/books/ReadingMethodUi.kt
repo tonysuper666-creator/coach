@@ -57,7 +57,7 @@ internal fun ReadingMethodPanel(
     val latestState = rememberUpdatedState(bookState)
     val plan = ReadingMethodFlow.planOf(chapter)
 
-    LaunchedEffect(book.id, chapter?.chapterId, draftReady) {
+    LaunchedEffect(book.id, chapter?.chapterId, draftReady, book.pages.count { it.ocr }, book.pages.size) {
         if (!draftReady) return@LaunchedEffect
         val signals = withContext(Dispatchers.IO) {
             val sourceName = runCatching { library.sourceFilename(book.id) }.getOrNull()
@@ -72,8 +72,7 @@ internal fun ReadingMethodPanel(
             }.orEmpty()
         }
         val disk = ReadingMethodBookState.decode(raw)
-        val resolved = latestState.value?.absorb(disk)
-            ?: ReadingMethodBookState.resolve(disk, signals).absorb(disk)
+        val resolved = ReadingMethodBookState.resolve(latestState.value ?: disk, signals).absorb(disk)
         bookState = resolved
         val encoded = resolved.encode()
         val current = latestDraft.value

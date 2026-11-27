@@ -23,6 +23,7 @@ ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "ht
 INTERACTIVE_TASKS = frozenset({
     "TEACH", "READER_SELECTION", "SOURCE_LOOKUP", "PREPARE_TEACH",
     "COLLECTION_QA", "STUDY_MODE_STREAM", "practice_grade", "practice_diagnose",
+    "course_essay_note", "course_essay_check",
     "course_vision_ocr",
 })
 REVIEW_GROUPS = frozenset({"review", "review_openai", "review_upgrade"})

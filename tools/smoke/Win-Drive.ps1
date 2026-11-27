@@ -281,6 +281,10 @@ function Get-ClientPids([switch]$Mine) {
                 (Test-CommandLineUnder $_.CommandLine $script:OwnedClientRoot)) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
+function Test-CoachWindowTitle([string]$Title) {
+    if ([string]::IsNullOrEmpty($Title)) { return $false }
+    return ($Title -match '^LearningCoach(?:\s|$)')
+}
 function Find-CoachWindow {
     $script:Win = [IntPtr]::Zero
     $mine = @(Get-ClientPids -Mine | Where-Object { $script:Known -notcontains $_ })
@@ -294,7 +298,8 @@ function Find-CoachWindow {
         $p = 0; [WD]::GetWindowThreadProcessId($x, [ref]$p) | Out-Null
         if ($p -in $mine -and [WD]::IsWindowVisible($x)) {
             $sb = New-Object Text.StringBuilder 256; [WD]::GetWindowText($x, $sb, 256) | Out-Null
-            if (@('Coach', 'LearningCoach') -contains $sb.ToString()) {
+            $title = $sb.ToString()
+            if ($title -eq 'Coach' -or (Test-CoachWindowTitle $title)) {
                 $script:Win = $x
                 $script:AppPid = $p
                 return $false

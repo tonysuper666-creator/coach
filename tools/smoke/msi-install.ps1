@@ -177,7 +177,7 @@ function Find-InstalledWindow {
     [WD]::EnumWindows({ param($h, $l)
         $p = 0; [WD]::GetWindowThreadProcessId($h, [ref]$p) | Out-Null
         if ($script:TargetPids -contains $p -and [WD]::IsWindowVisible($h)) {
-            if ([CoachWin]::Text($h) -eq 'LearningCoach') { $script:Win = $h; $script:WinPid = $p }
+            if (Test-CoachWindowTitle ([CoachWin]::Text($h))) { $script:Win = $h; $script:WinPid = $p }
         }
         return $true }, [IntPtr]::Zero) | Out-Null
     # Win-Drive 的窗口归属保护认 $script:AppPid：把这次起的、真正拥有窗口的那个进程绑上去。

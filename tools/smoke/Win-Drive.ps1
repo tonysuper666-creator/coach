@@ -247,9 +247,6 @@ function Get-ClientPids([switch]$Mine) {
             ForEach-Object { [int]$_.ProcessId }
         return
     }
-    if (-not $Mine) {
-        Get-Process -Name LearningCoach -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }
-    }
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object {
         ($_.CommandLine -like '*com.coach.desktop.MainKt*' -or $_.CommandLine -like '*com.coach.desktop.smoke.SmokeMain*') -and
             (-not $Mine -or -not $script:RepoMarker -or
@@ -915,7 +912,11 @@ function Invoke-ForegroundStep(
             $held = $false
             $declined = $false
             $trace = $null
-            $ownedPids = [uint32[]]@(@(Get-ClientPids) + @($script:AppPid) | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+            $ownedPids = if ($script:InstalledClientPid) {
+                [uint32[]]@($script:AppPid)
+            } else {
+                [uint32[]]@(@(Get-ClientPids) + @($script:AppPid) | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+            }
             try {
                 try { $held = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $held = $true }
                 if (-not $held) { throw 'WIN_DRIVE_TIMEOUT: waiting for one foreground action' }

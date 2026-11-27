@@ -1,7 +1,14 @@
 package com.coach.desktop.books
 
+import com.coach.desktop.reader.LocalBooksReaderSource
 import java.nio.file.Files
 import java.sql.DriverManager
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -87,6 +94,9 @@ class ObsidianVaultSyncTest {
                         mention_id, concept_id, book_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
                     ) VALUES('m1','c-opp','b1',8,4,'机会成本是放弃的下一件事','PRIMARY_DEF','定义')""",
                 )
+                sql.executeUpdate(
+                    "INSERT INTO pages(book,page,text) VALUES('b1',8,'页首两字机会成本是放弃的下一件事。后面还有。')",
+                )
             }
         }
         Files.createDirectories(vault.resolve(".obsidian"))
@@ -139,6 +149,9 @@ class ObsidianVaultSyncTest {
                         mention_id, concept_id, book_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
                     ) VALUES('m1','c-cost','b1',3,0,'边际成本是多生产一件','PRIMARY_DEF','定义')""",
                 )
+                sql.executeUpdate(
+                    "INSERT INTO pages(book,page,text) VALUES('b1',3,'边际成本是多生产一件。后面还有。')",
+                )
             }
         }
         Files.createDirectories(vault.resolve("nested"))
@@ -159,6 +172,61 @@ class ObsidianVaultSyncTest {
         val second = sync(library, vault)
         assertEquals(0, second.concepts)
         assertEquals(150, countNotes(library, "边际成本"))
+    }
+
+    @Test fun conceptNoteOnRealPageTextIsNotStale() = runBlocking {
+        val bookId = "0123456789abcdef".repeat(4)
+        val quote = "机会成本是放弃的下一件事"
+        val pageText = "页首两字${quote}。后面还有。"
+        val offset = 4
+        val library = library(bookId)
+        val vault = Files.createTempDirectory("obsidian-page-")
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO collections(id, kind, title, created_at, updated_at) VALUES('c1','BOOKLIST','库',1,1)")
+                sql.executeUpdate(
+                    "INSERT INTO concept_entities(concept_id, collection_id, canonical_name, aliases_json, muted, shared_note) VALUES('c-opp','c1','机会成本','[]',0,'')",
+                )
+                sql.executeUpdate(
+                    "INSERT INTO concept_entities(concept_id, collection_id, canonical_name, aliases_json, muted, shared_note) VALUES('c-sunk','c1','沉没成本','[]',0,'')",
+                )
+                sql.executeUpdate(
+                    """INSERT INTO concept_mentions(
+                        mention_id, concept_id, book_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
+                    ) VALUES('m1','c-opp','$bookId',2,$offset,'$quote','PRIMARY_DEF','定义')""",
+                )
+                sql.executeUpdate(
+                    """INSERT INTO concept_mentions(
+                        mention_id, concept_id, book_id, page, offset_utf16, quote_anchor, mention_role, claim_summary
+                    ) VALUES('m2','c-sunk','$bookId',2,0,'这句话不在页上','PRIMARY_DEF','定义')""",
+                )
+                sql.executeUpdate("INSERT INTO pages(book,page,text) VALUES('$bookId',2,'$pageText')")
+            }
+        }
+        Files.writeString(vault.resolve("机会成本.md"), "# 机会成本\n\n我写在原句上的笔记\n")
+        Files.writeString(vault.resolve("沉没成本.md"), "沉没成本对不上这一页\n")
+
+        val first = sync(library, vault)
+        assertEquals(1, first.concepts)
+        assertEquals(listOf("沉没成本"), first.unmatched)
+        assertEquals(0, countSpan(library, 0, 0))
+        val hung = readerNote(library, bookId)
+        assertEquals("1", hung["version"]?.jsonPrimitive?.content)
+        assertEquals(false, hung["stale"]?.jsonPrimitive?.boolean)
+        assertEquals(quote, hung["quote"]?.jsonPrimitive?.content)
+        assertEquals(offset, hung["start"]?.jsonPrimitive?.int)
+        assertEquals(offset + quote.length, hung["end"]?.jsonPrimitive?.int)
+        assertEquals(pageText.substring(offset, offset + quote.length), hung["quote"]?.jsonPrimitive?.content)
+
+        openLibraryCorpus(library.directory).use { db ->
+            db.createStatement().use { it.executeUpdate("UPDATE book_notes SET version='v1', text_sha256='quote-sha'") }
+        }
+        val again = sync(library, vault)
+        assertEquals(0, again.concepts)
+        assertEquals(1, countNotes(library, "我写在原句上的笔记"))
+        val repaired = readerNote(library, bookId)
+        assertEquals("1", repaired["version"]?.jsonPrimitive?.content)
+        assertEquals(false, repaired["stale"]?.jsonPrimitive?.boolean)
     }
 
     @Test fun refusesAFolderInsideGit() {
@@ -186,6 +254,22 @@ class ObsidianVaultSyncTest {
                 sql.executeQuery().use { rows ->
                     assertTrue(rows.next())
                     return rows.getString(1)
+                }
+            }
+        }
+    }
+
+    private suspend fun readerNote(library: TextbookLibrary, bookId: String) =
+        ((LocalBooksReaderSource(library, loadPageImages = false).state(bookId).body!!["notes"] as JsonArray).single()).jsonObject
+
+    private fun countSpan(library: TextbookLibrary, start: Int, end: Int): Int {
+        openLibraryCorpus(library.directory).use { db ->
+            db.prepareStatement("SELECT COUNT(*) FROM book_notes WHERE start=? AND \"end\"=? AND deleted=0").use { sql ->
+                sql.setInt(1, start)
+                sql.setInt(2, end)
+                sql.executeQuery().use { rows ->
+                    assertTrue(rows.next())
+                    return rows.getInt(1)
                 }
             }
         }
@@ -219,11 +303,15 @@ class ObsidianVaultSyncTest {
         }
     }
 
-    private fun library(): TextbookLibrary {
+    private fun library(bookId: String = "b1"): TextbookLibrary {
         val root = Files.createTempDirectory("obsidian-sync-lib-")
         val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
         DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
-            db.createStatement().use { it.executeUpdate("INSERT INTO books(id,title,format,touched) VALUES('b1','甲书','md',1)") }
+            db.prepareStatement("INSERT INTO books(id,title,format,touched) VALUES(?,?, 'md',1)").use { sql ->
+                sql.setString(1, bookId)
+                sql.setString(2, "甲书")
+                sql.executeUpdate()
+            }
         }
         return library
     }

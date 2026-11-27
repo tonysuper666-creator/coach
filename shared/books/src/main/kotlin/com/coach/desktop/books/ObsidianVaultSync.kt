@@ -93,6 +93,7 @@ internal fun syncObsidianVault(directory: Path, db: Connection): ObsidianSyncOut
     val notes = loadLiveNotes(db).toMutableMap()
     val concepts = loadConcepts(db)
     val mentions = loadMentions(db)
+    val pages = loadPageTexts(db)
     val books = listLibraryBooks(db).associateBy { it.id }
     val existing = loadLinks(db, vault)
     val files = markdownFiles(directory)
@@ -102,6 +103,8 @@ internal fun syncObsidianVault(directory: Path, db: Connection): ObsidianSyncOut
     val conflicts = ArrayList<ObsidianConflict>()
     val pulls = ArrayList<NoteWrite>()
     val inserts = ArrayList<NoteInsert>()
+    val repairs = ArrayList<AnchorRepair>()
+    val retires = ArrayList<NoteRetire>()
     val fileWrites = ArrayList<AnnotationWrite>()
     val kept = LinkedHashMap<LinkId, LinkDraft>()
 
@@ -145,31 +148,35 @@ internal fun syncObsidianVault(directory: Path, db: Connection): ObsidianSyncOut
             if (outside.isNotEmpty()) {
                 val id = "ou" + pathHash(rel)
                 val key = libraryRecordIds.entry(LibraryKind.ANNOTATION, id)
-                val anchor = anchorFor(bookId, outside, notes.values)
-                absorbImported(
-                    rel = rel,
-                    key = key,
-                    noteId = id,
-                    bookId = bookId,
-                    conceptId = "",
-                    title = title,
-                    text = outside,
-                    page = anchor.page,
-                    start = anchor.start,
-                    end = anchor.end,
-                    quote = anchor.quote,
-                    notes = notes,
-                    existing = existing,
-                    kept = kept,
-                    inserts = inserts,
-                    pulls = pulls,
-                    fileWrites = fileWrites,
-                    conflicts = conflicts,
-                    file = file,
-                    allowWriteBack = false,
-                    countConcept = false,
-                    onConcept = { },
-                )
+                val anchor = anchorFor(bookId, outside, notes.values, pages)
+                if (anchor == null) {
+                    dropStaleImport(notes, retires, pages, bookId, id)
+                    kept[LinkId(rel, "unmatched")] = LinkDraft("unmatched", title = title, body = outside)
+                } else {
+                    absorbImported(
+                        rel = rel,
+                        key = key,
+                        noteId = id,
+                        bookId = bookId,
+                        conceptId = "",
+                        title = title,
+                        text = outside,
+                        anchor = anchor,
+                        pages = pages,
+                        notes = notes,
+                        existing = existing,
+                        kept = kept,
+                        inserts = inserts,
+                        repairs = repairs,
+                        pulls = pulls,
+                        fileWrites = fileWrites,
+                        conflicts = conflicts,
+                        file = file,
+                        allowWriteBack = false,
+                        countConcept = false,
+                        onConcept = { },
+                    )
+                }
             }
         } else {
             val raw = if (coachId != null) userRegion(text) else bodyWithoutFrontmatter(text)
@@ -196,30 +203,42 @@ internal fun syncObsidianVault(directory: Path, db: Connection): ObsidianSyncOut
                 } else {
                     val id = "on" + pathHash(rel)
                     val key = libraryRecordIds.entry(LibraryKind.ANNOTATION, id)
-                    absorbImported(
-                        rel = rel,
-                        key = key,
-                        noteId = id,
-                        bookId = mention.bookId,
-                        conceptId = matched.id,
-                        title = matched.name,
-                        text = noteText,
-                        page = mention.page.coerceAtLeast(1),
-                        start = mention.offset.coerceAtLeast(0),
-                        end = (mention.offset + mention.quote.length).coerceAtLeast(mention.offset),
-                        quote = mention.quote,
-                        notes = notes,
-                        existing = existing,
-                        kept = kept,
-                        inserts = inserts,
-                        pulls = pulls,
-                        fileWrites = fileWrites,
-                        conflicts = conflicts,
-                        file = file,
-                        allowWriteBack = true,
-                        countConcept = true,
-                        onConcept = { conceptsAttached += 1 },
+                    val anchor = confirmOnPage(
+                        mention.bookId,
+                        mention.page,
+                        mention.offset,
+                        mention.offset + mention.quote.length,
+                        mention.quote,
+                        pages,
                     )
+                    if (anchor == null) {
+                        dropStaleImport(notes, retires, pages, mention.bookId, id)
+                        kept[LinkId(rel, "unmatched")] = LinkDraft("unmatched", title = title, body = noteText)
+                    } else {
+                        absorbImported(
+                            rel = rel,
+                            key = key,
+                            noteId = id,
+                            bookId = mention.bookId,
+                            conceptId = matched.id,
+                            title = matched.name,
+                            text = noteText,
+                            anchor = anchor,
+                            pages = pages,
+                            notes = notes,
+                            existing = existing,
+                            kept = kept,
+                            inserts = inserts,
+                            repairs = repairs,
+                            pulls = pulls,
+                            fileWrites = fileWrites,
+                            conflicts = conflicts,
+                            file = file,
+                            allowWriteBack = true,
+                            countConcept = true,
+                            onConcept = { conceptsAttached += 1 },
+                        )
+                    }
                 }
             }
         }
@@ -234,6 +253,8 @@ internal fun syncObsidianVault(directory: Path, db: Connection): ObsidianSyncOut
     if (auto) db.autoCommit = false
     try {
         for (insert in inserts) insertNote(db, insert)
+        for (repair in repairs) repairAnchor(db, repair)
+        for (retire in retires) retireNote(db, retire)
         for (pull in pulls) updateNote(db, pull)
         for ((id, draft) in kept) {
             if (draft.writeBack && draft.writeToken !in succeeded) continue
@@ -334,6 +355,8 @@ private data class LiveNote(
     val start: Int,
     val end: Int,
     val quote: String,
+    val version: String,
+    val textSha256: String,
 )
 
 private data class ConceptRef(val id: String, val name: String, val aliases: List<String>)
@@ -356,7 +379,20 @@ private data class NoteInsert(
     val end: Int,
     val quote: String,
     val note: String,
+    val pageSha: String,
 )
+
+private data class AnchorRepair(
+    val bookId: String,
+    val id: String,
+    val page: Int,
+    val start: Int,
+    val end: Int,
+    val quote: String,
+    val pageSha: String,
+)
+
+private data class NoteRetire(val bookId: String, val id: String)
 
 private data class AnnotationWrite(val path: Path, val key: String, val text: String)
 
@@ -376,7 +412,13 @@ private data class LinkDraft(
     val countConcept: Boolean = false,
 )
 
-private data class Anchor(val page: Int, val start: Int, val end: Int, val quote: String)
+private data class Anchor(
+    val page: Int,
+    val start: Int,
+    val end: Int,
+    val quote: String,
+    val pageSha: String,
+)
 
 private fun absorbImported(
     rel: String,
@@ -386,14 +428,13 @@ private fun absorbImported(
     conceptId: String,
     title: String,
     text: String,
-    page: Int,
-    start: Int,
-    end: Int,
-    quote: String,
+    anchor: Anchor,
+    pages: Map<Pair<String, Int>, String>,
     notes: MutableMap<String, LiveNote>,
     existing: Map<LinkId, LinkRow>,
     kept: MutableMap<LinkId, LinkDraft>,
     inserts: MutableList<NoteInsert>,
+    repairs: MutableList<AnchorRepair>,
     pulls: MutableList<NoteWrite>,
     fileWrites: MutableList<AnnotationWrite>,
     conflicts: MutableList<ObsidianConflict>,
@@ -402,18 +443,33 @@ private fun absorbImported(
     countConcept: Boolean,
     onConcept: () -> Unit,
 ) {
+    val page = anchor.page
+    val start = anchor.start
+    val end = anchor.end
+    val quote = anchor.quote
     val id = LinkId(rel, key)
     val link = existing[id]
     val current = notes[noteKey(bookId, noteId)]
     if (current == null && link == null) {
-        inserts += NoteInsert(bookId, noteId, page, start, end, quote, text)
-        notes[noteKey(bookId, noteId)] = LiveNote(bookId, noteId, text, page, start, end, quote)
+        inserts += NoteInsert(bookId, noteId, page, start, end, quote, text, anchor.pageSha)
+        notes[noteKey(bookId, noteId)] = LiveNote(bookId, noteId, text, page, start, end, quote, "1", anchor.pageSha)
         kept[id] = LinkDraft(
             "imported", baseline = text, hasBaseline = true, bookId = bookId, conceptId = conceptId,
             title = title, body = text, countConcept = countConcept,
         )
         if (countConcept) onConcept()
         return
+    }
+    if (current != null && readerWouldMarkStale(current, pages)) {
+        repairs += AnchorRepair(bookId, noteId, page, start, end, quote, anchor.pageSha)
+        notes[noteKey(bookId, noteId)] = current.copy(
+            page = page,
+            start = start,
+            end = end,
+            quote = quote,
+            version = "1",
+            textSha256 = anchor.pageSha,
+        )
     }
     val coach = notesOneLine(current?.note ?: link?.baseline.orEmpty())
     val token = writeToken(file, "")
@@ -487,14 +543,53 @@ private fun markMissing(existing: Map<LinkId, LinkRow>, seen: Set<String>, kept:
     return existing.keys.filter { it.rel !in seen && LinkId(it.rel, it.key) !in kept }.distinct()
 }
 
-private fun anchorFor(bookId: String, text: String, notes: Collection<LiveNote>): Anchor {
+private fun anchorFor(
+    bookId: String,
+    text: String,
+    notes: Collection<LiveNote>,
+    pages: Map<Pair<String, Int>, String>,
+): Anchor? {
     val quoted = notes.filter { it.bookId == bookId && it.quote.isNotBlank() && text.contains(it.quote) }
-    val pick = quoted.firstOrNull() ?: notes.firstOrNull { it.bookId == bookId && it.page > 0 }
-    return when {
-        pick == null -> Anchor(1, 0, 0, "")
-        quoted.isEmpty() -> Anchor(pick.page, 0, 0, "")
-        else -> Anchor(pick.page, pick.start, pick.end, pick.quote)
+    for (pick in quoted) {
+        val confirmed = confirmOnPage(bookId, pick.page, pick.start, pick.end, pick.quote, pages)
+        if (confirmed != null) return confirmed
     }
+    return null
+}
+
+// 阅读器认 version "1"、整页文字的哈希，以及页内截出的文字等于引文。对不上就不写位置。
+private fun confirmOnPage(
+    bookId: String,
+    page: Int,
+    start: Int,
+    end: Int,
+    quote: String,
+    pages: Map<Pair<String, Int>, String>,
+): Anchor? {
+    if (quote.isEmpty() || start !in 0 until end) return null
+    val text = pages[bookId to page] ?: return null
+    if (end > text.length || text.substring(start, end) != quote) return null
+    return Anchor(page, start, end, quote, sha256(text))
+}
+
+private fun readerWouldMarkStale(note: LiveNote, pages: Map<Pair<String, Int>, String>): Boolean {
+    val text = pages[note.bookId to note.page] ?: return true
+    if (note.version != "1" || note.textSha256 != sha256(text)) return true
+    if (note.start !in 0 until note.end || note.end > text.length) return true
+    return text.substring(note.start, note.end) != note.quote
+}
+
+private fun dropStaleImport(
+    notes: MutableMap<String, LiveNote>,
+    retires: MutableList<NoteRetire>,
+    pages: Map<Pair<String, Int>, String>,
+    bookId: String,
+    noteId: String,
+) {
+    val note = notes[noteKey(bookId, noteId)] ?: return
+    if (!readerWouldMarkStale(note, pages)) return
+    retires += NoteRetire(bookId, noteId)
+    notes.remove(noteKey(bookId, noteId))
 }
 
 private fun matchConcept(
@@ -538,7 +633,7 @@ private fun loadLiveNotes(db: Connection): Map<String, LiveNote> {
     if (!BookSchemaMigration.tableExists(db, "book_notes")) return emptyMap()
     val out = HashMap<String, LiveNote>()
     db.prepareStatement(
-        "SELECT book, id, note, page, start, end, quote FROM book_notes WHERE deleted=0",
+        "SELECT book, id, note, page, start, end, quote, version, text_sha256 FROM book_notes WHERE deleted=0",
     ).use { sql ->
         sql.executeQuery().use { rows ->
             while (rows.next()) {
@@ -550,8 +645,23 @@ private fun loadLiveNotes(db: Connection): Map<String, LiveNote> {
                     start = rows.getInt(5),
                     end = rows.getInt(6),
                     quote = rows.getString(7).orEmpty(),
+                    version = rows.getString(8).orEmpty(),
+                    textSha256 = rows.getString(9).orEmpty(),
                 )
                 out[noteKey(note.bookId, note.id)] = note
+            }
+        }
+    }
+    return out
+}
+
+private fun loadPageTexts(db: Connection): Map<Pair<String, Int>, String> {
+    if (!BookSchemaMigration.tableExists(db, "pages")) return emptyMap()
+    val out = HashMap<Pair<String, Int>, String>()
+    db.prepareStatement("SELECT book, page, text FROM pages").use { sql ->
+        sql.executeQuery().use { rows ->
+            while (rows.next()) {
+                out[rows.getString(1) to rows.getInt(2)] = rows.getString(3).orEmpty()
             }
         }
     }
@@ -709,15 +819,46 @@ private fun insertNote(db: Connection, insert: NoteInsert) {
     ).use { sql ->
         sql.setString(1, insert.bookId)
         sql.setString(2, insert.id)
-        sql.setString(3, "v1")
+        sql.setString(3, "1")
         sql.setInt(4, insert.page)
         sql.setInt(5, insert.start)
         sql.setInt(6, insert.end)
         sql.setString(7, insert.quote)
         sql.setString(8, insert.note)
-        sql.setString(9, sha256(insert.quote.ifBlank { insert.note }))
+        sql.setString(9, insert.pageSha)
         sql.setLong(10, 1)
         sql.setString(11, "obsidian-sync")
+        sql.executeUpdate()
+    }
+}
+
+private fun repairAnchor(db: Connection, repair: AnchorRepair) {
+    db.prepareStatement(
+        """UPDATE book_notes SET version=?, page=?, start=?, "end"=?, quote=?, text_sha256=?,
+           revision=revision+1, last_mutation_id=?
+           WHERE book=? AND id=? AND deleted=0""",
+    ).use { sql ->
+        sql.setString(1, "1")
+        sql.setInt(2, repair.page)
+        sql.setInt(3, repair.start)
+        sql.setInt(4, repair.end)
+        sql.setString(5, repair.quote)
+        sql.setString(6, repair.pageSha)
+        sql.setString(7, "obsidian-sync")
+        sql.setString(8, repair.bookId)
+        sql.setString(9, repair.id)
+        sql.executeUpdate()
+    }
+}
+
+private fun retireNote(db: Connection, retire: NoteRetire) {
+    db.prepareStatement(
+        """UPDATE book_notes SET deleted=1, revision=revision+1, last_mutation_id=?
+           WHERE book=? AND id=? AND deleted=0""",
+    ).use { sql ->
+        sql.setString(1, "obsidian-sync")
+        sql.setString(2, retire.bookId)
+        sql.setString(3, retire.id)
         sql.executeUpdate()
     }
 }

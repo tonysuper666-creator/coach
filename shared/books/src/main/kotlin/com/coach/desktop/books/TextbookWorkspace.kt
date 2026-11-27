@@ -84,6 +84,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     var guideCourse by remember { mutableStateOf<String?>(null) }
     var comparisonCourse by remember { mutableStateOf<String?>(null) }
+    var followCourse by remember { mutableStateOf<String?>(null) }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -447,7 +448,26 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)
-                            if (comparisonCourse == detail.courseId) {
+                            if (followCourse == detail.courseId) {
+                                val followIds = detail.materials
+                                    .filter { it.format.equals("pdf", ignoreCase = true) }
+                                    .map { it.bookId }
+                                LiteratureStationFollowPane(
+                                    bookIds = followIds,
+                                    load = { ids -> LiteratureStationFollow.load(controller.library, ids) },
+                                    onBack = { followCourse = null },
+                                    onJump = { station ->
+                                        run {
+                                            controller.jumpToMockSourcePage(
+                                                detail.courseId,
+                                                station.bookId,
+                                                station.page,
+                                                station.quote,
+                                            )
+                                        }
+                                    },
+                                )
+                            } else if (comparisonCourse == detail.courseId) {
                                 LiteratureComparisonPane(detail, controller.library, explainer,
                                     onBack = { comparisonCourse = null }) { source ->
                                     run {
@@ -461,8 +481,17 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     }
                                 }
                             } else if (guideCourse == detail.courseId) {
-                                LiteratureGuidePane(detail, controller.library, explainer,
-                                    onBack = { guideCourse = null }) { source ->
+                                LiteratureGuidePane(
+                                    detail,
+                                    controller.library,
+                                    explainer,
+                                    onBack = { guideCourse = null },
+                                    onOpenLiteratureFollow = {
+                                        guideCourse = null
+                                        comparisonCourse = null
+                                        followCourse = detail.courseId
+                                    },
+                                ) { source ->
                                     run { controller.jumpToLiteraturePage(detail.courseId, source.book.id, source.anchor.pdfPage) }
                                 }
                             } else CourseScreen(
@@ -470,10 +499,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
                                 onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {
-                                    { comparisonCourse = null; guideCourse = detail.courseId }
+                                    { comparisonCourse = null; followCourse = null; guideCourse = detail.courseId }
+                                } else null,
+                                onOpenLiteratureFollow = if (!originalPdfTouchEnabled) {
+                                    { comparisonCourse = null; guideCourse = null; followCourse = detail.courseId }
                                 } else null,
                                 onOpenLiteratureComparison = if (!originalPdfTouchEnabled) {
-                                    { guideCourse = null; comparisonCourse = detail.courseId }
+                                    { guideCourse = null; followCourse = null; comparisonCourse = detail.courseId }
                                 } else null,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },

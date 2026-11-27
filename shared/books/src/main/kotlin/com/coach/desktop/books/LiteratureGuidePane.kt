@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.*
@@ -20,6 +21,7 @@ internal fun LiteratureGuidePane(
     library: TextbookLibrary,
     explainer: BookExplainer,
     onBack: () -> Unit,
+    onOpenLiteratureFollow: (() -> Unit)? = null,
     onSource: (GuideExcerpt) -> Unit,
 ) {
     val materials = detail.materials.filter { it.format.equals("pdf", true) || it.format.equals("epub", true) }
@@ -185,6 +187,11 @@ internal fun LiteratureGuidePane(
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 V7TextButton(onBack) { Text("← 课程") }
+                if (onOpenLiteratureFollow != null) {
+                    PaperButton(onOpenLiteratureFollow, modifier = Modifier.testTag("guide-station-follow")) {
+                        Text("逐站跟读")
+                    }
+                }
                 if (guide != null) {
                     V7TextButton({ guide = null; failures = emptyList(); notice = "" }) { Text("换一组材料") }
                 }

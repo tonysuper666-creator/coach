@@ -16,6 +16,12 @@ internal object LiteraturePassages {
     private val note = Regex("""^(?:\[\d{1,3}]|\d{1,3}[.)]|[*†‡])\s+\S""")
     private val bottomBareNote = Regex("""^\d{1,3}\s+[A-Z\p{IsHan}]""")
     private val bibliography = Regex("""(?i)^(?:references|bibliography|works cited|endnotes|notes and references|参考文献|尾注)\s*[:：]?$""")
+    // Shared with sectioning (TON-1898): a notes heading, not a sentence that merely mentions notes.
+    private val notesBoundary = Regex(
+        """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
+    )
+    private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
+    private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val end = Regex("""[.!?。！？][”’"')\]]*$""")
     private val folio = Regex("""(?i)^(?:page\s*)?(?:\d+|[ivxlcdm]{1,6})$""")
@@ -62,6 +68,81 @@ internal object LiteraturePassages {
         if (trailingPageRef.containsMatchIn(t) && (authorInitialPrefix.containsMatchIn(t) || Regex("""\((?:1[5-9]\d{2}|20\d{2})\)""").containsMatchIn(t))) return true
         return false
     }
+
+    /** Notes heading. Sectioning should call this instead of keeping its own copy. */
+    fun isNotesHeading(line: String): Boolean = notesBoundary.matches(line.trim())
+
+    fun isBackMatterHeading(line: String): Boolean =
+        bibliography.matches(line.trim()) || isNotesHeading(line)
+
+    fun isDownloadBanner(line: String): Boolean = publisher.containsMatchIn(line)
+
+    fun endsSentence(text: String): Boolean {
+        val trimmed = text.trim()
+        return trimmed.isNotEmpty() && end.containsMatchIn(trimmed)
+    }
+
+    fun isBareNoteNumber(line: String): Boolean = bareNoteNumber.matches(line.trim())
+
+    fun noteNumber(line: String): Int? {
+        val match = noteNumberAtStart.find(line.trim()) ?: return null
+        return match.groupValues.drop(1).firstOrNull(String::isNotEmpty)?.toIntOrNull()
+    }
+
+    /**
+     * Numbered endnote page: several note markers begin in the top half.
+     * One footer note (marker only in the bottom half) is not an endnote page.
+     */
+    fun isEndnotePage(lines: List<String>): Boolean {
+        val nonblank = lines.map(String::trim).filter(String::isNotEmpty)
+        if (nonblank.size < 4) return false
+        val markers = nonblank.indices.filter { index ->
+            val line = nonblank[index]
+            note.containsMatchIn(line) || (isBareNoteNumber(line) && index + 1 < nonblank.size)
+        }
+        if (markers.size < 3 || markers.first() > nonblank.size / 2) return false
+        return markers.size >= 5 || markers.size * 4 >= nonblank.size
+    }
+
+    /** A short block that opens with a high note number, such as footnote 57, rather than list item 1. */
+    fun isFootnoteBlock(lines: List<String>): Boolean {
+        val nonblank = lines.map(String::trim).filter(String::isNotEmpty)
+        if (nonblank.isEmpty() || nonblank.size > 6) return false
+        val number = noteNumber(nonblank.first()) ?: return false
+        if (number < 10) return false
+        val first = nonblank.first()
+        return isBareNoteNumber(first) || note.containsMatchIn(first) || bottomBareNote.containsMatchIn(first)
+    }
+
+    /**
+     * The sentence at [startUtf16] is the first one near the top of [pageNumber] and continues
+     * a sentence the previous page did not finish. Download banners and folios are not that sentence.
+     */
+    fun continuesPreviousPage(book: Textbook, pageNumber: Int, startUtf16: Int): Boolean {
+        if (pageNumber <= 1 || startUtf16 > 220) return false
+        val prev = book.pages.firstOrNull { it.number == pageNumber - 1 } ?: return false
+        if (isFrontMatterCover(prev)) return false
+        val last = lastProseLine(prev) ?: return false
+        if (last.length < 40) return false
+        val endChar = last.last()
+        return endChar != '.' && endChar != '!' && endChar != '?' &&
+            endChar != '。' && endChar != '！' && endChar != '？'
+    }
+
+    private fun isFrontMatterCover(page: BookPage): Boolean =
+        page.number == 1 && (
+            jstorCoverHeader.findAll(page.text).count() >= 2 ||
+                coursepackCoverHeader.findAll(page.text).count() >= 2
+            )
+
+    private fun lastProseLine(page: BookPage): String? =
+        page.guideRegions.asSequence()
+            .flatMap { it.text.lineSequence() }
+            .map(String::trim)
+            .lastOrNull { line ->
+                line.isNotEmpty() && !folio.matches(line) && !isDownloadBanner(line) &&
+                    !isBackMatterHeading(line) && !isBibliographicFootnote(line)
+            }
 
     fun bodySentence(s: String): Boolean = s.length in 6..650 &&
         !hasControlOrBrokenChar(s) &&
@@ -114,18 +195,29 @@ internal object LiteraturePassages {
 
         val candidates = mutableListOf<Candidate>()
         var backMatter = false
+        val notesOpen = book.pages.size / 3
         for (page in book.pages) {
-            if (page.number == 1 && (jstorCoverHeader.findAll(page.text).count() >= 2 ||
-                    coursepackCoverHeader.findAll(page.text).count() >= 2)
-            ) continue
+            if (isFrontMatterCover(page)) continue
+            if (backMatter) continue
+            val pageLines = page.guideRegions.flatMap { it.text.lines() }
+            if (page.number > notesOpen && isEndnotePage(pageLines)) {
+                backMatter = true
+                continue
+            }
             val pageCandidates = mutableListOf<Candidate>()
             var base = 0
+            var dropPageTop = continuesPreviousPage(book, page.number, 0)
             for (region in page.guideRegions) {
+                val regionLines = region.text.lines()
+                if (isFootnoteBlock(regionLines)) continue
                 var start = -1
                 var finish = 0
+                var skipFirst = false
                 fun finishParagraph() {
                     if (start < 0) return
                     val paragraph = region.text.substring(start, finish)
+                    val dropLead = skipFirst
+                    var lead = dropLead
                     val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(paragraph) }
                     var a = iterator.first()
                     var b = iterator.next()
@@ -135,41 +227,52 @@ internal object LiteraturePassages {
                         if (quote.isNotEmpty()) {
                             val localStart = start + a + raw.indexOf(quote)
                             val localEnd = localStart + quote.length
-                            if (!region.overlapsWideGap(localStart, localEnd) &&
+                            val at = base + localStart
+                            val pageTopTail = dropPageTop && at <= 220
+                            if (pageTopTail) dropPageTop = false
+                            val blankTail = lead
+                            lead = false
+                            if (!pageTopTail && !blankTail &&
+                                !region.overlapsWideGap(localStart, localEnd) &&
                                 bodySentence(quote) &&
                                 region.containsSentence(quote)
                             ) {
-                                pageCandidates += Candidate(page, region, base + localStart, quote)
+                                pageCandidates += Candidate(page, region, at, quote)
                             }
                         }
                         a = b
                         b = iterator.next()
                     }
                     start = -1
+                    skipFirst = !endsSentence(paragraph)
                 }
                 var offset = 0
                 var footnotes = false
-                val lines = region.text.lines()
-                for ((index, raw) in lines.withIndex()) {
+                for ((index, raw) in regionLines.withIndex()) {
                     val line = raw.trim()
-                    val isEdge = index < 3 || index >= lines.size - 3
+                    val bottom = index >= regionLines.size / 2
+                    val isEdge = index < 3 || index >= regionLines.size - 3
                     val isHeading = (heading.matches(line) && !end.containsMatchIn(line)) ||
                         (line.length in 4..70 && !end.containsMatchIn(line) &&
-                            lines.getOrNull(index - 1).isNullOrBlank() && lines.getOrNull(index + 1).isNullOrBlank() &&
+                            regionLines.getOrNull(index - 1).isNullOrBlank() && regionLines.getOrNull(index + 1).isNullOrBlank() &&
                             line.split(' ').all { it.firstOrNull()?.isUpperCase() == true || it in listOf("of", "the", "in", "and", "a", "to") })
                     when {
                         backMatter -> break
-                        line.isBlank() || folio.matches(line) || publisher.containsMatchIn(line) ||
+                        isBareNoteNumber(line) && bottom -> {
+                            finishParagraph()
+                            footnotes = true
+                        }
+                        line.isBlank() || folio.matches(line) || isDownloadBanner(line) ||
                             isBibliographicFootnote(line) ||
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
-                        bibliography.matches(line) -> {
+                        isBackMatterHeading(line) -> {
                             finishParagraph()
-                            if (page.number > book.pages.size / 2) backMatter = true
+                            if (page.number > notesOpen) backMatter = true
                         }
                         isHeading -> finishParagraph()
-                        note.containsMatchIn(line) || (index >= lines.size / 2 && bottomBareNote.containsMatchIn(line)) -> {
+                        note.containsMatchIn(line) || (bottom && bottomBareNote.containsMatchIn(line)) -> {
                             finishParagraph()
-                            if (index >= lines.size * 2 / 3) footnotes = true
+                            if (bottom) footnotes = true
                         }
                         !footnotes -> {
                             if (start < 0) start = offset
@@ -187,7 +290,7 @@ internal object LiteraturePassages {
             if (copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
             candidates += pageCandidates
         }
-        require(candidates.isNotEmpty()) { "《${book.title}》没有可核对的正文句，请检查原件版面或文字识别。" }
+        if (candidates.isEmpty()) return emptyList()
         val seen = HashSet<String>(candidates.size)
         return candidates.mapNotNull { c ->
             val norm = LiteratureTextNorm.normalize(c.quote)

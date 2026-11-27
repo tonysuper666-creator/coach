@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -21,10 +22,13 @@ class LiteratureComparisonServiceTest {
     @Test fun pendingAndCompletedPollUseOneHaikuBatch() = runBlocking {
         val headers = CopyOnWriteArrayList<Map<String, String>>()
         val models = CopyOnWriteArrayList<String>()
+        val systems = CopyOnWriteArrayList<String>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
             headers += exchange.requestHeaders.mapKeys { it.key.lowercase() }.mapValues { it.value.first() }
-            models += Json.parseToJsonElement(exchange.requestBody.reader().readText()).jsonObject.getValue("model").jsonPrimitive.content
+            val payload = Json.parseToJsonElement(exchange.requestBody.reader().readText()).jsonObject
+            models += payload.getValue("model").jsonPrimitive.content
+            systems += payload.getValue("messages").jsonArray.first().jsonObject.getValue("content").jsonPrimitive.content
             val pending = headers.size == 1
             val body = if (pending) """{"x_coach_batch":"pending","retry_after_ms":60000}"""
             else """{"choices":[{"message":{"content":"{\"rows\":[]}"},"finish_reason":"stop"}],
@@ -50,6 +54,9 @@ class LiteratureComparisonServiceTest {
             assertTrue(headers.all {
                 it["x-coach-background"] == "1" && it["x-coach-task"] == "literature_comparison" &&
                     it["x-coach-friend"] == friendId("synthetic")
+            })
+            assertTrue(systems.all { system ->
+                "本行这一篇" in system && "反对者自己" in system && "不要一边写成支持" in system
             })
         } finally {
             server.stop(0)

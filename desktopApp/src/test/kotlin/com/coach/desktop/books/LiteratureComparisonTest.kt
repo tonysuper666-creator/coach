@@ -73,6 +73,56 @@ class LiteratureComparisonTest {
         }
     }
 
+    @Test fun conflictingRelationDirectionsAreNotShownAsVerified() {
+        withPapers(2) { books ->
+            val input = LiteratureComparisonInput(books)
+            val request = input.request()
+            val conflict = requireNotNull(
+                input.verify(comparisonReply(request, outlineCount = 3) { index ->
+                    if (index == 0) "support" else "refute"
+                }, pageOcr).table,
+            )
+            assertTrue(conflict.rows.all { !it.claim.pending })
+            assertTrue(conflict.rows.all { row -> row.relations.all { it.cell.pending && it.kind == null } })
+            val agreed = requireNotNull(
+                input.verify(comparisonReply(request, outlineCount = 3) { _ -> "support" }, pageOcr).table,
+            )
+            assertEquals(1.0, agreed.audit().passRate)
+            assertTrue(agreed.rows.all { row ->
+                val relation = row.relations.single()
+                !relation.cell.pending && relation.kind == ComparisonRelationKind.SUPPORT
+            })
+        }
+    }
+
+    @Test fun aPaperWithOnlyNotesIsPendingAndNotQuoted() {
+        withPapers(2) { books ->
+            val notes = """
+                12. The cataloguer copied a title from an earlier list and added a short remark about it.
+                The note continues as a full sentence after the marker and must stay out of the pool.
+                13. Another end note repeats a side remark without stating the paper claim.
+                14. A third numbered remark sits in the note region and looks like a body sentence.
+                15. A fourth numbered remark also looks like an ordinary sentence about the collection.
+            """.trimIndent()
+            val emptyPaper = books[1].copy(
+                pages = listOf(BookPage(16, notes, guideRegions = listOf(GuideRegion(notes)))),
+            )
+            val input = LiteratureComparisonInput(listOf(books[0], emptyPaper))
+            val blocks = input.request().getValue("blocks").jsonArray.map { it.jsonObject }
+            assertTrue(blocks.isNotEmpty())
+            assertTrue(blocks.none { it.getValue("bookId").jsonPrimitive.content == emptyPaper.id })
+            assertTrue(blocks.none { "cataloguer copied" in it.getValue("text").jsonPrimitive.content })
+            val table = requireNotNull(input.verify(comparisonReply(input.request(), outlineCount = 3), pageOcr).table)
+            val row = table.rows.single { it.bookId == emptyPaper.id }
+            assertEquals(COMPARISON_PENDING, row.claim.text)
+            assertTrue(row.claim.pending && row.claim.source == null)
+            assertTrue(row.method.pending)
+            assertTrue(row.concepts.all { it.pending })
+            assertTrue(row.relations.isEmpty() || row.relations.all { it.cell.pending })
+            assertTrue(!table.rows.single { it.bookId == books[0].id }.claim.pending)
+        }
+    }
+
     @Test fun onePaperDoesNotBuildATable() {
         withPapers(1) { books ->
             val error = assertFailsWith<IllegalArgumentException> { LiteratureComparisonInput(books) }
@@ -132,14 +182,37 @@ internal fun comparisonReply(
     failMethodOf: String? = null,
     copyClaimOf: String? = null,
     outlineCount: Int = 4,
+    relationKind: ((index: Int) -> String)? = null,
 ): JsonObject {
     val blocks = request.getValue("blocks").jsonArray.map { it.jsonObject }
     val byBook = blocks.groupBy { it.getValue("bookId").jsonPrimitive.content }
     val ids = request.getValue("papers").jsonArray.map { it.jsonObject.getValue("bookId").jsonPrimitive.content }
+    val usable = ids.filter { byBook[it].orEmpty().isNotEmpty() }
     return buildJsonObject {
         put("rows", buildJsonArray {
             ids.forEachIndexed { index, id ->
-                val refs = byBook.getValue(id)
+                val refs = byBook[id].orEmpty()
+                if (refs.isEmpty()) {
+                    add(buildJsonObject {
+                        put("bookId", id)
+                        put("claim", buildJsonObject {
+                            put("text", "模型仍给这一篇写了主张。")
+                            put("ref", 0)
+                        })
+                        put("method", buildJsonObject {
+                            put("text", "模型仍给这一篇写了方法。")
+                            put("ref", 0)
+                        })
+                        put("concepts", buildJsonArray {
+                            add(buildJsonObject {
+                                put("text", "模型仍给这一篇写了概念。")
+                                put("ref", 0)
+                            })
+                        })
+                        put("relations", buildJsonArray {})
+                    })
+                    return@forEachIndexed
+                }
                 val claimRef = refs.first()
                 val methodRef = refs.getOrElse(1) { claimRef }
                 val other = ids[(index + 1) % ids.size]
@@ -164,7 +237,7 @@ internal fun comparisonReply(
                     put("relations", buildJsonArray {
                         add(buildJsonObject {
                             put("otherBookId", other)
-                            put("kind", when (index % 3) {
+                            put("kind", relationKind?.invoke(index) ?: when (index % 3) {
                                 0 -> "support"
                                 1 -> "refute"
                                 else -> "supplement"
@@ -177,9 +250,10 @@ internal fun comparisonReply(
             }
         })
         put("outline", buildJsonArray {
+            if (usable.isEmpty()) return@buildJsonArray
             repeat(outlineCount) { n ->
-                val left = ids[n % ids.size]
-                val right = ids[(n + 1) % ids.size]
+                val left = usable[n % usable.size]
+                val right = usable[(n + 1) % usable.size]
                 add(buildJsonObject {
                     put("thesis", "论点 ${n + 1}：样本条件改变了生长速度。")
                     put("supports", buildJsonArray {

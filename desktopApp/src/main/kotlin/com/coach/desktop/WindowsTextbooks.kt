@@ -10,7 +10,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
-import androidx.compose.ui.window.application
+import com.coach.desktop.incident.runCoachApplication
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
@@ -225,7 +225,7 @@ internal fun runWindowsTextbooks() {
     IncidentLog.installCrashHandler()
     IncidentLog.startSession(settings.home)
     IncidentWatchdog.start()
-    application {
+    runCoachApplication {
         val scope = rememberCoroutineScope()
         var saveDrafts by remember { mutableStateOf<suspend () -> Boolean>({ true }) }
         val closeGuard = remember(scope) {

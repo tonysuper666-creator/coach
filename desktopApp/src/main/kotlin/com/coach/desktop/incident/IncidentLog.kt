@@ -30,13 +30,13 @@ internal object IncidentLog {
         synchronized(storeLock) {
             sessionStore = active
         }
-        if (shutdownHook.compareAndSet(false, true)) {
-            Runtime.getRuntime().addShutdownHook(Thread({
-                markStartedSessionClean()
-            }, "incident-clean-exit"))
-        }
     }
 
+    /**
+     * Only the app's own close path calls this (see [runCoachApplication]). There is deliberately no JVM
+     * shutdown hook: a hook also runs when Windows ends the process at logoff or shutdown, or on Ctrl+C,
+     * and those exits must still offer the prompt on the next start (TON-1941).
+     */
     internal fun markStartedSessionClean() {
         if (suppressCleanExit) return
         val started = synchronized(storeLock) { sessionStore } ?: return
@@ -86,7 +86,6 @@ internal object IncidentLog {
         if (!crashHandlerInstalled.compareAndSet(false, true)) return
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            if (thread.name == "incident-clean-exit") return@setDefaultUncaughtExceptionHandler
             try {
                 suppressCleanExit = System.getenv("COACH_INCIDENT_TEST") == "crash" || thread.name.startsWith("AWT-EventQueue")
                 current().record("crash", "uncaught", error.message, error)
@@ -109,7 +108,6 @@ internal object IncidentLog {
         store ?: IncidentStore(incidentDirectory(Path.of(System.getProperty("user.home")), System::getenv)).also { store = it }
     }
 
-    private val shutdownHook = AtomicBoolean(false)
 }
 
 internal fun incidentDirectory(home: Path, environment: (String) -> String?): Path {

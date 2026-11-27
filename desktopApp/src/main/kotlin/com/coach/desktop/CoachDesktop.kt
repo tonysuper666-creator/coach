@@ -15,7 +15,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
-import androidx.compose.ui.window.application
+import com.coach.desktop.incident.IncidentLog
+import com.coach.desktop.incident.IncidentPromptLayer
+import com.coach.desktop.incident.runCoachApplication
 import androidx.compose.ui.window.rememberWindowState
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.HttpLedgerTransport
@@ -92,12 +94,21 @@ fun runCoach() {
     val settings = DesktopConnectionSettings()
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
-    application {
+    // Packaged builds carry a course, so this route is what installs run; it needs the same exit marker (TON-1941).
+    IncidentLog.installCrashHandler()
+    IncidentLog.startSession(settings.home)
+    runCoachApplication {
         var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
         var readerController by remember { mutableStateOf<CoachController?>(null) }
         Window(onCloseRequest = ::exitApplication, title = "LearningCoach", icon = AppIcon.window(), state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             WindowsReadingMinimum(window)
+            var promptIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
+            IncidentPromptLayer(promptIdentity) {
             DesktopPairingGate(settings) { identity ->
+                DisposableEffect(identity) {
+                    promptIdentity = identity
+                    onDispose { promptIdentity = null }
+                }
                 if (identity.credentials.role == "friend") {
                     FriendCourseContent { kotlinx.coroutines.withContext(Dispatchers.Swing) {
                         val dialog = java.awt.FileDialog(window, "上传教材", java.awt.FileDialog.LOAD)
@@ -116,6 +127,7 @@ fun runCoach() {
                 }
                 LaunchedEffect(session) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(session.controller, it) } }
                 }
+            }
             }
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {

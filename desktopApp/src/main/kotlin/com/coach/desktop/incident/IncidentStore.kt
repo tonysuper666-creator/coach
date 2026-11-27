@@ -1,10 +1,13 @@
 package com.coach.desktop.incident
 
 import com.coach.domain.IncidentRedactor
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.ArrayDeque
@@ -190,7 +193,19 @@ internal class IncidentStore(
 
     private fun writeSession(open: Boolean) {
         val body = (if (open) "open" else "clean") + "\n" + clock().toEpochMilli() + "\n" + pid() + "\n"
-        Files.writeString(root.resolve("session.txt"), body)
+        // Replace the marker whole and flush it: a power cut right after start must leave "open", not an empty file.
+        val target = root.resolve("session.txt")
+        val temp = root.resolve("session.txt.part")
+        FileChannel.open(temp, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING).use { channel ->
+            val bytes = ByteBuffer.wrap(body.toByteArray(Charsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
+        try {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     private data class SessionMarker(val open: Boolean, val startedAt: Long, val pid: Long?)

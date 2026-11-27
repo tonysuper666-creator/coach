@@ -43,12 +43,17 @@ internal fun runningAppVersion(): String =
         ?: System.getProperty("coach.app.version")?.takeIf { it.isNotBlank() }
         ?: "dev"
 
-/** Verified installers live here so a temp cleanup cannot take the previous package with it. */
+/**
+ * Verified installers live beside the product directory, not inside it.
+ * Uninstalling LearningCoach deletes %LOCALAPPDATA%\LearningCoach. An MSI stored there
+ * disappears while msiexec is still reading it (error 1316) and the app is left uninstalled.
+ * A temp directory is also wrong: cleanup can remove the only copy of the previous package.
+ */
 internal fun windowsUpdatesDirectory(
     localAppData: String? = System.getenv("LOCALAPPDATA"),
     temp: String = System.getProperty("java.io.tmpdir"),
 ): Path {
-    val rooted = localAppData?.takeIf { it.isNotBlank() }?.let { Path.of(it, "LearningCoach", "updates") }
+    val rooted = localAppData?.takeIf { it.isNotBlank() }?.let { Path.of(it, "LearningCoach-updates") }
     return rooted ?: Path.of(temp, "LearningCoach-updates")
 }
 

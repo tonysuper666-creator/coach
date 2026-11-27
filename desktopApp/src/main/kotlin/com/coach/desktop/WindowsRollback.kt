@@ -10,6 +10,9 @@ internal const val ROLLBACK_NO_PACKAGE = "这台电脑上没有留下上一版�
 internal const val ROLLBACK_NO_SNAPSHOT = "没有留下升级前的学习记录，没有更换版本。可以继续使用现在这个版本。"
 internal const val ROLLBACK_FAILED = "没能回到上一版，还在当前版本。可以继续使用。"
 
+/** msiexec has been handed to a helper that outlives this process. The library stays as it is. */
+internal const val ROLLBACK_HANDOFF = -1
+
 /**
  * One-step rollback.
  *
@@ -55,15 +58,17 @@ internal object WindowsRollback {
     }
 
     /**
-     * Restores the upgrade snapshot and starts the previous installer.
-     * An empty string means the installer was started and the caller should exit.
-     * Any other string is a status to show while staying on this version.
+     * Starts the previous installer without touching the live library.
+     * The library is replaced only after msiexec returns 0 or 3010.
+     * An empty string means the caller should exit: either the previous version is installed
+     * and the snapshot is already restored, or a helper will do both after this process ends.
+     * Any other string is a status to show while staying on this version, with the library unchanged.
      */
     fun rollback(
         libraryDir: Path,
         updatesDir: Path,
         freeBytes: () -> Long = { usableSpace(libraryDir) },
-        launch: (Path) -> Boolean = ::startWindowsInstaller,
+        install: (Path, Path, Path) -> Int = ::handoffRollbackInstall,
     ): String {
         val previous = updatesDir.resolve("previous.msi")
         if (!Files.isRegularFile(previous)) return ROLLBACK_NO_PACKAGE
@@ -76,24 +81,137 @@ internal object WindowsRollback {
         if (freeBytes() < bytes * 3 + 16L * 1024 * 1024) return UPDATE_SPACE
         val safety = libraryDir.resolve(".rollback").resolve("safety")
         val pending = libraryDir.resolve(".rollback").resolve("pending.sqlite")
-        var swapped = false
+        val current = updatesDir.resolve("current.msi")
+        var restored = false
         return try {
             backupPair(libraryDir, safety)
             parkNewRows(live, snapshot, pending)
-            swapped = true
-            restoreSnapshot(libraryDir)
-            if (!launch(previous)) {
-                undo(libraryDir, safety)
-                Files.deleteIfExists(pending)
-                ROLLBACK_FAILED
-            } else {
-                ""
+            when (val code = install(previous, current, libraryDir)) {
+                0, 3010 -> {
+                    restoreSnapshot(libraryDir)
+                    restored = true
+                    ""
+                }
+                ROLLBACK_HANDOFF -> ""
+                else -> {
+                    Files.deleteIfExists(pending)
+                    ROLLBACK_FAILED
+                }
             }
         } catch (_: Exception) {
-            if (swapped) undo(libraryDir, safety)
+            if (restored) undo(libraryDir, safety)
             Files.deleteIfExists(pending)
             ROLLBACK_FAILED
         }
+    }
+
+    /** Shown once on the next launch when the helper could not finish the rollback. */
+    fun consumeRollbackFailure(libraryDir: Path): String? {
+        val marker = libraryDir.resolve(".rollback").resolve("failed.txt")
+        if (!Files.isRegularFile(marker)) return null
+        Files.deleteIfExists(marker)
+        return ROLLBACK_FAILED
+    }
+
+    /**
+     * Starts a helper and returns immediately. The app must exit so msiexec can replace its files.
+     * The helper waits for that exit, runs the previous package, and only then swaps the library.
+     * A failed install leaves the library in place and, if the product directory is gone, installs current.msi.
+     */
+    fun handoffRollbackInstall(previous: Path, current: Path, libraryDir: Path): Int {
+        val root = System.getenv("SystemRoot") ?: return Int.MIN_VALUE
+        val powershell = Path.of(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        val cmd = Path.of(root, "System32", "cmd.exe")
+        if (!Files.isRegularFile(powershell) || !Files.isRegularFile(cmd)) return Int.MIN_VALUE
+        val updatesDir = previous.parent
+        Files.createDirectories(updatesDir)
+        val script = updatesDir.resolve("rollback-helper.ps1")
+        Files.writeString(
+            script,
+            helperScript(
+                previous = previous,
+                current = current,
+                libraryDir = libraryDir,
+                result = updatesDir.resolve("rollback-result.txt"),
+                log = updatesDir.resolve("rollback-install.log"),
+            ),
+        )
+        ProcessBuilder(
+            cmd.toString(),
+            "/c",
+            "start \"rollback\" /min \"$powershell\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"$script\"",
+        ).start()
+        return ROLLBACK_HANDOFF
+    }
+
+    private fun helperScript(previous: Path, current: Path, libraryDir: Path, result: Path, log: Path): String {
+        fun q(path: Path) = "'" + path.toAbsolutePath().toString().replace("'", "''") + "'"
+        return """
+            ${'$'}ErrorActionPreference = 'Continue'
+            ${'$'}previous = ${q(previous)}
+            ${'$'}current = ${q(current)}
+            ${'$'}library = ${q(libraryDir)}
+            ${'$'}result = ${q(result)}
+            ${'$'}log = ${q(log)}
+            function Wait-App {
+              ${'$'}deadline = (Get-Date).AddMinutes(2)
+              do {
+                if (-not (Get-Process -Name 'LearningCoach' -ErrorAction SilentlyContinue)) { return }
+                Start-Sleep -Milliseconds 400
+              } while ((Get-Date) -lt ${'$'}deadline)
+            }
+            function Note([string]${'$'}text) { Add-Content -LiteralPath ${'$'}result -Value ${'$'}text }
+            Wait-App
+            if (-not (Test-Path -LiteralPath ${'$'}current)) {
+              ${'$'}cached = ${'$'}null
+              Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData' -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { ${'$'}_.PSChildName -eq 'InstallProperties' } |
+                ForEach-Object {
+                  ${'$'}props = Get-ItemProperty ${'$'}_.PSPath -ErrorAction SilentlyContinue
+                  if (${'$'}props.DisplayName -eq 'LearningCoach' -and ${'$'}props.LocalPackage -and (Test-Path -LiteralPath ${'$'}props.LocalPackage)) {
+                    ${'$'}cached = ${'$'}props.LocalPackage
+                  }
+                }
+              if (${'$'}cached) { Copy-Item -LiteralPath ${'$'}cached -Destination ${'$'}current -Force }
+            }
+            ${'$'}installer = Join-Path ${'$'}env:SystemRoot 'System32\msiexec.exe'
+            ${'$'}proc = Start-Process -FilePath ${'$'}installer -ArgumentList @('/i', ${'$'}previous, '/passive', '/norestart', '/l*v', ${'$'}log) -Wait -PassThru
+            ${'$'}code = ${'$'}proc.ExitCode
+            'EXIT=' + ${'$'}code | Set-Content -LiteralPath ${'$'}result
+            ${'$'}rollback = Join-Path ${'$'}library '.rollback'
+            ${'$'}pending = Join-Path ${'$'}rollback 'pending.sqlite'
+            ${'$'}exe = Join-Path ${'$'}env:LOCALAPPDATA 'LearningCoach\LearningCoach.exe'
+            if (${'$'}code -eq 0 -or ${'$'}code -eq 3010) {
+              function Swap-Db([string]${'$'}source, [string]${'$'}target) {
+                ${'$'}staging = ${'$'}target + '.rollback-new'
+                Copy-Item -LiteralPath ${'$'}source -Destination ${'$'}staging -Force
+                Remove-Item -LiteralPath ${'$'}target -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (${'$'}target + '-wal') -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (${'$'}target + '-shm') -Force -ErrorAction SilentlyContinue
+                Move-Item -LiteralPath ${'$'}staging -Destination ${'$'}target -Force
+              }
+              Swap-Db (Join-Path ${'$'}rollback 'snapshot.sqlite') (Join-Path ${'$'}library 'library.sqlite')
+              ${'$'}exams = (Get-Content -LiteralPath (Join-Path ${'$'}rollback 'exams.txt') -Raw -ErrorAction SilentlyContinue)
+              if (${'$'}exams -match 'present') {
+                Swap-Db (Join-Path ${'$'}rollback 'snapshot-exams.sqlite') (Join-Path ${'$'}library 'exams.sqlite')
+              } elseif (${'$'}exams -match 'absent') {
+                ${'$'}liveExams = Join-Path ${'$'}library 'exams.sqlite'
+                Remove-Item -LiteralPath ${'$'}liveExams -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (${'$'}liveExams + '-wal') -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (${'$'}liveExams + '-shm') -Force -ErrorAction SilentlyContinue
+              }
+              Note 'SWAPPED=yes'
+              exit 0
+            }
+            Remove-Item -LiteralPath ${'$'}pending -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath ${'$'}exe) -and (Test-Path -LiteralPath ${'$'}current)) {
+              Start-Process -FilePath ${'$'}installer -ArgumentList @('/i', ${'$'}current, '/passive', '/norestart') -Wait | Out-Null
+              Note 'REINSTALLED=current'
+            }
+            Set-Content -LiteralPath (Join-Path ${'$'}rollback 'failed.txt') -Value 'failed' -Encoding Ascii
+            Note 'SWAPPED=no'
+            exit ${'$'}code
+        """.trimIndent()
     }
 
     /** After msiexec has been started: the running version's installer becomes the one-step previous. */

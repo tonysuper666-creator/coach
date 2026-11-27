@@ -115,6 +115,10 @@ internal class UpdateSession(
         }
     }
 
+    fun noteRollback(text: String) {
+        rollbackStatus = text
+    }
+
     fun rollback() {
         if (rollbackBusy) return
         rollbackBusy = true
@@ -122,7 +126,7 @@ internal class UpdateSession(
         scope.launch {
             val status = try {
                 if (!save()) UPDATE_NOT_SAVED
-                else withContext(Dispatchers.IO) { WindowsRollback.rollback(libraryDir, updatesDir, launch = launch) }
+                else withContext(Dispatchers.IO) { WindowsRollback.rollback(libraryDir, updatesDir) }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
@@ -152,7 +156,9 @@ internal fun rememberWindowsUpdateSession(
 ): UpdateSession {
     val scope = rememberCoroutineScope()
     val session = remember(libraryDir, updatesDir) {
-        UpdateSession(libraryDir, updatesDir, save, close, scope, launch)
+        UpdateSession(libraryDir, updatesDir, save, close, scope, launch).also { created ->
+            WindowsRollback.consumeRollbackFailure(libraryDir)?.let { created.noteRollback(it) }
+        }
     }
     LaunchedEffect(session) {
         val update = WindowsUpdate.installed() ?: return@LaunchedEffect

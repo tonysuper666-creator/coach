@@ -31,7 +31,7 @@ class WindowsRollbackTest {
             }
             Files.write(updates.resolve("previous.msi"), byteArrayOf(1))
             var launched: Path? = null
-            val status = WindowsRollback.rollback(library, updates) { launched = it; true }
+            val status = WindowsRollback.rollback(library, updates) { previous, _, _ -> launched = previous; 0 }
             assertEquals("", status)
             assertEquals(updates.resolve("previous.msi"), launched)
             assertEquals(listOf("A" to "升级前的笔记"), notes(db))
@@ -61,13 +61,49 @@ class WindowsRollbackTest {
             sqlite(db) { dbc ->
                 dbc.createStatement().execute("INSERT INTO book_notes(book, id, note) VALUES ('book', 'B', '不能丢')")
             }
-            assertEquals(ROLLBACK_NO_PACKAGE, WindowsRollback.rollback(library, updates) { true })
+            assertEquals(ROLLBACK_NO_PACKAGE, WindowsRollback.rollback(library, updates) { _, _, _ -> 0 })
             assertEquals(listOf("A" to "还在", "B" to "不能丢"), notes(db))
             Files.write(updates.resolve("previous.msi"), byteArrayOf(1))
-            assertEquals(UPDATE_SPACE, WindowsRollback.rollback(library, updates, launch = { true }, freeBytes = { 0L }))
+            assertEquals(UPDATE_SPACE, WindowsRollback.rollback(library, updates, install = { _, _, _ -> 0 }, freeBytes = { 0L }))
             assertEquals(listOf("A" to "还在", "B" to "不能丢"), notes(db))
-            assertEquals(ROLLBACK_FAILED, WindowsRollback.rollback(library, updates) { false })
+            assertEquals(ROLLBACK_FAILED, WindowsRollback.rollback(library, updates) { _, _, _ -> throw IllegalStateException("not started") })
             assertEquals(listOf("A" to "还在", "B" to "不能丢"), notes(db))
+            assertFalse(Files.exists(library.resolve(".rollback/pending.sqlite")))
+        } finally {
+            library.toFile().deleteRecursively()
+            updates.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun failedInstallLeavesTheLibraryAndThePackagesUntouched() {
+        val library = Files.createTempDirectory("coach-rollback-fail")
+        val updates = Files.createTempDirectory("coach-rollback-fail-upd")
+        try {
+            val db = library.resolve("library.sqlite")
+            sqlite(db) { dbc ->
+                dbc.createStatement().use { sql ->
+                    sql.execute("CREATE TABLE book_notes(book TEXT NOT NULL, id TEXT NOT NULL, note TEXT NOT NULL, PRIMARY KEY(book, id))")
+                    sql.execute("INSERT INTO book_notes(book, id, note) VALUES ('book', 'A', '升级前')")
+                }
+            }
+            WindowsRollback.prepareLaunch(library, "2.0.0")
+            sqlite(db) { dbc ->
+                dbc.createStatement().execute("INSERT INTO book_notes(book, id, note) VALUES ('book', 'B', '升级后')")
+            }
+            val previous = updates.resolve("previous.msi")
+            val current = updates.resolve("current.msi")
+            Files.write(previous, byteArrayOf(1, 2, 3))
+            Files.write(current, byteArrayOf(4, 5, 6))
+            var called = false
+            val status = WindowsRollback.rollback(library, updates) { prev, curr, _ ->
+                called = prev == previous && curr == current
+                1603
+            }
+            assertEquals(ROLLBACK_FAILED, status)
+            assertTrue(called)
+            assertContentEquals(byteArrayOf(1, 2, 3), Files.readAllBytes(previous))
+            assertContentEquals(byteArrayOf(4, 5, 6), Files.readAllBytes(current))
+            assertEquals(listOf("A" to "升级前", "B" to "升级后"), notes(db))
             assertFalse(Files.exists(library.resolve(".rollback/pending.sqlite")))
         } finally {
             library.toFile().deleteRecursively()

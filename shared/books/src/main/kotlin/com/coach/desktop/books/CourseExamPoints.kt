@@ -52,39 +52,65 @@ internal object CourseExamPoints {
         val teaching = materials.filter { it.role in teachingRoles && (it.userLocked || !CourseClientGates.isPastExamMaterial(it.title, it.sourceFilename)) }
             .sortedBy { it.role.authorityRank }
         if (teaching.size < 2) return emptyList()
-        val titles = linkedMapOf<String, String>()
-        data class IndexedPage(val bookId: String, val page: Int, val role: CourseMaterialRole, val text: String)
-        val pages = mutableListOf<IndexedPage>()
+        val pages = mutableListOf<ExamTeachingPage>()
         for (mat in teaching) {
             val excludedRanges = excluded.filter { it.bookId == mat.bookId }.map { it.startPage..it.endPage }
             val first = CourseStore.loadCorrectedBodyPage(db, mat.bookId) ?: 1
             for (page in CourseStore.loadPagesForBook(db, mat.bookId, mat.pageCount)) {
                 if (page.number < first || page.ocrPending || excludedRanges.any { page.number in it }) continue
-                val lines = page.text.lineSequence().map(String::trim)
-                    .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
-                for ((index, line) in lines.withIndex()) {
-                    val heading = when {
-                        line.startsWith("#") -> line.trimStart('#', ' ')
-                        definition.containsMatchIn(line) -> definition.find(line)!!.groupValues[1]
-                        index == 0 -> line
-                        else -> continue
-                    }.replace(sectionNumber, "").trim()
-                    if (heading.length !in 2..64 || heading.any { it in "。！？!?；;." } || heading.none(Char::isLetter)) continue
-                    val key = normalize(heading)
-                    if (key.length >= 2 && key !in boilerplate) titles.putIfAbsent(key, heading)
-                }
-                pages += IndexedPage(mat.bookId, page.number, mat.role, normalize(page.text))
+                pages += ExamTeachingPage(mat.bookId, page.number, mat.role, page.text)
             }
+        }
+        return identifyFromPages(courseId, pages)
+    }
+
+    /**
+     * Headings that the textbook itself defines, or numbers as a section, stay even when
+     * the slides never repeat the name. A bare first line still needs a second book.
+     */
+    fun identifyFromPages(courseId: String, pages: List<ExamTeachingPage>): List<CourseTopicPlan> {
+        val titles = linkedMapOf<String, String>()
+        val textbookStrong = mutableSetOf<String>()
+        val indexed = mutableListOf<ExamTeachingPage>()
+        for (page in pages) {
+            if (page.role !in teachingRoles || page.text.isBlank()) continue
+            val lines = page.text.lineSequence().map(String::trim)
+                .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
+            for ((index, line) in lines.withIndex()) {
+                val defined = definition.containsMatchIn(line)
+                val markdown = line.startsWith("#")
+                val numbered = sectionNumber.containsMatchIn(line)
+                val heading = when {
+                    markdown -> line.trimStart('#', ' ')
+                    defined -> definition.find(line)!!.groupValues[1]
+                    numbered || index == 0 -> line
+                    else -> continue
+                }.replace(sectionNumber, "").trim()
+                if (heading.length !in 2..64 || heading.any { it in "。！？!?；;." } || heading.none(Char::isLetter)) continue
+                val key = normalize(heading)
+                if (key.length < 2 || key in boilerplate) continue
+                titles.putIfAbsent(key, heading)
+                if (page.role == CourseMaterialRole.CORE_TEXTBOOK && (defined || numbered || markdown)) textbookStrong += key
+            }
+            indexed += page.copy(text = normalize(page.text))
         }
         return titles.mapNotNull { (key, title) ->
             val pattern = termPattern(key)
-            val sources = pages.filter { pattern.containsMatchIn(it.text) }.map {
+            val sources = indexed.filter { pattern.containsMatchIn(it.text) }.map {
                 CourseTopicLinkPlan(it.bookId, startPage = it.page, endPage = it.page, role = it.role)
             }
-            // Single-source material remains available in its existing chapter or weekly topic.
-            if (sources.distinctBy { it.bookId }.size < 2) return@mapNotNull null
+            val textbookBacked = key in textbookStrong && sources.any { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            // A name that is only a slide title stays on its weekly topic. A textbook definition does not.
+            if (sources.distinctBy { it.bookId }.size < 2 && !textbookBacked) return@mapNotNull null
             val id = UUID.nameUUIDFromBytes("$courseId|point|$key".toByteArray(Charsets.UTF_8))
             CourseTopicPlan("point-$id", LABEL, null, 0, title, CourseTopicStatus.EXAMINABLE, sources = sources)
         }.mapIndexed { index, topic -> topic.copy(ord = index + 1) }
     }
 }
+
+internal data class ExamTeachingPage(
+    val bookId: String,
+    val page: Int,
+    val role: CourseMaterialRole,
+    val text: String,
+)

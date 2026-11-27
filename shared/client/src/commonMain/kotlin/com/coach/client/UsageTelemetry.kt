@@ -74,7 +74,7 @@ class UsageReporter(baseUrl: String, private val device: String, private val tok
         install(HttpTimeout) { requestTimeoutMillis = 5_000; connectTimeoutMillis = 2_000 }
     }
     suspend fun send(events: List<JsonObject>): Boolean = http.post(url) {
-        header("Authorization", "Bearer $token"); header("X-Coach-Device", device)
+        header("Authorization", "Bearer $token"); header("X-Coach-Device", device); coachVersionHeader()
         contentType(ContentType.Application.Json); setBody(JsonArray(events).toString())
     }.status == HttpStatusCode.NoContent
     fun close() = http.close()

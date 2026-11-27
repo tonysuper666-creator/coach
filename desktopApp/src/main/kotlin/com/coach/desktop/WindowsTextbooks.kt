@@ -15,6 +15,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.LocalBookRelogin
+import com.coach.desktop.books.IncidentHooks
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.LearningJournal
@@ -34,7 +35,6 @@ import com.coach.desktop.incident.IncidentExitPrompt
 import com.coach.desktop.incident.IncidentLog
 import com.coach.desktop.incident.IncidentWatchdog
 import com.coach.desktop.incident.runIncidentTestSwitch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
@@ -228,17 +228,6 @@ internal fun runWindowsTextbooks() {
                 } else LearningProfile(directory,null)
                 key(profile.directory) {
                     val controller = remember { windowsBookController(profile.directory) }
-                    LaunchedEffect(controller) {
-                        var previous = controller.state.value
-                        controller.state.collect { next ->
-                            val message = next.error
-                            if (previous.importing != null && next.importing == null && !message.isNullOrBlank()
-                                && message != "已取消导入，书架没有新增教材。") {
-                                runCatching { IncidentLog.recordImportFailure(message) }
-                            }
-                            previous = next
-                        }
-                    }
                     val drafts = rememberAnswerDrafts(controller)
                     val exams = rememberLocalExamController(controller.library)
                     DisposableEffect(controller,drafts,exams) {
@@ -376,7 +365,7 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (failure: Exception) {
                         // The outbox keeps the change. The record stays on this computer until the user sends it.
-                        runCatching { IncidentLog.recordSyncFailure("${failure.javaClass.name} ${failure.message.orEmpty()}") }
+                        runCatching { IncidentHooks.syncFailed("${failure.javaClass.name} ${failure.message.orEmpty()}") }
                     }
                     delay(15_000)
                 }

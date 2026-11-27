@@ -469,6 +469,7 @@ internal fun SingleBookCompanionPanel(
                             onUpdatePreference = onUpdateStudyPreference,
                             compact = true,
                             tag = "companion-mode-trigger",
+                            noun = "伴读",
                         )
                         modulePills(Modifier.weight(1f))
                         if (showKnobsInMerged) {
@@ -495,6 +496,7 @@ internal fun SingleBookCompanionPanel(
                             onUpdatePreference = onUpdateStudyPreference,
                             compact = true,
                             tag = "companion-mode-trigger",
+                            noun = "伴读",
                         )
                         CoachCardMeta(
                             "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",

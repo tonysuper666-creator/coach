@@ -175,6 +175,8 @@ tasks.test {
     providers.gradleProperty("coach.liveBookConnection").orNull?.let { systemProperty("coach.liveBookConnection", it) }
     providers.gradleProperty("coach.ai1.soakSeconds").orNull?.let { systemProperty("coach.ai1.soakSeconds", it) }
     providers.gradleProperty("coach.ai1.reportOut").orNull?.let { systemProperty("coach.ai1.reportOut", it) }
+    // 真书阶段读 COACH_IMPORT_PHASE。不把这次成功记成可复用，否则换阶段会被 Gradle 跳过。
+    if (!System.getenv("COACH_IMPORT_PHASE").isNullOrBlank()) outputs.upToDateWhen { false }
 }
 
 // Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.
@@ -323,4 +325,20 @@ tasks.register<JavaExec>("structureAudit") {
     classpath = sourceSets.getByName("test").runtimeClasspath
     mainClass.set("com.coach.desktop.books.StructureAuditMain")
     jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
+}
+
+// Held-out coverage. Paths are properties so Windows quoting stays intact.
+// The report is refused inside a git checkout and contains no question text.
+tasks.register<JavaExec>("examCoverage") {
+    group = "verification"
+    description = "Score a course bank against held-out questions. Writes point names and reason classes only."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.getByName("test").runtimeClasspath
+    mainClass.set("com.coach.desktop.books.ExamCoverageMainKt")
+    jvmArgs("-Dfile.encoding=UTF-8")
+    val examArgs = listOf("bank", "holdout", "out", "teaching", "textbook", "identified").mapNotNull { name ->
+        val value = providers.gradleProperty("exam.$name").orNull ?: return@mapNotNull null
+        listOf("--$name", value)
+    }.flatten()
+    args(examArgs)
 }

@@ -87,7 +87,10 @@ fun Application.incidentReportRoutes(
                 return@post
             }
             when (store.accept(call.attributes[observedDevice], body)) {
-                IncidentAccept.Stored -> call.respond(HttpStatusCode.NoContent)
+                IncidentAccept.Stored -> {
+                    call.application.attributes.getOrNull(reliabilityCounts)?.incident(body)
+                    call.respond(HttpStatusCode.NoContent)
+                }
                 IncidentAccept.Limited -> call.respond(HttpStatusCode.TooManyRequests)
                 IncidentAccept.Rejected -> call.respond(HttpStatusCode.BadRequest)
             }

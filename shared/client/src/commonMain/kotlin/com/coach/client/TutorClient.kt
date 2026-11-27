@@ -54,7 +54,10 @@ class TutorClient(
         followRedirects = false
         install(WebSockets) { maxFrameSize = MAX_SOCKET_FRAME_BYTES }
         install(HttpTimeout) { connectTimeoutMillis = 5_000; requestTimeoutMillis = 5_000 }
-        defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
+        defaultRequest {
+            header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId)
+            coachVersionOrNull()?.let { header("X-Coach-Version", it) }
+        }
     }
     @kotlin.concurrent.Volatile private var live: Channel<String>? = null
     private val lifecycle = Any()

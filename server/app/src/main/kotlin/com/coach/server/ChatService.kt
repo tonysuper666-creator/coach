@@ -85,6 +85,7 @@ class ChatService(
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
     val reader = ReaderExplanation(actor, bridge, tokenLedger = tokenLedger)
+    internal var reliability: ReliabilityCounts? = null
     private val preparation = LessonPreparation(actor,bridge,packsDirectory)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()
@@ -154,6 +155,8 @@ class ChatService(
         data class Cursor(val text: String = "", val index: Int = 0)
         @Volatile var cursor = Cursor()
         val finished = AtomicBoolean(false)
+        @Volatile var reliabilityKind: String? = null
+        @Volatile var reliabilityDevice: String = ""
 
         /** 取消只有一条路径：断开 HTTP，桥据此杀掉 CLI 整个进程组（§5.5）。 */
         fun abort(status: String, reason: String) {
@@ -214,7 +217,7 @@ class ChatService(
         hub.emit(user)
         if (quick) {
             val anchor = actor.execute { snapshot(courseId).projection.quickAsks.values.single { it.threadId == threadId } }
-            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null,saved.messageId,receivedAt)
+            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null,saved.messageId,receivedAt, reliabilityKind = "ask", reliabilityDevice = device)
         }
         when (tutorIntent(question)) {
             TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack,allowExample=false,receivedAt=receivedAt)
@@ -222,7 +225,7 @@ class ChatService(
             null -> Unit
         }
         val plan = if (tutor.hasThread(courseId,threadId)) tutor.followup(courseId,threadId) else null
-        return startReply(threadId,courseId,question,pack,plan,saved.messageId,receivedAt)
+        return startReply(threadId,courseId,question,pack,plan,saved.messageId,receivedAt, reliabilityKind = "ask", reliabilityDevice = device)
     }
 
     suspend fun quickAsk(courseId: String, question: String, pack: String = "",
@@ -323,10 +326,10 @@ class ChatService(
         publish(tutor.settings(courseId,threadId,groupSize,mode),threadId,courseId)
     }
 
-    suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String, receivedAt: Long = System.nanoTime()) {
+    suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String, receivedAt: Long = System.nanoTime(), device: String = "") {
         val outcome = tutor.explain(courseId,threadId,mode)
         publish(outcome,threadId,courseId)
-        startReply(threadId,courseId,"请按指定模式讲解。",pack,outcome.plan,receivedAt=receivedAt)
+        startReply(threadId,courseId,"请按指定模式讲解。",pack,outcome.plan,receivedAt=receivedAt, reliabilityKind = "explain", reliabilityDevice = device)
     }
 
     suspend fun submitGroup(threadId: String, courseId: String, group: String, answers: Map<String,String>, device: String, submission: String) {
@@ -347,7 +350,7 @@ class ChatService(
             "phase" to "pool_queued","text" to (outcome.poolMessage ?: "题池暂空，补题尚未运行")))
     }
 
-    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null, receivedAt: Long = System.nanoTime()): String {
+    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null, receivedAt: Long = System.nanoTime(), reliabilityKind: String? = null, reliabilityDevice: String = ""): String {
         val messageId = UUID.randomUUID().toString()
         val suppliedPack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
         val sourcePack = if (plan?.explanation == true) {
@@ -356,6 +359,8 @@ class ChatService(
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mistakes.isEmpty() && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan, FirstWordTrace(messageId, null, receivedAt), receivedAt)
+        session.reliabilityKind = reliabilityKind
+        session.reliabilityDevice = reliabilityDevice
         sessions[messageId] = session
         val recent = actor.execute { recentTurns(threadId,beforeMessage=userMessageId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
@@ -417,6 +422,7 @@ class ChatService(
         }
         val plan=checkNotNull(session.plan)
         publish(tutor.finish(plan,session.messageId,status==StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
+        noteReliability(session, status, reason)
         session.finished.set(true);sessions.remove(session.messageId)
         hub.emit(endFrame(session,status,reason,text.length))
         session.trace?.let { log(it.finish(status, null, null)) }
@@ -718,6 +724,7 @@ class ChatService(
         log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${result.call.ttftMs} terminal=$terminalStatus failure=$failure")
         session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs, rid)) }
         if (willFallback) fallback(session,question,pack)
+        else noteReliability(session, status, reason)
     }
 
     /** At most one invocation per original answer; the supplement cannot ask for another lookup. */
@@ -829,6 +836,8 @@ class ChatService(
     private suspend fun fallback(previous: Session, question: String, pack: String) {
         val messageId = UUID.randomUUID().toString()
         val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan, FirstWordTrace(messageId, previous.messageId, previous.receivedAt), previous.receivedAt)
+        session.reliabilityKind = previous.reliabilityKind
+        session.reliabilityDevice = previous.reliabilityDevice
         session.restrictedGuard = previous.restrictedGuard
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
@@ -866,7 +875,15 @@ class ChatService(
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy))
         log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=${safeDiagnosticReason(reason)}")
+        noteReliability(session, status, reason)
         session.trace?.let { log(it.finish(status, result.terminal?.queueMs, result.terminal?.ttftMs, result.call.requestId)) }
+    }
+
+    private fun noteReliability(session: Session, status: String, reason: String?) {
+        val kind = session.reliabilityKind ?: return
+        val code = classifyChat(status, reason) ?: return
+        val counts = reliability ?: return
+        counts.outcome(kind, counts.versionOf(session.reliabilityDevice), code)
     }
 
     /**

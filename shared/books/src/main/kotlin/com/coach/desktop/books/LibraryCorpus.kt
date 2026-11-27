@@ -73,34 +73,43 @@ internal fun openLibraryCorpus(directory: Path): Connection =
     }
 
 /** 把阅读位置写到这本书的原页，好让随后打开的阅读器落在那一句附近。页不在书里则不动。原句还在才记下高亮。 */
-internal fun stageLibraryJump(library: TextbookLibrary, record: LibraryRecord): Boolean {
-    val page = record.page?.takeIf { it > 0 } ?: run {
-        library.consumeQuoteJump(record.bookId)
+internal fun stageLibraryJump(library: TextbookLibrary, record: LibraryRecord): Boolean =
+    stagePassageJump(library, record.bookId, record.page, record.startUtf16, record.endUtf16, record.quote)
+
+internal fun stagePassageJump(
+    library: TextbookLibrary,
+    bookId: String,
+    page: Int?,
+    startUtf16: Int?,
+    endUtf16: Int?,
+    quote: String,
+): Boolean {
+    val resolved = page?.takeIf { it > 0 } ?: run {
+        library.consumeQuoteJump(bookId)
         return false
     }
-    val offset = record.startUtf16?.takeIf { it >= 0 } ?: 0
+    val offset = startUtf16?.takeIf { it >= 0 } ?: 0
     val moved = openLibraryCorpus(library.directory).use { db ->
         db.prepareStatement(
             "UPDATE books SET reading_page=? WHERE id=? AND EXISTS (SELECT 1 FROM pages WHERE book=? AND page=?)",
         ).use { sql ->
-            sql.setInt(1, page)
-            sql.setString(2, record.bookId)
-            sql.setString(3, record.bookId)
-            sql.setInt(4, page)
+            sql.setInt(1, resolved)
+            sql.setString(2, bookId)
+            sql.setString(3, bookId)
+            sql.setInt(4, resolved)
             sql.executeUpdate() == 1
         }
     }
     if (!moved) {
-        library.consumeQuoteJump(record.bookId)
+        library.consumeQuoteJump(bookId)
         return false
     }
-    library.saveReadSpot(record.bookId, page, offset)
-    val end = record.endUtf16
-    val quote = record.quote
+    library.saveReadSpot(bookId, resolved, offset)
+    val end = endUtf16
     if (end != null && end > offset && quote.isNotBlank()) {
-        library.stageQuoteJump(BookPassage(record.bookId, page, offset, end, quote))
+        library.stageQuoteJump(BookPassage(bookId, resolved, offset, end, quote))
     } else {
-        library.consumeQuoteJump(record.bookId)
+        library.consumeQuoteJump(bookId)
     }
     return true
 }

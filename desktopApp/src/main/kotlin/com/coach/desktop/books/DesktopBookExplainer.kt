@@ -14,6 +14,8 @@ import com.coach.desktop.DesktopPairing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.nio.file.Files
@@ -29,6 +31,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     private val library: TextbookLibrary? = null) {
     private val imports = library?.let(::ImportedBookWire)
     private val pairing = DesktopPairing(settings)
+    private val loadMutex = Mutex()
     var identity by mutableStateOf<DesktopIdentity?>(null)
         protected set
     var loaded by mutableStateOf(false)
@@ -51,7 +54,8 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         identity = null; revoked = true
     }
 
-    open suspend fun load() {
+    open suspend fun load() = loadMutex.withLock {
+        if (loaded) return@withLock
         val result = withContext(Dispatchers.IO) {
             runCatching { Triple(settings.serverUrl(), pairing.load(), runCatching { pairing.wasRevoked() }.getOrDefault(false)) }
         }
@@ -62,7 +66,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             val authorized = saved == null || saved.credentials.role != "friend" || withContext(Dispatchers.IO) {
                 pairing.stillAuthorized(saved)
             }
-            if (!authorized) { markRevoked(); loaded = true; return }
+            if (!authorized) { markRevoked(); loaded = true; return@withLock }
             identity = if (stale) null else saved
             revoked = stale || (saved == null && wasRevoked)
         }

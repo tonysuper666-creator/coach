@@ -19,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,8 +91,25 @@ internal object FirstOpenPlanner {
             else book.lessons.indexOfFirst { it.blocks.any { block -> !block.heading && block.text.isNotBlank() } }
         }
         if (index < 0) return null
-        val group = ChapterCompanionGrouping.groupForSection(book, index) ?: return null
-        val first = ChapterCompanionProgressive.firstSectionGroup(group, null) ?: group
+        val chosenLesson = book.lessons[index]
+        val group = ChapterCompanionGrouping.groupForSection(book, index)
+        val first = if (group != null) {
+            ChapterCompanionProgressive.firstSectionGroup(group, chosenLesson.id)
+                ?.takeIf { g -> g.sections.any { sec -> sec.blocks.any { !it.heading && it.text.isNotBlank() } } }
+                ?: group.copy(
+                    firstPage = chosenLesson.firstPage,
+                    lastPage = chosenLesson.lastPage,
+                    sections = listOf(chosenLesson),
+                )
+        } else {
+            ChapterSectionGroup(
+                chapterId = chosenLesson.id,
+                chapterTitle = chosenLesson.title,
+                sections = listOf(chosenLesson),
+                firstPage = chosenLesson.firstPage,
+                lastPage = chosenLesson.lastPage,
+            )
+        }
         return trim(first, OPENING_CHARS)
     }
 
@@ -206,12 +224,23 @@ internal fun FirstTastePanel(
 ) {
     val colors = CoachTheme.colors
     val pollMs = LocalConnectivityPollMs.current
+    val currentBook by rememberUpdatedState(book)
     var fetchTrigger by remember(book.id) { mutableIntStateOf(0) }
     var manualClicks by remember(book.id) { mutableIntStateOf(0) }
     var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
     var recoveredOnline by remember(book.id) { mutableStateOf(false) }
+    var waitingBookReady by remember(book.id) { mutableStateOf(false) }
     var step by remember(book.id) { mutableStateOf<TasteStep>(TasteStep.Loading) }
     var picked by remember(book.id) { mutableStateOf<String?>(null) }
+
+    // If Tier 0 PDF import had not yet extracted body paragraphs when FirstTastePanel mounted,
+    // automatically proceed as soon as Tier 1 / OCR updates the book in memory.
+    LaunchedEffect(book.id, book.indexState, book.hasPendingOcr, book.lessons.size) {
+        if (waitingBookReady) {
+            waitingBookReady = false
+            fetchTrigger += 1
+        }
+    }
 
     // Automatic resume when host connectivity recovers from OFFLINE -> ONLINE.
     // Never touches Ask or Told once the first question has already loaded.
@@ -273,12 +302,21 @@ internal fun FirstTastePanel(
         recoveredOnline = false
         step = TasteStep.Loading
         picked = null
-        val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(book) }.getOrNull() }
+        val snapshotBook = currentBook
+        val group = withContext(Dispatchers.IO) { runCatching { FirstOpenPlanner.openingGroup(snapshotBook) }.getOrNull() }
         if (group == null) {
+            if (snapshotBook.indexState != "READY" || snapshotBook.hasPendingOcr) {
+                waitingBookReady = true
+                return@LaunchedEffect
+            }
             step = TasteStep.Hold(FirstOpenBlock.OTHER, FirstOpenCopy.NO_QUESTION)
             return@LaunchedEffect
         }
-        val wire = ChapterCompanionGrouping.buildWireRequest(book, group)
+        waitingBookReady = false
+        if (!explainer.loaded) {
+            explainer.load()
+        }
+        val wire = ChapterCompanionGrouping.buildWireRequest(snapshotBook, group)
         val blocks = ChapterCompanionGrouping.wireBlocks(group)
         when (val result = explainer.fetchChapterCompanion(wire, blocks)) {
             is ChapterCompanionFetchResult.Ready -> {

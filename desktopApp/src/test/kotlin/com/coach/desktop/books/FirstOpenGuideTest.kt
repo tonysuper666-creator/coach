@@ -47,6 +47,35 @@ class FirstOpenGuideTest {
         }
     }
 
+    @Test fun tier0BookWithEmptyChapterOpenerPicksExtractedSectionInsteadOfReturningNull() {
+        val bookId = "a".repeat(64)
+        val bodyText = "Health care markets exhibit uncertainty and asymmetric information."
+        val pages = (1..30).map { p -> BookPage(p, if (p == 19) bodyText else "") }
+        val outline = listOf(
+            BookOutlineItem("Chapter 1 Introduction", level = 0, page = 17, source = HeadingSource.PDF_OUTLINE),
+            BookOutlineItem("1.1 Why Health Economics?", level = 1, page = 19, source = HeadingSource.PDF_OUTLINE),
+            BookOutlineItem("1.2 Demand for Health", level = 1, page = 25, source = HeadingSource.PDF_OUTLINE),
+        )
+        val structure = BookTocWaterfall.buildTier0Structure(bookId, "Health Economics", 30, outline)
+            .copy(nativeBodyStart = BookPageAnchor(19)).also {
+                it.deferResolvedLessons { it.toLessons(bookId, pages) }
+            }
+        val tier0Book = Textbook(
+            id = bookId,
+            title = "Health Economics",
+            format = "pdf",
+            pages = pages,
+            readingPage = 19,
+            structure = structure,
+            indexState = "TIER0",
+        )
+        val group = checkNotNull(FirstOpenPlanner.openingGroup(tier0Book)) {
+            "Tier 0 book with an empty chapter opener before extracted 1.1 must still resolve openingGroup"
+        }
+        assertEquals(1, group.sections.size)
+        assertTrue(group.sections.single().blocks.any { bodyText in it.text })
+    }
+
     @Test fun troubleCopyStaysHuman() {
         assertEquals(FirstOpenBlock.OFFLINE, FirstOpenPlanner.blockFor(ExplainTrouble.Unreachable, CoachConnectivityStatus.ONLINE))
         assertEquals(FirstOpenBlock.BUSY, FirstOpenPlanner.blockFor(ExplainTrouble.Busy, CoachConnectivityStatus.ONLINE))

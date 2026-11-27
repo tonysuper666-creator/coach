@@ -45,17 +45,44 @@ public class WD {
     IntPtr h, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(
     IntPtr h, uint message, IntPtr wParam, StringBuilder lParam, uint flags, uint timeoutMs, out IntPtr result);
-  // 跨进程读控件正文。GetWindowText 对别的进程的窗口只回缓存标题（编辑框恒为空串），
-  // 驱动和 Coach 不是一个进程，所以读「文件名」框永远是空的；WM_GETTEXT 是系统会替
-  // 标准控件编组缓冲区的消息，跨进程才拿得到框里的真实内容。别换成 GetWindowText。
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(
+    IntPtr h, uint message, IntPtr wParam, string lParam, uint flags, uint timeoutMs, out IntPtr result);
+  // 跨进程读控件正文。GetWindowText 对别的进程的窗口只回缓存标题：编辑框里敲进去的字不在缓存里，
+  // 缓存只记最后一次 WM_SETTEXT。选书框打开时自己往「文件名」框写过文件夹名（11-27 730498c2 那轮
+  // 是「friend-path-books」），之后敲的路径 GetWindowText 永远读不到，只会回那个旧名字。
+  // 所以先问 WM_GETTEXT（系统替标准控件编组缓冲区，跨进程拿得到框里的真实内容），问不到再看缓存。
   public static string ReadControlText(IntPtr h) {
     StringBuilder sb = new StringBuilder(1024);
-    GetWindowText(h, sb, 1024);
-    if (sb.Length > 0) return sb.ToString();
-    sb = new StringBuilder(1024);
     IntPtr r;
-    if (SendMessageTimeout(h, 0x000D, (IntPtr)1024, sb, 0x0003, 400, out r) == IntPtr.Zero) return "";
+    if (SendMessageTimeout(h, 0x000D, (IntPtr)1024, sb, 0x0003, 400, out r) != IntPtr.Zero && sb.Length > 0) return sb.ToString();
+    sb = new StringBuilder(1024);
+    GetWindowText(h, sb, 1024);
     return sb.ToString();
+  }
+  // 只认 WM_GETTEXT 的答案：核对「文件名」框时不能拿缓存标题冒充框里的字。
+  public static string ReadEditText(IntPtr h) {
+    StringBuilder sb = new StringBuilder(1024);
+    IntPtr r;
+    if (SendMessageTimeout(h, 0x000D, (IntPtr)1024, sb, 0x0003, 400, out r) == IntPtr.Zero) return null;
+    return sb.ToString();
+  }
+  // WM_SETTEXT 直接写进指定控件，不经键盘，不会落到别的框或文件列表里。
+  public static bool WriteControlText(IntPtr h, string text) {
+    IntPtr r;
+    return SendMessageTimeout(h, 0x000C, IntPtr.Zero, text, 0x0003, 1000, out r) != IntPtr.Zero && r != IntPtr.Zero;
+  }
+  [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
+    public int cbSize; public int flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+    public int caretL, caretT, caretR, caretB;
+  }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO gi);
+  // 窗口所在线程此刻键盘焦点落在哪个子控件上（跨进程可读）。
+  public static IntPtr FocusedControl(IntPtr top) {
+    uint pid; uint tid = GetWindowThreadProcessId(top, out pid);
+    GUITHREADINFO gi = new GUITHREADINFO(); gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    return GetGUIThreadInfo(tid, ref gi) ? gi.hwndFocus : IntPtr.Zero;
   }
   public static string LastActivationFailure { get; private set; }
   public static bool LastActivationAccepted { get; private set; }
@@ -1246,7 +1273,7 @@ function Find-AppWindowByTitle([string]$prefix) {
 # 文件选择框里「文件名」是个真 Edit（有时套在 ComboBox 里）。只有把它的文字读回来，
 # 才知道路径真的落进去了；读不到就按回车，是 11-21 02:17 L4 那种「按了三次回车框还没关」。
 # 读要用 [WD]::ReadControlText（跨进程 WM_GETTEXT）：对话框在 Coach 进程里，驱动在
-# powershell 进程里，GetWindowText 跨进程只会回空串，那样四路都会被误判成「没拿到文件名」。
+# powershell 进程里，GetWindowText 跨进程只回缓存标题（空串或对话框自己写进去的旧文件夹名），看不到敲进去的字。
 function Get-DialogEditTexts([IntPtr]$h) {
     $script:DialogEdits = New-Object Collections.Generic.List[string]
     [WD]::EnumChildWindows($h, { param($c, $l)
@@ -1256,6 +1283,28 @@ function Get-DialogEditTexts([IntPtr]$h) {
             $script:DialogEdits.Add([WD]::ReadControlText($c)) }
         return $true }, [IntPtr]::Zero) | Out-Null
     return ,$script:DialogEdits
+}
+
+# 选书框的「文件名」框：对话框给它的控件号固定是 1148（cmb13），编辑框本身或它外面套的
+# ComboBox / ComboBoxEx32 带这个号。找不到时返回 0，调用方退回按键加读全部框的旧做法。
+function Find-FileNameEdit([IntPtr]$h) {
+    $script:FileNameEdit = [IntPtr]::Zero
+    [WD]::EnumChildWindows($h, { param($c, $l)
+        $cb = New-Object Text.StringBuilder 64; [WD]::GetClassName($c, $cb, 64) | Out-Null
+        if ($cb.ToString() -eq 'Edit' -and [WD]::IsWindowVisible($c)) {
+            $x = $c
+            for ($up = 0; $up -lt 3 -and $x -ne [IntPtr]::Zero -and $x -ne $h; $up++) {
+                if ([WD]::GetDlgCtrlID($x) -eq 1148) { $script:FileNameEdit = $c; return $false }
+                $x = [WD]::GetParent($x)
+            }
+        }
+        return $true }, [IntPtr]::Zero) | Out-Null
+    return $script:FileNameEdit
+}
+function Get-ControlLabel([IntPtr]$c) {
+    if ($c -eq [IntPtr]::Zero) { return '无' }
+    $cb = New-Object Text.StringBuilder 64; [WD]::GetClassName($c, $cb, 64) | Out-Null
+    "$($cb.ToString())#$([WD]::GetDlgCtrlID($c))"
 }
 
 # Dialog discovery and waiting do not hold the mutex. Filename filling is
@@ -1273,11 +1322,35 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
     $deadline = (Get-Date).AddSeconds($timeoutSec); $h = [IntPtr]::Zero
     while ($h -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $h = Find-AppWindowByTitle $dialogTitlePrefix }
     if ($h -eq [IntPtr]::Zero) { $script:ChooseFileWhy = '没有弹出选书对话框'; return $false }
-    # 四路并行时四个进程同时弹这个框，谁抢到前台就把键送给谁。所以敲完必须读回「文件名」框，
+    # 四路并行时四个进程同时弹这个框，谁抢到前台就把键送给谁。所以填完必须读回「文件名」框，
     # 拿到这本书的路径才按回车；框读得到、内容却不对就不回车，把框关掉，免得它扣着前台卡死其余三路。
-    # 一个框都读不出字（布局里没有 Edit/ComboBox）时退回修复前的做法：直接按回车，不能因此判失败。
+    # 11-27 730498c2：三次都读回「friend-path-books」。框刚打开时自己往「文件名」框写过文件夹名，
+    # 旧的读法先看缓存标题，敲进去的路径读不到。现在先认准「文件名」框（控件号 1148），用 WM_SETTEXT
+    # 把路径直接写进这个框，再只用 WM_GETTEXT 从同一个框读回；回车前再确认键盘焦点就在这个框上。
+    $box = [IntPtr]::Zero
+    $boxDeadline = (Get-Date).AddSeconds(5)
+    while ($box -eq [IntPtr]::Zero -and (Get-Date) -lt $boxDeadline) {
+        $box = Find-FileNameEdit $h
+        if ($box -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 300 }
+    }
     $filled = $false; $readable = $false; $seen = ''
     for ($try = 0; $try -lt 3 -and -not $filled; $try++) {
+        if ($box -ne [IntPtr]::Zero) {
+            $script:ChooseFileWrote = $false
+            Invoke-ForegroundStep -Window $h -InjectsInput -Action {
+                [System.Windows.Forms.SendKeys]::SendWait('%n')
+                Assert-OurForeground
+                $script:ChooseFileWrote = [WD]::WriteControlText($box, $path)
+            }
+            Start-Sleep -Milliseconds 300
+            $t = [WD]::ReadEditText($box)
+            if ($null -ne $t -and $t -ne '') {
+                $readable = $true
+                if ($t -match $leafRx) { $filled = $true } elseif (-not $seen) { $seen = $t }
+            }
+            if (-not $filled -and -not $script:ChooseFileWrote -and -not $seen) { $seen = '写入被拒' }
+            continue
+        }
         Invoke-ForegroundStep -Window $h -InjectsInput -Action {
             [System.Windows.Forms.SendKeys]::SendWait('%n')
             Assert-OurForeground
@@ -1294,7 +1367,9 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
             if (-not $seen) { $seen = $t }
         }
     }
-    if ($readable -and -not $filled) {
+    # 认准了「文件名」框却读不回这本书：不回车。没找到这个框、一个框都读不出字（布局里没有 Edit/ComboBox）
+    # 时退回修复前的做法：直接按回车，不能因此判失败。
+    if (($box -ne [IntPtr]::Zero -or $readable) -and -not $filled) {
         if ($seen.Length -gt 60) { $seen = $seen.Substring(0, 60) + '…' }
         $script:ChooseFileWhy = "选书对话框的「文件名」框没拿到 $leaf（框里读到「$seen」），没有按回车"
         try { Invoke-ForegroundStep -Window $h -InjectsInput -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
@@ -1313,8 +1388,31 @@ function Choose-File([string]$dialogTitlePrefix, [string]$path, [int]$timeoutSec
             }
             return $false
         }
-        Invoke-ForegroundStep -Window $all[0] -InjectsInput -Action {
-            Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        if ($box -ne [IntPtr]::Zero) {
+            # 回车只交给装着这本书的「文件名」框：再读一次框里的字，焦点不在这个框上就不按。
+            $script:ChooseFileEnterWhy = $null
+            Invoke-ForegroundStep -Window $all[0] -InjectsInput -Action {
+                [System.Windows.Forms.SendKeys]::SendWait('%n')
+                Assert-OurForeground
+                $now = [WD]::ReadEditText($box)
+                $focus = [WD]::FocusedControl($all[0])
+                if ($null -eq $now -or $now -notmatch $leafRx) {
+                    $script:ChooseFileEnterWhy = "回车前「文件名」框里已不是 $leaf"
+                } elseif ($focus -ne $box) {
+                    $script:ChooseFileEnterWhy = "回车前焦点在 $(Get-ControlLabel $focus)，不在「文件名」框"
+                } else {
+                    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                }
+            }
+            if ($script:ChooseFileEnterWhy) {
+                $script:ChooseFileWhy = "$($script:ChooseFileEnterWhy)，没有按回车"
+                try { Invoke-ForegroundStep -Window $all[0] -InjectsInput -Action { [System.Windows.Forms.SendKeys]::SendWait('{ESC}') } } catch { }
+                return $false
+            }
+        } else {
+            Invoke-ForegroundStep -Window $all[0] -InjectsInput -Action {
+                Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            }
         }
         Start-Sleep -Seconds 2
     }

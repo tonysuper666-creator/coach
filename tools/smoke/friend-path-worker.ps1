@@ -1115,8 +1115,20 @@ function Find-Step6PretestState($lines, [int]$winW, [int]$winH, $fallbackStrip =
     $opt = if ($above.Count -gt 0) { $above[-1] } else { $null }
     [pscustomobject]@{ Submit = $sb; Strip = $curStrip; Option = $opt }
 }
-# 跳页框里的数字紧挨在「前往」左边。认不出返回 $null（调用方仍可提交，交给页码断言）。
-# 读到截断数字时调用方不得按回车。
+# 读前自测题卡出来了没有：先认题号行「第 i / N 题」（OCR 偶把「题」认成繁写「題」）。
+# 题号字小，11-27 07:51 那帧整卡都在、题号却一行没认出来：这时同一帧有「这题是猜的」，
+# 且按 Find-Step6PretestState 认得出模块条、提交和它上面的选项，也算题卡就绪。返回认到的那一行，没就绪返回 $null。
+function Find-Step6QuestionCard($lines, [int]$winW, [int]$winH, $fallbackStrip = $null) {
+    $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
+    if ($q) { return $q }
+    $guess = $lines | Where-Object { ($_.Text -replace '\s', '') -match '这题是猜的' } | Select-Object -First 1
+    if (-not $guess) { return $null }
+    $st = Find-Step6PretestState $lines $winW $winH $fallbackStrip
+    if ($st.Submit -and $st.Strip -and $st.Option) { return $st.Option }
+    return $null
+}
+# 跳页框里的数字紧挨在「前往」左边。认不出返回 $null，调用方再用 Read-JumpFieldCrop 截框放大重认。
+# 没读到目标页（认不出、截断、别的数）调用方都不得按回车。
 function Get-JumpFieldText($lines) {
     $go = Find-Text $lines '前往'
     if (-not $go) { return $null }
@@ -1138,6 +1150,66 @@ function Get-JumpFieldText($lines) {
     if ($best) { return $best.Text }
     return $null
 }
+# 放大截图里认出的行换回整帧坐标：只要整行都是数字的那串，取最右边的（框紧挨着「前往」）。
+# 光标那一竖常被认成「|」「l」「I」粘在数字后面，Alt 是去掉这一截的读法；真页码以 Text 为准。
+function Select-JumpFieldDigits($lines, [int]$offX, [int]$offY, [double]$scale) {
+    $best = $null
+    foreach ($l in @($lines)) {
+        $raw = $l.Text -replace '\s', ''
+        $text = Convert-OcrDigits $raw
+        if ($text -notmatch '^\d{1,5}$') { continue }
+        $alt = Convert-OcrDigits ($raw -replace '[|lI丨]+$', '')
+        $b = Get-LineBox $l
+        $right = $offX + [int]($b.X2 / $scale)
+        if (-not $best -or $right -gt $best.Right) {
+            $best = [pscustomobject]@{
+                Text = $text; Alt = $alt; Right = $right
+                X = $offX + [int](($b.X1 + $b.X2) / 2 / $scale); Y = $offY + [int]($b.Y / $scale)
+            }
+        }
+    }
+    return $best
+}
+# 整屏 OCR 常认不出跳页框里那颗小字：TON-1861 11-27 09:32 那轮三帧框里都是 33，整屏一个框内数字都没读到。
+# 只截「前往」左边那一小块，放大再认，返回 Select-JumpFieldDigits 的结果（含整帧里的中心点），认不出返回 $null。
+function Read-JumpFieldCrop([string]$png, $go) {
+    if (-not $png -or -not $go -or -not (Test-Path -LiteralPath $png)) { return $null }
+    $src = [Drawing.Bitmap]::new($png)
+    $file = Join-Path (Split-Path -Parent $png) ('jump-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.png')
+    try {
+        $gh = [Math]::Max(12, $go.Y2 - $go.Y1); $gw = [Math]::Max(12, $go.X2 - $go.X1)
+        $x1 = [int][Math]::Max(0, $go.X1 - [int](4.5 * $gw)); $x2 = [int][Math]::Min($src.Width, $go.X1 - 2)
+        $y1 = [int][Math]::Max(0, $go.Y1 - 2 * $gh); $y2 = [int][Math]::Min($src.Height, $go.Y2 + 2 * $gh)
+        if (($x2 - $x1) -lt 8 -or ($y2 - $y1) -lt 8) { return $null }
+        $rect = [Drawing.Rectangle]::new($x1, $y1, $x2 - $x1, $y2 - $y1)
+        foreach ($scale in @(4, 6, 3)) {
+            $zoom = [Drawing.Bitmap]::new($rect.Width * $scale, $rect.Height * $scale)
+            try {
+                $g = [Drawing.Graphics]::FromImage($zoom)
+                try {
+                    $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.DrawImage($src, [Drawing.Rectangle]::new(0, 0, $zoom.Width, $zoom.Height), $rect, [Drawing.GraphicsUnit]::Pixel)
+                } finally { $g.Dispose() }
+                $zoom.Save($file, [Drawing.Imaging.ImageFormat]::Png)
+            } finally { $zoom.Dispose() }
+            $hit = Select-JumpFieldDigits @(Read-Screen $file) $x1 $y1 $scale
+            if ($hit) { return $hit }
+        }
+        return $null
+    } finally {
+        $src.Dispose()
+        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    }
+}
+# 点回跳页框的落点。框 64dp 宽，右边隔 10dp 间距和「前往」按钮的内边距：框中心约在「前往」字左边 56dp
+# （11-27 那帧 1.5 倍缩放下实测 89px，56dp 落在框里偏右）。放大重认拿到框里数字的位置时用它，但只认「前往」同一行、左边百来 dp 内的。
+function Get-JumpFieldPoint($go, $field, [double]$scale) {
+    $s = [Math]::Max(1.0, $scale)
+    if ($field -and $field.X -lt $go.X1 -and ($go.X1 - $field.X) -le [int](110 * $s) -and [Math]::Abs($field.Y - $go.Y) -le [int](20 * $s)) {
+        return [pscustomobject]@{ X = [int]$field.X; Y = [int]$go.Y }
+    }
+    return [pscustomobject]@{ X = [int]($go.X1 - [Math]::Round(56 * $s)); Y = [int]$go.Y }
+}
 # 跳页框逐位送数字。先把页码收成字符串再拆开：直接在整数上调 ToCharArray 会在第一位发出去之前就失败。
 function Send-PageDigits([int]$page) {
     foreach ($ch in ([string]$page).ToCharArray()) {
@@ -1152,10 +1224,27 @@ function Jump-VerifiedReaderPage([int]$step, [int]$physPage, [int]$midX, [int]$h
     $opened = [bool](Await-Text $step "$tag-goto" @('前往') 10)
     if (-not $opened) { Fail $step "Ctrl+G 没展开跳页框（读不到「前往」，见 $step-$tag-goto.png）" }
     # 一次把「154」送进父状态会丢位（框里只剩 15，回车就跳到目录页）。逐位敲，敲完先认框里的数字。
-    # 认成别的数就整段重敲，最多 3 次；三次都是错的数就不按回车。这一帧没认出数字才提交，交给下面的页码断言。
+    # 第一遍照 Ctrl+G 给的焦点直接敲；没读到目标页（框里还是原页、截断、认不出）就在最新一帧重新找「前往」，
+    # 点进框里再整段重敲（TON-1861 11-27 09:32：三帧框里都是 33，数字和回车都没进框）。框收起来了先重按 Ctrl+G。
+    # 一共 4 遍，没确认是目标页就不按回车，带着截图失败。
+    $scale = 1.0
+    try { $dpi = [WD]::GetDpiForWindow($script:Win); if ($dpi -gt 0) { $scale = [Math]::Max(1.0, $dpi / 96.0) } } catch { }
     $typedSeen = $null
     $typedOk = $false
-    foreach ($attempt in 1..3) {
+    $field = $null
+    foreach ($attempt in 1..4) {
+        if ($attempt -gt 1) {
+            $go = Find-Text $script:Last '前往'
+            if (-not $go) {
+                Send-Keys '^g'; Start-Sleep -Milliseconds 900
+                $null = Await-Text $step "$tag-goto$attempt" @('前往') 6
+                $go = Find-Text $script:Last '前往'
+                if (-not $go) { Note "跳页框收起来了，重按 Ctrl+G 也没展开（第 $attempt 遍）"; continue }
+            }
+            $pt = Get-JumpFieldPoint $go $field $scale
+            $null = Click-At $pt.X $pt.Y
+            Start-Sleep -Milliseconds 300
+        }
         Send-Keys '^a'
         Start-Sleep -Milliseconds 150
         Send-Keys '{BACKSPACE}'
@@ -1164,11 +1253,22 @@ function Jump-VerifiedReaderPage([int]$step, [int]$physPage, [int]$midX, [int]$h
         Start-Sleep -Milliseconds 300
         $typedLines = Shot $step $(if ($attempt -eq 1) { "$tag-goto-typed" } else { "$tag-goto-typed$attempt" })
         $typedSeen = Get-JumpFieldText $typedLines
+        if ($typedSeen -ne "$physPage") {
+            $goNow = Find-Text $typedLines '前往'
+            $crop = if ($goNow) { Read-JumpFieldCrop $script:LastPng $goNow } else { $null }
+            if ($crop) {
+                $field = $crop
+                $typedSeen = if ($crop.Alt -eq "$physPage") { $crop.Alt } else { $crop.Text }
+            }
+        }
         if ($typedSeen -eq "$physPage") { $typedOk = $true; break }
-        if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，整段重敲" }
-        else { Note "跳页框里的数字这一帧没认出来（第 $attempt 次），提交后交给页码断言"; break }
+        if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，点回框里整段重敲（第 $attempt 遍）" }
+        else { Note "跳页框里的数字这一帧没认出来（第 $attempt 遍），不提交，点回框里重敲" }
     }
-    if ($typedSeen -and -not $typedOk) { Fail $step "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 $step-$tag-goto-typed*.png）" }
+    if (-not $typedOk) {
+        $lastSeen = if ($typedSeen) { "最后读到 $typedSeen" } else { '框里的数字一直没认出来' }
+        Fail $step "跳页框敲了 4 遍都没确认是 $physPage（$lastSeen），没按回车（见 $step-$tag-goto-typed*.png）"
+    }
     Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
     $pageNow = $null
     foreach ($try in 1..6) {
@@ -2269,12 +2369,12 @@ try {
             $lines = Shot 6 $(if ($stTry -eq 1) { 'pretest' } else { "pretest-click$stTry" })
             if (($lines | Where-Object { ($_.Text -replace '\s', '') -match '读前自测|^第\d+[/／]\d+[题題]|本章暂无读前自测' } | Select-Object -First 1)) { break }
         }
-        # 等题目卡：题号行「第 i / N 题」（Windows OCR 偶把简写「题」认成繁写「題」）；空卡直接写「本章暂无读前自测题。」。
+        # 等题目卡：题号行，或题号没认出来但答题控件齐全（见 Find-Step6QuestionCard）；空卡直接写「本章暂无读前自测题。」。
         $deadline = (Get-Date).AddSeconds(60); $q = $null
         while ((Get-Date) -lt $deadline -and -not $q) {
             $lines = $script:Last
-            $q = $lines | Where-Object { ($_.Text -replace '\s', '') -match '^第\d+[/／]\d+[题題]' } | Select-Object -First 1
-            if ($q) { break }
+            $q = Find-Step6QuestionCard $lines $winW $winH $strip
+            if ($q) { Note "步骤6 题卡就绪：$($q.Text)"; break }
             # 伴读包没拿到时同一句话顶在模块下面（和第 ⑤ 步同一个 ExplainTrouble.UNREACHABLE）：
             # 这不是「界面变了」，是客户端没收到 JSON（门没转发 companion/chapter 时回的是 nginx 404 页）。
             $why6 = $lines | Where-Object { ($_.Text -replace '\s', '') -match '连不上' } | Select-Object -First 1

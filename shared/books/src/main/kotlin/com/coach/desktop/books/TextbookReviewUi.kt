@@ -40,8 +40,14 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
 @Composable
-internal fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {
+internal fun LocalBookReviews(
+    ui: LibraryUi,
+    onBack: () -> Unit,
+    onOpen: (LocalBookReview) -> Unit,
+    onOpenMemory: (MemoryReviewItem) -> Unit = {},
+) {
     val queue = ui.todayQueue
+    val memoryItems = queue.memory
     Desk(crumb = "今日复习", onBack = onBack, backLabel = "返回首页", showNavigation = false, hasMargin = false, showFocusToggle = false) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             Column(
@@ -50,12 +56,20 @@ internal fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalB
             ) {
                 Text("今日复习", style = MaterialTheme.typography.headlineMedium)
                 Text("答错、猜的和到期题都在这里；原答和每次复习都保留。", color = CoachTheme.colors.fgSecondary)
-                if (ui.reviews.isEmpty()) {
+                if (ui.reviews.isEmpty() && memoryItems.isEmpty()) {
                     CoachCardMeta("今日复习已完成。", Modifier.testTag("local-review-done"))
-                } else if (queue.cards.isNotEmpty()) {
+                } else if (queue.lineup.isNotEmpty()) {
                     CoachCardMeta(queue.summary, Modifier.testTag("local-review-summary"))
+                    if (memoryItems.isNotEmpty()) {
+                        Text("概念和自己的批注跟题目共用今天的名额。", color = CoachTheme.colors.fgSecondary)
+                    }
                     PrimaryButton(
-                        onClick = { onOpen(queue.cards.first()) },
+                        onClick = {
+                            when (val first = queue.lineup.first()) {
+                                is ReviewLine.Question -> onOpen(first.review)
+                                is ReviewLine.Memory -> onOpenMemory(first.item)
+                            }
+                        },
                         enabled = !ui.busy,
                         modifier = Modifier.testTag("local-review-start"),
                     ) { Text("开始今日复习") }
@@ -71,6 +85,14 @@ internal fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalB
                         }
                         CoachCardMeta("${review.lessonTitle} · ${review.mode.label} · 上次作答：${review.originalAnswer}")
                         Text(review.practice.prompt, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                memoryItems.forEachIndexed { index, item ->
+                    PaperTile(!ui.busy, Modifier.fillMaxWidth().testTag("memory-review-item-$index"), { onOpenMemory(item) },
+                        PaddingValues(20.dp), 8.dp) {
+                        Text(item.bookTitle, style = MaterialTheme.typography.titleMedium)
+                        CoachCardMeta(if (item.kind == MemoryReviewKind.CONCEPT) "概念 · ${item.title}" else "我的批注")
+                        Text(item.quote, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
@@ -442,6 +464,110 @@ internal fun LocalBookReviewQuestion(
                             modifier = Modifier.testTag("local-review-history-${attempt.number}"),
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MemoryReviewCard(
+    item: MemoryReviewItem,
+    enabled: Boolean,
+    position: Pair<Int, Int>?,
+    onBack: () -> Unit,
+    onSource: () -> Unit,
+    onRate: (remembered: Boolean, editedNote: String?) -> Unit,
+) {
+    val colors = CoachTheme.colors
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
+    var noteDraft by remember(item.bookId, item.objectId, item.body) { mutableStateOf(item.body) }
+    val prompt = item.prompt
+    Desk(
+        crumb = item.bookTitle,
+        onBack = onBack,
+        backLabel = "暂停退出",
+        showNavigation = false,
+        hasMargin = false,
+        showFocusToggle = false,
+        status = position?.let { "${it.first} / ${it.second}" } ?: "",
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            Column(
+                Modifier.widthIn(max = 720.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("memory-review-card"),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (position != null) {
+                    CoachCardMeta("${position.first} / ${position.second}", Modifier.testTag("local-review-position"))
+                }
+                Text(
+                    if (item.kind == MemoryReviewKind.CONCEPT) "概念 · ${item.title}" else "我的批注",
+                    style = MaterialTheme.typography.headlineMedium,
+                )
+                Text(item.quote, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.testTag("memory-review-quote"))
+                when (prompt) {
+                    is MemoryPrompt.Cloze -> {
+                        Text(prompt.stem, style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("memory-review-prompt"))
+                        prompt.options.forEachIndexed { index, option ->
+                            PaperButton(
+                                onClick = { onRate(option == prompt.answer, null) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("memory-review-option-$index"),
+                            ) { Text(option) }
+                        }
+                    }
+                    MemoryPrompt.Retell -> {
+                        Text("用自己的话说说", style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("memory-review-prompt"))
+                        if (item.body.isNotBlank()) {
+                            Text(item.body, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("memory-review-body"))
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PaperButton(
+                                onClick = { onRate(false, null) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("memory-review-again"),
+                            ) { Text("还没说出来") }
+                            PrimaryButton(
+                                onClick = { onRate(true, null) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("memory-review-good"),
+                            ) { Text("说得出来") }
+                        }
+                    }
+                    MemoryPrompt.StillTrue -> {
+                        Text("现在还这么看吗", style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("memory-review-prompt"))
+                        val shape = RoundedCornerShape(CoachV7.Radius.btn)
+                        BasicTextField(
+                            value = noteDraft,
+                            onValueChange = { noteDraft = it },
+                            minLines = 2,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fgPrimary),
+                            cursorBrush = SolidColor(colors.fgPrimary),
+                            modifier = Modifier.fillMaxWidth()
+                                .semantics { contentDescription = "批注" }
+                                .v7FocusRing(shape).clip(shape).background(colors.surface2)
+                                .border(1.dp, colors.borderSubtle, shape).padding(horizontal = 12.dp, vertical = 10.dp)
+                                .testTag("memory-review-note"),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PaperButton(
+                                onClick = { onRate(false, noteDraft) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("memory-review-again"),
+                            ) { Text("想不起来了") }
+                            PrimaryButton(
+                                onClick = { onRate(true, noteDraft) },
+                                enabled = enabled,
+                                modifier = Modifier.testTag("memory-review-good"),
+                            ) { Text("还是这么看") }
+                        }
+                    }
+                }
+                V7TextButton(onSource, enabled = enabled, modifier = Modifier.testTag("memory-review-source")) {
+                    Text("回到原句")
+                }
+                if (offline) {
+                    Text("断网也能复习。改动会在联网后同步。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 }
             }
         }

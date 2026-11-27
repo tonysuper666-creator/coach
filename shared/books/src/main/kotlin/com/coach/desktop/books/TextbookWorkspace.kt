@@ -562,7 +562,22 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         }
                         ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                             onBack = { run { controller.back() } },
-                            onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
+                            onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } },
+                            onOpenMemory = { item -> run { if (drafts.flush()) controller.openMemoryReview(item) } })
+                        ui.screen == BookScreen.REVIEWING && ui.memoryReview != null -> {
+                            val item = checkNotNull(ui.memoryReview)
+                            val at = ui.todayQueue.lineup.indexOfFirst {
+                                it is ReviewLine.Memory && it.item.kind == item.kind && it.item.objectId == item.objectId && it.item.bookId == item.bookId
+                            }
+                            MemoryReviewCard(
+                                item = item,
+                                enabled = !ui.busy,
+                                position = at.takeIf { it >= 0 }?.let { it + 1 to ui.todayQueue.lineup.size },
+                                onBack = { run { controller.back() } },
+                                onSource = { run { controller.showMemorySentence() } },
+                                onRate = { remembered, note -> run { controller.rateMemoryReview(remembered, note) } },
+                            )
+                        }
                         ui.screen == BookScreen.REVIEWING && ui.review != null -> {
                             val storedReview = checkNotNull(ui.review)
                             val review = storedReview.copy(answer = drafts.currentReview(storedReview))
@@ -575,9 +590,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 onBack = { run { controller.back() } },
                                 onSource = { openPracticeSource(review.practice) },
                                 onAnswer = { drafts.saveReview(review, it) },
-                                position = ui.todayQueue.cards.indexOfFirst {
-                                    it.book == review.book && it.lesson == review.lesson && it.mode == review.mode
-                                }.takeIf { it >= 0 }?.let { it + 1 to ui.todayQueue.cards.size },
+                                position = ui.todayQueue.lineup.indexOfFirst {
+                                    it is ReviewLine.Question && it.review.book == review.book && it.review.lesson == review.lesson && it.review.mode == review.mode
+                                }.takeIf { it >= 0 }?.let { it + 1 to ui.todayQueue.lineup.size },
                                 deferred = ui.todayQueue.deferred,
                                 onNext = { run { if (drafts.flush()) controller.nextReview() } },
                                 onRate = { rating, ans ->

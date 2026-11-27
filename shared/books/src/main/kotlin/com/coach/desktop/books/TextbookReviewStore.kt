@@ -3,7 +3,6 @@ package com.coach.desktop.books
 import com.coach.domain.fsrs.Fsrs5
 import com.coach.domain.fsrs.FsrsConfig
 import com.coach.domain.fsrs.FsrsDailyQueue
-import com.coach.domain.fsrs.FsrsQueueCard
 import com.coach.domain.fsrs.FsrsRating
 import com.coach.domain.fsrs.FsrsState
 import com.coach.domain.fsrs.LegacyAnswer
@@ -18,9 +17,23 @@ import java.sql.ResultSet
 import java.sql.Types
 import java.time.LocalDate
 
-/** Today's review in one order, capped like the product promises; deferred cards stay due for tomorrow. */
-internal data class LocalReviewQueue(val cards: List<LocalBookReview>, val deferred: Int) {
-    val summary: String get() = if (deferred == 0) "今日 ${cards.size} 题" else "今日优先 ${cards.size} 题 · 另有 $deferred 题顺延"
+/**
+ * Today's review in one order, capped like the product promises; deferred cards stay due for tomorrow.
+ * Concepts and notes share that cap. When [memory] is empty, [lineup] is the question list, so older
+ * call sites that only read [cards] keep the same order and the same summary.
+ */
+internal data class LocalReviewQueue(
+    val cards: List<LocalBookReview>,
+    val deferred: Int,
+    val memory: List<MemoryReviewItem> = emptyList(),
+    val lineup: List<ReviewLine> = cards.map { ReviewLine.Question(it) },
+) {
+    val summary: String get() = if (memory.isEmpty()) {
+        if (deferred == 0) "今日 ${cards.size} 题" else "今日优先 ${cards.size} 题 · 另有 $deferred 题顺延"
+    } else {
+        val shown = cards.size + memory.size
+        if (deferred == 0) "今日 $shown 条" else "今日优先 $shown 条 · 另有 $deferred 条顺延"
+    }
 }
 
 /** Local calendar-day FSRS-5 policy: an independent correct answer is GOOD, anything else AGAIN.
@@ -153,14 +166,20 @@ internal class TextbookReviewStore(
         return next
     }
 
+    /** Grades one concept or note on the same FSRS config questions use, and writes that card. */
+    fun rateMemory(db: Connection, item: MemoryReviewItem, remembered: Boolean, editedNote: String?) {
+        MemoryReview.rate(db, item, remembered, editedNote, today(), nowMs(), fsrsConfig)
+    }
+
     /** Today's due cards ranked by real `NeedScore` (with eligible 72h T2 cohorts silently mixed in). */
     fun queue(db: Connection): LocalReviewQueue {
         val day = today()
         val now = nowMs()
         MasteryStore.enqueueEligibleT2Reviews(db, day, now)
+        MemoryReview.enroll(db, day)
         val due = pending(db)
-        if (due.isEmpty()) return LocalReviewQueue(emptyList(), 0)
-        val byId = due.associateBy { "${it.book}/${it.lesson}/${it.mode}" }
+        val memoryDue = MemoryReview.due(db, day)
+        if (due.isEmpty() && memoryDue.isEmpty()) return LocalReviewQueue(emptyList(), 0)
         val scored = due.map { row ->
             val cardId = "${row.book}/${row.lesson}/${row.mode}"
             val state = fsrsState(db, row.book, row.lesson, row.mode) ?: Fsrs5.newCard(row.dueDay)
@@ -168,24 +187,36 @@ internal class TextbookReviewStore(
             val retrievability = Fsrs5.retrievability(effectiveState, day)
             val need = MasteryStore.needScoreForReviewCard(db, row.book, row.lesson, retrievability, now)
             val waitingDays = (day - row.dueDay).coerceAtLeast(0L)
-            Triple(
-                FsrsQueueCard(cardId, row.book, row.lesson, need.coerceAtLeast(0.01), effectiveState),
-                need,
-                waitingDays,
-            )
+            RankedReview(need, waitingDays, cardId, row, null)
         }
+        val mixed = scored + memoryDue.map { RankedReview(it.score, it.waitingDays, it.cardId, null, it.item) }
         val todayDate = LocalDate.ofEpochDay(day)
         val nearestExamDay = ExamCountdownPlanner.nearestUpcomingExamEpochDay(db, todayDate)
         val cap = dailyQueue.capFor(day, nearestExamDay)
-        val ordered = scored.sortedWith(
-            compareByDescending<Triple<FsrsQueueCard, Double, Long>> { it.second }
-                .thenByDescending { it.third }
-                .thenBy { it.first.cardId },
+        val ordered = mixed.sortedWith(
+            compareByDescending<RankedReview> { it.score }
+                .thenByDescending { it.waitingDays }
+                .thenBy { it.cardId },
         )
-        val priority = ordered.take(cap).mapNotNull { byId[it.first.cardId] }
-        val deferred = (ordered.size - priority.size).coerceAtLeast(0)
-        return LocalReviewQueue(priority, deferred)
+        val shown = ordered.take(cap)
+        val deferred = (ordered.size - shown.size).coerceAtLeast(0)
+        val questions = shown.mapNotNull { it.question }
+        val memory = shown.mapNotNull { it.memory }
+        if (memory.isEmpty()) return LocalReviewQueue(questions, deferred)
+        val lineup = shown.map { rank ->
+            val question = rank.question
+            if (question != null) ReviewLine.Question(question) else ReviewLine.Memory(checkNotNull(rank.memory))
+        }
+        return LocalReviewQueue(questions, deferred, memory, lineup)
     }
+
+    private data class RankedReview(
+        val score: Double,
+        val waitingDays: Long,
+        val cardId: String,
+        val question: LocalBookReview?,
+        val memory: MemoryReviewItem?,
+    )
 
     private fun sources(mode: QuestionMode, practice: Practice, answer: PracticeAnswer): Int {
         var bits = if (answer.guessed) LocalReviewSource.GUESSED.bit else 0

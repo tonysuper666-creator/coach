@@ -13,7 +13,7 @@
 | 书内问答 | `book_ask_turns` 自增键只在本库有效。按 thread、turn 恢复问题、回答、出处、选段定位和次序；`book_ask_drafts` 包含未发问题 | turns 116 |
 | 答题和错题 | `answers`、`book_reviews` 保存按书、课、模式分组的草稿和题目快照；`TextbookReviewStore` 单建 `book_review_history`，带走每次实际作答 | reviews 212，history 60 |
 | 掌握度 | `concept_mastery_ledger`、`learner_evidence_events`、`learning_gain_cohorts`；带走基线、证据和测评阶段。概念及出处来自 `concept_entities`、`concept_mentions`、`concept_links`，连同手写说明、隐藏标记和 `margin_whisper_audit` 中已持久化的提示状态恢复 | mastery_ledger 96 |
-| FSRS 复习 | `book_fsrs_cards` 的 due day、稳定度、难度、上次日期、次数等，以及对应题目、复习历史。旧历史可能连日期都没有 | fsrs_cards 84 |
+| FSRS 复习 | `book_fsrs_cards` 的 due day、稳定度、难度、上次日期、次数等，以及对应题目、复习历史。旧历史可能连日期都没有。概念和批注也在这张表里，kind 仍是 `card`：`mode` 为 `CONCEPT` 或 `NOTE`，`lesson` 为 `concept:<id>` 或 `note:<id>`。没有新的同步键。删掉批注或静音概念时删掉对应卡片，同步走原来的删除墓碑 | fsrs_cards 84 |
 | 课程、材料关联、考点 | `collections`、`collection_materials`、`course_topics`、`course_topic_sources`。携带排序、手动锁、考期、范围、练习草稿和已保存题包版本 | collections 64，topics 84 |
 | 本地模考 | `exams.sqlite` 的 `local_exam_papers`、`local_exam_attempts`。按卷版本恢复学习者的题、作答、时限、交卷状态及评分；运行代理的试卷作答不混入个人记录 | papers 112，attempts 136 |
 

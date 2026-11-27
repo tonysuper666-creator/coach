@@ -32,7 +32,7 @@ internal fun TodayCard(
     val exam by produceState<ExamDayBoard?>(null, library, budgetRevision) {
         value = withContext(Dispatchers.IO) { library?.let { ExamDailyHome.loadDay(it) } }
     }
-    val count = ui.todayQueue.cards.size
+    val count = ui.todayQueue.lineup.size
     val colors = CoachTheme.colors
     PaperCard(Modifier.testTag("home-focus-card"), color = colors.surface1) {
         Text("今天", modifier = Modifier.testTag("home-focus-title"), style = MaterialTheme.typography.titleLarge, fontFamily = LocalV7Fonts.current.display)

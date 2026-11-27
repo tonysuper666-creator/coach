@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import com.coach.desktop.incident.IncidentExitPrompt
 import com.coach.desktop.incident.IncidentLog
+import com.coach.desktop.incident.IncidentPromptState
 import com.coach.desktop.incident.IncidentWatchdog
 import com.coach.desktop.incident.runIncidentTestSwitch
 import kotlinx.coroutines.flow.first
@@ -132,6 +133,10 @@ internal fun WindowsTextbookGate(
     var hostManagesPrompt by remember { mutableStateOf(false) }
     val currentPaired by rememberUpdatedState(paired)
     val currentDarkTheme by rememberUpdatedState(darkTheme)
+    val promptState = remember { IncidentPromptState(scope) }
+    LaunchedEffect(paired) {
+        promptState.onIdentityChanged(paired)
+    }
     val promptHost = remember {
         IncidentPromptHost(
             onHostMounted = { hostManagesPrompt = it },
@@ -140,6 +145,7 @@ internal fun WindowsTextbookGate(
                     identity = currentPaired,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     darkTheme = currentDarkTheme,
+                    state = promptState,
                 )
             },
         )
@@ -161,6 +167,9 @@ internal fun WindowsTextbookGate(
             LocalIncidentPromptHost provides promptHost,
         ) {
             key(paired.credentials.deviceId, paired.credentials.token) {
+                DisposableEffect(paired.credentials.deviceId, paired.credentials.token) {
+                    onDispose { promptState.cancelSessionSend() }
+                }
                 RememberDesktopLedgerRecovery(settings, paired)
                 content(paired)
             }
@@ -202,8 +211,8 @@ internal fun WindowsTextbookGate(
             }
         }
     }
-    if (paired == null || !hostManagesPrompt) {
-        IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme)
+    if (initialized && (paired == null || !hostManagesPrompt)) {
+        IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme, state = promptState)
     }
     }
 }

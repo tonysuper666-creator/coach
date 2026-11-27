@@ -14,6 +14,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,22 +27,96 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.desktop.DesktopIdentity
 import com.coach.ui.theme.CoachTheme
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val NEED_LOGIN_NOTICE = "登录后才能发送。记录还在这台电脑上。"
+
+@Stable
+internal class IncidentPromptState(
+    private val sendScope: CoroutineScope,
+    initialOffer: PendingOffer? = IncidentLog.currentOffer(),
+) {
+    var pending by mutableStateOf(initialOffer)
+        private set
+    var preview by mutableStateOf(false)
+    var sending by mutableStateOf(false)
+        private set
+    var notice by mutableStateOf<String?>(null)
+        private set
+    private var activeJob: Job? = null
+
+    fun onIdentityChanged(identity: DesktopIdentity?) {
+        if (identity != null && notice == NEED_LOGIN_NOTICE) {
+            notice = null
+        }
+    }
+
+    fun cancelSessionSend() {
+        activeJob?.cancel()
+        activeJob = null
+        sending = false
+    }
+
+    fun send(identity: DesktopIdentity?) {
+        val offer = pending ?: return
+        if (sending) return
+        if (identity == null) {
+            notice = NEED_LOGIN_NOTICE
+            return
+        }
+        sending = true
+        notice = null
+        val job = sendScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    IncidentUpload.send(identity, offer.text)
+                }
+                when (result) {
+                    IncidentUploadResult.Sent -> {
+                        IncidentLog.markSent(offer)
+                        pending = null
+                    }
+                    IncidentUploadResult.NeedLogin -> notice = NEED_LOGIN_NOTICE
+                    IncidentUploadResult.TooBig -> notice = "记录太大，没有发出去。记录还在这台电脑上。"
+                    IncidentUploadResult.Limited -> notice = "发得太勤了，稍后再试。记录还在这台电脑上。"
+                    IncidentUploadResult.NotSent -> notice = "没发出去，记录还在这台电脑上。"
+                }
+            } finally {
+                sending = false
+                activeJob = null
+            }
+        }
+        activeJob = job
+    }
+
+    fun decline() {
+        val offer = pending ?: return
+        if (sending) return
+        IncidentLog.decline(offer)
+        pending = null
+    }
+}
 
 @Composable
 internal fun IncidentExitPrompt(
     identity: DesktopIdentity?,
     modifier: Modifier = Modifier,
     darkTheme: Boolean = isSystemInDarkTheme(),
+    state: IncidentPromptState = run {
+        val scope = rememberCoroutineScope()
+        remember { IncidentPromptState(scope) }
+    },
 ) {
-    var pending by remember { mutableStateOf(IncidentLog.currentOffer()) }
-    var preview by remember { mutableStateOf(false) }
-    var sending by remember { mutableStateOf(false) }
-    var notice by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    val offer = pending ?: return
+    DisposableEffect(state) {
+        onDispose { state.preview = false }
+    }
+    val offer = state.pending ?: return
+    val sending = state.sending
+    val notice = state.notice
     CoachTheme(darkTheme) {
     val colors = CoachTheme.colors
     Surface(modifier.testTag("incident-exit-prompt"), color = colors.surface1, shadowElevation = 2.dp) {
@@ -51,38 +127,14 @@ internal fun IncidentExitPrompt(
                     color = colors.fgPrimary,
                     modifier = Modifier.weight(1f, fill = false),
                 )
-                TextButton({ preview = true }, Modifier.testTag("incident-view")) { Text("查看", maxLines = 1, softWrap = false) }
+                TextButton({ state.preview = true }, Modifier.testTag("incident-view")) { Text("查看", maxLines = 1, softWrap = false) }
                 TextButton(
-                    {
-                        if (sending) return@TextButton
-                        sending = true
-                        notice = null
-                        scope.launch {
-                            val result = withContext(Dispatchers.IO) {
-                                if (identity == null) IncidentUploadResult.NeedLogin
-                                else IncidentUpload.send(identity, offer.text)
-                            }
-                            when (result) {
-                                IncidentUploadResult.Sent -> {
-                                    IncidentLog.markSent(offer)
-                                    pending = null
-                                }
-                                IncidentUploadResult.NeedLogin -> notice = "登录后才能发送。记录还在这台电脑上。"
-                                IncidentUploadResult.TooBig -> notice = "记录太大，没有发出去。记录还在这台电脑上。"
-                                IncidentUploadResult.Limited -> notice = "发得太勤了，稍后再试。记录还在这台电脑上。"
-                                IncidentUploadResult.NotSent -> notice = "没发出去，记录还在这台电脑上。"
-                            }
-                            sending = false
-                        }
-                    },
+                    { state.send(identity) },
                     Modifier.testTag("incident-send"),
                     enabled = !sending,
                 ) { Text(if (sending) "正在发送" else "发送", maxLines = 1, softWrap = false) }
                 TextButton(
-                    {
-                        IncidentLog.decline(offer)
-                        pending = null
-                    },
+                    { state.decline() },
                     Modifier.testTag("incident-decline"),
                     enabled = !sending,
                 ) { Text("不发", maxLines = 1, softWrap = false) }
@@ -90,9 +142,9 @@ internal fun IncidentExitPrompt(
             notice?.let { Text(it, color = colors.fgSecondary, modifier = Modifier.testTag("incident-notice")) }
         }
     }
-    if (preview) {
+    if (state.preview) {
         AlertDialog(
-            onDismissRequest = { preview = false },
+            onDismissRequest = { state.preview = false },
             title = { Text("要发送的记录") },
             text = {
                 SelectionContainer {
@@ -102,7 +154,7 @@ internal fun IncidentExitPrompt(
                     )
                 }
             },
-            confirmButton = { TextButton({ preview = false }, Modifier.testTag("incident-preview-close")) { Text("关闭") } },
+            confirmButton = { TextButton({ state.preview = false }, Modifier.testTag("incident-preview-close")) { Text("关闭") } },
         )
     }
     }

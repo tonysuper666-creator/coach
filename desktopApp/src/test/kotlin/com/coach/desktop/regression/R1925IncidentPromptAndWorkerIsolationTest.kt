@@ -39,6 +39,9 @@ import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -253,7 +256,7 @@ class R1925IncidentPromptAndWorkerIsolationTest {
     fun homeIncidentPromptSendsOfferToServerWhenClicked() {
         CoachConnectivityRegistry.resetForTests()
         val root = Files.createTempDirectory("coach-r1925-send-").toRealPath()
-        val uploaded = mutableListOf<String>()
+        val uploaded = CopyOnWriteArrayList<String>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { ex ->
                 val path = ex.requestURI.path.orEmpty()
@@ -306,7 +309,8 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                     }
                 }
                 waitUntil(timeoutMillis = 15_000) {
-                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
+                    onAllNodesWithTag("windows-host").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("incident-send").performClick()
                 waitUntil(timeoutMillis = 10_000) {
@@ -317,6 +321,119 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                 assertNull(IncidentLog.currentOffer())
             }
         } finally {
+            server.stop(0)
+            CoachConnectivityRegistry.resetForTests()
+            IncidentLog.resetForTest()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sentReportSurvivesImmediateNavigationToReaderAndStaysResolvedOnReturn() {
+        CoachConnectivityRegistry.resetForTests()
+        val root = Files.createTempDirectory("coach-r1925-nav-").toRealPath()
+        val requestSeen = CountDownLatch(1)
+        val releaseResponse = CountDownLatch(1)
+        val responseSent = CountDownLatch(1)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/") { ex ->
+                val path = ex.requestURI.path.orEmpty()
+                val (code, body) = when (path) {
+                    "/v1/public/status" -> 200 to "{}"
+                    "/v1/incidents" -> {
+                        ex.requestBody.use { it.readBytes() }
+                        requestSeen.countDown()
+                        check(releaseResponse.await(10, TimeUnit.SECONDS))
+                        204 to ""
+                    }
+                    else -> 404 to "{}"
+                }
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                ex.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+                ex.sendResponseHeaders(code, if (code == 204) -1L else bytes.size.toLong())
+                if (code != 204) ex.responseBody.use { it.write(bytes) } else ex.close()
+                if (path == "/v1/incidents") responseSent.countDown()
+            }
+            start()
+        }
+        try {
+            val home = Files.createDirectories(root.resolve("home"))
+            val incidentDir = Files.createDirectories(root.resolve("incidents"))
+            val prior = IncidentStore(incidentDir, pid = { 777_777L })
+            assertNull(prior.beginSession())
+            prior.recordImportFailure("synthetic in-flight failure")
+
+            IncidentLog.startSession(home) { key ->
+                if (key == "COACH_INCIDENT_DIR") incidentDir.toString() else null
+            }
+            assertNotNull(IncidentLog.currentOffer())
+
+            val serverUrl = "http://127.0.0.1:${server.address.port}"
+            val settings = DesktopConnectionSettings(
+                home = home,
+                environment = { null },
+                mac = false,
+                property = { if (it == "jpackage.app-path") home.resolve("LearningCoach.exe").toString() else null },
+            )
+            val creds = DesktopCredentials(settings.clientDirectory)
+            creds.saveAddress(serverUrl)
+            creds.save(serverUrl, PairedCredentials("r1925-nav-pc", "t".repeat(43), "friend"))
+
+            val library = TextbookLibrary(home.resolve("books"), todayCardEnabled = false)
+            val bookFile = root.resolve("sample.md")
+            Files.writeString(bookFile, "# Chapter 1\n\nSynthetic text for navigation test.")
+            library.importBook(bookFile)
+
+            val explainer = StubSelectionExplainer(home, library, serverUrl)
+            val controller = TextbookController(library)
+
+            runSkikoComposeUiTest(size = Size(800f, 600f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookGate(settings, darkTheme = false) {
+                        WindowsTextbookHost(controller, bookExplainer = explainer) { null }
+                    }
+                }
+                waitUntil(timeoutMillis = 15_000) {
+                    !controller.state.value.busy &&
+                        controller.state.value.screen == BookScreen.HOME &&
+                        onAllNodesWithTag("home-read").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("incident-send").performClick()
+                waitUntil(timeoutMillis = 6_000) { requestSeen.count == 0L }
+
+                // Navigate immediately to Reader while the upload is still in flight.
+                onNodeWithTag("home-read").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.screen == BookScreen.READER &&
+                        onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertTrue(onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isEmpty())
+
+                releaseResponse.countDown()
+                waitUntil(timeoutMillis = 6_000) { responseSent.count == 0L }
+                waitUntil(timeoutMillis = 6_000) { IncidentLog.currentOffer() == null }
+
+                // Return to Home: the already-sent prompt must stay resolved.
+                onNodeWithTag("textbook-reader").performMouseInput {
+                    moveTo(Offset(320f, 10f))
+                }
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("immersive-back").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("immersive-back").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    controller.state.value.screen == BookScreen.HOME &&
+                        onAllNodesWithTag("home-read").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                assertTrue(
+                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isEmpty(),
+                    "Completed send must stay resolved after returning to Home",
+                )
+            }
+        } finally {
+            releaseResponse.countDown()
             server.stop(0)
             CoachConnectivityRegistry.resetForTests()
             IncidentLog.resetForTest()

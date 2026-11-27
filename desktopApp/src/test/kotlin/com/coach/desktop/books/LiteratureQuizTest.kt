@@ -103,7 +103,8 @@ class LiteratureQuizTest {
             val book = Textbook("bib", "Bib", "pdf", listOf(BookPage(1, bibliography)))
             val excerpt = GuideExcerpt(book, BookCompanionAnchor(1, "bib", 0, bibliography.length, bibliography), GuideRegion(bibliography))
             val cited = LiteratureQuiz.verify(listOf(excerpt), oneItem(0, "关于这条脚注，哪一项更贴近正文记录？"), ocr)
-            assertEquals("not_body_sentence", cited.failures.single().rule)
+            assertEquals("footer_note", cited.failures.single().rule)
+            assertTrue("页脚" in cited.failures.single().detail, cited.failures.single().detail)
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -256,6 +257,8 @@ class LiteratureQuizTest {
         val seeLead = "See Hunter for the earlier list of the same beds."
         val seeDiscussion = "See the discussion in the earlier estate papers."
         val bibliographyFragment = "Hunter discusses those plants in the earlier catalogue."
+        val pageCite = "The implication is that the keeper moved the cabinets into one smaller room (Hunter, 1989), p. 21."
+        val seeVolume = "For the importance of the early lists of the same plants see V."
         val body = "Plot one contained flowering plants during the survey."
         val books = listOf(
             regionBook("paper-a", listOf(
@@ -269,24 +272,37 @@ class LiteratureQuizTest {
             )),
             regionBook("paper-b", listOf(seeAlso, seeLead, seeDiscussion, bibliographyFragment)),
             regionBook("paper-c", listOf("Plot three recorded flowering stems across the open field.")),
+            regionBook("paper-d", listOf(
+                "Plot four recorded flowering stems across the shaded beds.",
+                pageCite,
+                seeVolume,
+            )),
         )
         val extracted = books.flatMap { LiteraturePassages.extractCandidates(it) }.map { it.anchor.quoteAnchor }
-        assertTrue(extracted.any { "(Hunter, 1989, p. 21)" in it }, extracted.joinToString("\n"))
-        assertTrue(extracted.any { "第 21 页" in it }, extracted.joinToString("\n"))
-        assertTrue(extracted.any { "on whom see" in it }, extracted.joinToString("\n"))
-        assertTrue(extracted.any { "See also" in it }, extracted.joinToString("\n"))
-        assertTrue(extracted.any { "earlier catalogue" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it || "on whom see" in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.none { "See also" in it || "earlier catalogue" in it || "see V." in it }, extracted.joinToString("\n"))
+        assertTrue(extracted.any { "flowering plants" in it }, extracted.joinToString("\n"))
         val input = LiteratureInput(books, questions)
         val pool = LiteratureQuiz.request(input).pool.map { it.anchor.quoteAnchor }
-        assertTrue(pool.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it || "on whom see" in it || "See also" in it || "earlier catalogue" in it }, pool.joinToString("\n"))
+        assertTrue(pool.none { "(Hunter, 1989, p. 21)" in it || "第 21 页" in it || "on whom see" in it || "See also" in it || "earlier catalogue" in it || "see V." in it }, pool.joinToString("\n"))
         assertTrue(pool.any { "flowering plants" in it }, pool.joinToString("\n"))
         val ocr = pageTextOcr()
         val cited = LiteratureQuiz.verify(listOf(excerpt(englishNote)), choice(), ocr)
         assertEquals("footer_note", cited.failures.single().rule)
+        assertTrue("页脚" in cited.failures.single().detail, cited.failures.single().detail)
         val citedChinese = LiteratureQuiz.verify(listOf(excerpt(chineseNote)), choice(), ocr)
         assertEquals("footer_note", citedChinese.failures.single().rule)
         val citedSee = LiteratureQuiz.verify(listOf(excerpt(onWhomSee)), choice(), ocr)
         assertEquals("footer_note", citedSee.failures.single().rule)
+        val citedVolume = LiteratureQuiz.verify(listOf(excerpt(seeVolume)), choice(), ocr)
+        assertEquals("footer_note", citedVolume.failures.single().rule)
+        assertTrue("页脚" in citedVolume.failures.single().detail, citedVolume.failures.single().detail)
+        val repair = assertNotNull(LiteratureQuiz.repairRequest(handInput(), citedVolume))
+        val because = repair.json.getValue("repair").jsonObject.getValue("slots").jsonArray
+            .map { it.jsonObject }
+            .first { it.getValue("questionIndex").jsonPrimitive.int == 0 }
+            .getValue("because").jsonPrimitive.content
+        assertTrue("页脚" in because && "footer_note：footer_note" !in because, because)
     }
 
     private fun handInput(): LiteratureInput = LiteratureInput(

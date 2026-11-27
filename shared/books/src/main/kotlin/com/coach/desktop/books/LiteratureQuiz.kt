@@ -64,12 +64,6 @@ internal object LiteratureQuiz {
     private val comparisonSource = Regex("""(?i)同样|相比|而非|whereas|unlike|rather than|equally|more important|in contrast|compared with|compared to""")
     private val denial = Regex("""原文(?:并)?没有|并未(?:提及|讨论|论述|说明|记载)|没有这类|没提到|未提及|不存在这类|并无此类|does not (?:mention|discuss)|no such""")
     private val leadingDenial = Regex("""^(?:原文(?:并)?没有|并未|没有这类|并没有|未提及|没提到|不存在这类|并无此类|does not\b|no such)""")
-    private val authorYearPage = Regex("""\([A-Z][\p{L}'\-]+(?:\s+et\s+al\.?)?,\s*(?:1[5-9]\d{2}|20\d{2})\s*[,:;]\s*(?:pp?\.\s*)?\d+""")
-    private val cjkYearPage = Regex("""（[^）]{0,40}(?:1[5-9]\d{2}|20\d{2})[^）]{0,20}第\s*\d+\s*页""")
-    private val noteCue = Regex(
-        """(?i)\bon whom see\b|\bsee also\b|\b(?:ibid|op\.?\s*cit|loc\.?\s*cit)\b|^\s*see\s+|\(\s*(?:cf\.?|see)\s+(?-i:[A-Z])|^\s*(?-i:[A-Z])[\p{L}'\-]{2,},\s+(?-i:[A-Z])[^.]{0,80}\b(?:1[5-9]\d{2}|20\d{2})\b""",
-    )
-
     private val metadataStem = Regex(
         """(?i)页眉|页脚|书目|参考文献|版权|jstor|下载于|作者是谁|哪一年|发表于哪|标题是什么|running\s*head|bibliography|page\s*header""",
     )
@@ -365,7 +359,11 @@ internal object LiteratureQuiz {
             val sources = mutableListOf<GuideExcerpt>()
             for (ref in refs.filterNotNull().distinct()) {
                 val (excerpt, rule) = checkRef(ref, pool, ocr, refOutcomes, ocrChecks, rejected)
-                if (excerpt == null) return fail(rule.substringBefore(':'), rule)
+                if (excerpt == null) {
+                    val name = rule.substringBefore(':')
+                    val detail = rule.substringAfter(':', "").ifBlank { name }
+                    return fail(name, detail)
+                }
                 if (copiesQuote(stem, excerpt.anchor.quoteAnchor) || copiesQuote(text, excerpt.anchor.quoteAnchor) ||
                     copiesQuote(why, excerpt.anchor.quoteAnchor)
                 ) {
@@ -404,11 +402,11 @@ internal object LiteratureQuiz {
         ) {
             return (null to "offset_mismatch:page=${anchor.pdfPage}").also { refOutcomes[ref] = it }
         }
-        if (!LiteraturePassages.bodySentence(anchor.quoteAnchor) || LiteraturePassages.isBibliographicFootnote(anchor.quoteAnchor)) {
-            return (null to "not_body_sentence").also { refOutcomes[ref] = it }
+        if (LiteraturePassages.isFootnoteSentence(anchor.quoteAnchor)) {
+            return (null to LiteraturePassages.FOOTNOTE_REJECTION).also { refOutcomes[ref] = it }
         }
-        if (isFooterCitation(anchor.quoteAnchor)) {
-            return (null to "footer_note").also { refOutcomes[ref] = it }
+        if (!LiteraturePassages.bodySentence(anchor.quoteAnchor)) {
+            return (null to "not_body_sentence:这不是完整的正文句子").also { refOutcomes[ref] = it }
         }
         val ocrText = try {
             ocr.ocrPageText(excerpt.book, anchor.pdfPage)
@@ -457,8 +455,7 @@ internal object LiteratureQuiz {
         }
     }
 
-    private fun isFooterCitation(quote: String): Boolean =
-        authorYearPage.containsMatchIn(quote) || cjkYearPage.containsMatchIn(quote) || noteCue.containsMatchIn(quote)
+    private fun isFooterCitation(quote: String): Boolean = LiteraturePassages.isFootnoteSentence(quote)
 
     private fun firstClause(why: String) =
         why.trim().split(Regex("[。！？；.!?]")).firstOrNull { it.isNotBlank() }?.trim().orEmpty()

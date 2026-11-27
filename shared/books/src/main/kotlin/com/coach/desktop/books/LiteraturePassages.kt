@@ -1,8 +1,5 @@
 package com.coach.desktop.books
 
-import java.text.BreakIterator
-import java.util.Locale
-
 /** Candidate sentence filtering and per-paper / cross-paper ranking for the one-page literature guide. */
 internal object LiteraturePassages {
     private val publisher = Regex(
@@ -42,6 +39,27 @@ internal object LiteraturePassages {
     private val ibidLine = Regex("""(?i)^(?:see\s+(?:also\s+)?)?(?:ibid|op\.?\s*cit|loc\.?\s*cit)\.?(?:,|\s|$)""")
     private val authorInitialPrefix = Regex("""^(?:(?:see\s+(?:also\s+)?)?(?:[A-Z]\.\s*){1,3}[A-Z][\p{L}'\-]+|[\p{Lu}][\p{Ll}'\-]+,\s+[A-Z]\.)""")
     private val trailingPageRef = Regex("""(?i)\bpp?\.\s*\d+(?:\s*[-–—]\s*\d+)?\s*[.;]?$""")
+    private val authorYearPage = Regex(
+        """\([A-Z][\p{L}'\-]+(?:\s+et\s+al\.?)?,\s*(?:1[5-9]\d{2}|20\d{2})\s*[,:;]\s*(?:pp?\.\s*)?\d+""",
+    )
+    private val cjkYearPage = Regex("""（[^）]{0,40}(?:1[5-9]\d{2}|20\d{2})[^）]{0,20}第\s*\d+\s*页""")
+    private val noteCue = Regex(
+        """(?i)\bon whom see\b|\bsee also\b|\b(?:ibid|op\.?\s*cit|loc\.?\s*cit)\b|^\s*see\s+|\(\s*(?:cf\.?|see)\s+(?-i:[A-Z])|^\s*(?-i:[A-Z])[\p{L}'\-]{2,},\s+(?-i:[A-Z])[^.]{0,80}\b(?:1[5-9]\d{2}|20\d{2})\b""",
+    )
+    private val seeShortEnd = Regex("""(?i)\bsee\s+(?:also\s+)?(?:[A-Z]\.|vol\.|ch\.|pp?\.)\s*\d*\s*$""")
+    private val bibliographyPageEnd = Regex(
+        """(?i)(?:\bpp?\.\s*\d+(?:\s*[-–—]\s*\d+)?|(?:1[5-9]\d{2}|20\d{2})\)?,?\s+(?:pp?\.\s*)?\d{1,4})\s*[.。]?\s*$""",
+    )
+    private val abbreviations = setOf(
+        "ph", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
+        "no", "nos", "pp", "p", "cf", "ed", "eds", "fig", "figs", "al", "etc", "eg", "ie",
+        "ibid", "op", "cit", "loc", "vs", "ca", "ch", "esp", "viz", "rev", "trans",
+        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt",
+    )
+    private val compactSpace = Regex("""\s+""")
+
+    /** Quiz and guide repair text. The part before the colon is the rule name. */
+    const val FOOTNOTE_REJECTION = "footer_note:这是页脚注释或尾注，不能当作正文出处"
 
     // Rhetorical signals still match the question when the prompt and paper use different languages.
     private val intentCues = listOf(
@@ -71,6 +89,21 @@ internal object LiteraturePassages {
         return false
     }
 
+    /**
+     * Footer, endnote, or bibliographic citation. Shared by the one-pager, quiz, comparison, and follow-along.
+     * A prose sentence that merely mentions a year is not a footnote.
+     */
+    fun isFootnoteSentence(s: String): Boolean {
+        val t = s.trim()
+        if (t.isEmpty()) return false
+        return isBibliographicFootnote(t) ||
+            authorYearPage.containsMatchIn(t) ||
+            cjkYearPage.containsMatchIn(t) ||
+            noteCue.containsMatchIn(t) ||
+            seeShortEnd.containsMatchIn(t) ||
+            bibliographyPageEnd.containsMatchIn(t)
+    }
+
     /** Notes heading. Sectioning should call this instead of keeping its own copy. */
     fun isNotesHeading(line: String): Boolean = notesBoundary.matches(line.trim())
 
@@ -80,8 +113,51 @@ internal object LiteraturePassages {
     fun isDownloadBanner(line: String): Boolean = publisher.containsMatchIn(line)
 
     fun endsSentence(text: String): Boolean {
-        val trimmed = text.trim()
-        return trimmed.isNotEmpty() && end.containsMatchIn(trimmed)
+        val trimmed = text.trim().dropLastWhile { it in "”’\"')]" }
+        if (trimmed.isEmpty()) return false
+        val last = trimmed.last()
+        if (last == '!' || last == '?' || last == '。' || last == '！' || last == '？') return true
+        if (last != '.') return false
+        return !isAbbreviationPeriod(trimmed, trimmed.length - 1)
+    }
+
+    /** Periods inside Ph.Tr., p. 21, and initials are not sentence boundaries. */
+    private fun isAbbreviationPeriod(text: String, period: Int): Boolean {
+        if (period <= 0 || period >= text.length || text[period] != '.') return false
+        var i = period - 1
+        while (i >= 0 && text[i].isLetter()) i--
+        val word = text.substring(i + 1, period)
+        if (word.isEmpty()) return false
+        if (word.length == 1 && word[0].isUpperCase()) return true
+        return word.lowercase() in abbreviations
+    }
+
+    private fun sentenceBounds(text: String): List<Pair<Int, Int>> {
+        val bounds = ArrayList<Pair<Int, Int>>()
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            val hard = ch == '!' || ch == '?' || ch == '。' || ch == '！' || ch == '？'
+            val closes = ch == '.' && !isAbbreviationPeriod(text, i) && closerFollows(text, i)
+            if (hard || closes) {
+                var bound = i + 1
+                while (bound < text.length && text[bound] in "”’\"')]") bound++
+                if (text.substring(start, bound).isNotBlank()) bounds += start to bound
+                start = bound
+                i = bound
+            } else {
+                i++
+            }
+        }
+        if (start < text.length && text.substring(start).isNotBlank()) bounds += start to text.length
+        return bounds
+    }
+
+    private fun closerFollows(text: String, period: Int): Boolean {
+        var j = period + 1
+        while (j < text.length && text[j] in "”’\"')]") j++
+        return j >= text.length || text[j].isWhitespace()
     }
 
     fun isBareNoteNumber(line: String): Boolean = bareNoteNumber.matches(line.trim())
@@ -143,30 +219,27 @@ internal object LiteraturePassages {
             .map(String::trim)
             .lastOrNull { line ->
                 line.isNotEmpty() && !folio.matches(line) && !isDownloadBanner(line) &&
-                    !isBackMatterHeading(line) && !isBibliographicFootnote(line)
+                    !isBackMatterHeading(line) && !isFootnoteSentence(line)
             }
 
-    fun bodySentence(s: String): Boolean = s.length in 6..650 &&
-        !LiteratureScaffoldNoise.rejectsSentence(s) &&
-        !hasControlOrBrokenChar(s) &&
-        end.containsMatchIn(s) &&
-        !publisher.containsMatchIn(s) &&
-        !note.containsMatchIn(s) &&
-        !isBibliographicFootnote(s) &&
-        s.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
-        (s.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(s).take(4).count() >= 4)
+    fun bodySentence(s: String): Boolean {
+        val compact = compactSpace.replace(s, " ").trim()
+        return compact.length in 6..650 &&
+            !LiteratureScaffoldNoise.rejectsSentence(compact) &&
+            !hasControlOrBrokenChar(s) &&
+            end.containsMatchIn(compact) &&
+            !publisher.containsMatchIn(s) &&
+            !note.containsMatchIn(s) &&
+            !isFootnoteSentence(s) &&
+            compact.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
+            (compact.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(compact).take(4).count() >= 4)
+    }
 
     fun countBodySentences(text: String): Int {
         if (text.isBlank()) return 0
-        val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(text) }
         var count = 0
-        var a = iterator.first()
-        var b = iterator.next()
-        while (b != BreakIterator.DONE) {
-            val quote = text.substring(a, b).trim()
-            if (bodySentence(quote)) count++
-            a = b
-            b = iterator.next()
+        for ((a, b) in sentenceBounds(text)) {
+            if (bodySentence(text.substring(a, b).trim())) count++
         }
         return count
     }
@@ -209,6 +282,8 @@ internal object LiteraturePassages {
                 continue
             }
             val pageCandidates = mutableListOf<Candidate>()
+            var footnoteLines = 0
+            var proseLines = 0
             var base = 0
             var dropPageTop = continuesPreviousPage(book, page.number, 0)
             var skipSection = false
@@ -233,10 +308,7 @@ internal object LiteraturePassages {
                     val paragraph = region.text.substring(start, finish)
                     val dropLead = skipFirst
                     var lead = dropLead
-                    val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(paragraph) }
-                    var a = iterator.first()
-                    var b = iterator.next()
-                    while (b != BreakIterator.DONE) {
+                    for ((a, b) in sentenceBounds(paragraph)) {
                         val raw = paragraph.substring(a, b)
                         val quote = raw.trim()
                         if (quote.isNotEmpty()) {
@@ -255,8 +327,6 @@ internal object LiteraturePassages {
                                 pageCandidates += Candidate(page, region, at, quote)
                             }
                         }
-                        a = b
-                        b = iterator.next()
                     }
                     start = -1
                     skipFirst = !endsSentence(paragraph)
@@ -301,6 +371,9 @@ internal object LiteraturePassages {
                         LiteratureScaffoldNoise.isSubfigureCaptionLine(regionLines, index)
                     val undelimitedCap = !delimitedCap && LiteratureScaffoldNoise.isUndelimitedCaptionStart(line)
                     val abstractMatch = if (page.number == 1) inlineAbstractLead.find(raw) else null
+                    val marker = isBareNoteNumber(line) || note.containsMatchIn(line) ||
+                        (bottom && bottomBareNote.containsMatchIn(line))
+                    val footnoteLine = line.isNotEmpty() && (isFootnoteSentence(line) || marker)
                     when {
                         backMatter -> break
                         isBackMatter -> {
@@ -326,17 +399,19 @@ internal object LiteraturePassages {
                             prevCaptionEnded = endsSentence(line)
                         }
                         LiteratureScaffoldNoise.isKeywordsOrMetaLine(line) -> finishParagraph()
-                        isBareNoteNumber(line) && bottom -> {
+                        footnoteLine -> {
                             finishParagraph()
-                            footnotes = true
+                            footnoteLines++
+                            if (bottom && marker) footnotes = true
                         }
-                        line.isBlank() || folio.matches(line) || isDownloadBanner(line) ||
-                            isBibliographicFootnote(line) ||
+                        line.isBlank() -> {
+                            if (start >= 0) {
+                                val open = region.text.substring(start, finish)
+                                if (open.isBlank() || endsSentence(open)) finishParagraph()
+                            }
+                        }
+                        folio.matches(line) || isDownloadBanner(line) ||
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
-                        note.containsMatchIn(line) || (bottom && bottomBareNote.containsMatchIn(line)) -> {
-                            finishParagraph()
-                            if (bottom) footnotes = true
-                        }
                         abstractMatch != null && !footnotes -> {
                             finishParagraph()
                             val bodyStart = offset + abstractMatch.range.last + 1
@@ -348,6 +423,7 @@ internal object LiteraturePassages {
                         !footnotes -> {
                             if (start < 0) start = offset
                             finish = offset + raw.length
+                            proseLines++
                         }
                     }
                     offset += raw.length + 1
@@ -355,6 +431,7 @@ internal object LiteraturePassages {
                 finishParagraph()
                 base += region.text.length + 2
             }
+            if (footnoteLines >= 3 && footnoteLines * 2 >= footnoteLines + proseLines) continue
             // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences
             // (or heavy copyright notice cover on page 1 with >= 4 copyright hits and <= 6 sentences).
             // Never drop the final body sentences on a page that transitions into back-matter References (ISBN citations).

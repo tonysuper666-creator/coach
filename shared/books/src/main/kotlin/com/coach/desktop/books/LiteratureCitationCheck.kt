@@ -23,6 +23,7 @@ internal object LiteratureCitationCheck {
         ) {
             return null to "offset_mismatch"
         }
+        if (LiteraturePassages.isFootnoteSentence(anchor.quoteAnchor)) return null to LiteraturePassages.FOOTNOTE_REJECTION
         if (!LiteraturePassages.bodySentence(anchor.quoteAnchor)) return null to "not_body_sentence"
         val ocrText = try {
             ocr.ocrPageText(excerpt.book, anchor.pdfPage)

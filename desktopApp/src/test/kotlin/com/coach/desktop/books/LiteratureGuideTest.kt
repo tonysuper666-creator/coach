@@ -173,22 +173,27 @@ class LiteratureGuideTest {
 
             Ada Quentin to the recorded century as a whole. Shade reduced evaporation in this sample because the keepers closed the south windows.
         """.trimIndent()
-        val odnbQuotes = LiteraturePassages.extractCandidates(
-            Textbook(
-                "odnb-halves",
-                "Half Shape",
-                "pdf",
-                listOf(
-                    BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
-                    BookPage(2, page2, guideRegions = listOf(GuideRegion(page2))),
-                ),
+        val odnbBook = Textbook(
+            "odnb-halves",
+            "Half Shape",
+            "pdf",
+            listOf(
+                BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                BookPage(2, page2, guideRegions = listOf(GuideRegion(page2))),
             ),
-        ).map { it.anchor.quoteAnchor }
-        assertEquals(3, odnbQuotes.size)
-        assertTrue(odnbQuotes.none { "as a whole" in it || "Downloaded from" in it })
+        )
+        val odnbExcerpts = LiteraturePassages.extractCandidates(odnbBook)
+        val odnbQuotes = odnbExcerpts.map { it.anchor.quoteAnchor }
+        assertTrue(odnbQuotes.none { "Downloaded from" in it }, odnbQuotes.joinToString("\n"))
+        assertTrue(odnbQuotes.none { it.trim().startsWith("Niles Carter") }, odnbQuotes.joinToString("\n"))
         assertTrue(odnbQuotes.any { "visiting scholars" in it })
         assertTrue(odnbQuotes.any { "written down in the register" in it })
         assertTrue(odnbQuotes.any { "south windows" in it })
+        assertTrue(odnbQuotes.any { "catalog and then" in it && "as a whole" in it }, odnbQuotes.joinToString("\n"))
+        val joined = odnbExcerpts.first { "catalog and then" in it.anchor.quoteAnchor }
+        val joinedPage = odnbBook.page(joined.anchor.pdfPage)!!.text
+        assertEquals(joined.anchor.quoteAnchor, joinedPage.substring(joined.anchor.startUtf16, joined.anchor.endUtf16))
+        assertTrue("\n\n" in joined.anchor.quoteAnchor)
 
         val halvesOnly = """
             Downloaded from the public archive on 3 June 2006.
@@ -199,19 +204,69 @@ class LiteratureGuideTest {
 
             Ada Quentin to the recorded century as a whole.
         """.trimIndent()
-        assertTrue(
-            LiteraturePassages.extractCandidates(
-                Textbook(
-                    "halves-only",
-                    "Halves Only",
-                    "pdf",
-                    listOf(
-                        BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
-                        BookPage(2, halvesOnly, guideRegions = listOf(GuideRegion(halvesOnly))),
-                    ),
+        val halfQuotes = LiteraturePassages.extractCandidates(
+            Textbook(
+                "halves-only",
+                "Halves Only",
+                "pdf",
+                listOf(
+                    BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                    BookPage(2, halvesOnly, guideRegions = listOf(GuideRegion(halvesOnly))),
                 ),
-            ).isEmpty(),
-        )
+            ),
+        ).map { it.anchor.quoteAnchor }
+        assertTrue(halfQuotes.any { "catalog and then" in it && "as a whole" in it }, halfQuotes.joinToString("\n"))
+        assertTrue(halfQuotes.none { "Downloaded from" in it || it.trim().startsWith("Niles Carter") }, halfQuotes.joinToString("\n"))
+    }
+
+    @Test fun joinsDoubleSpacedLinesKeepsAbbreviationsAndDropsFooterShapes() {
+        fun quotesOf(text: String) = LiteraturePassages.extractCandidates(
+            Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(GuideRegion(text))))),
+        ).map { it.anchor.quoteAnchor }
+
+        val spaced = """
+            The society kept a public
+
+            repository for visiting scholars
+
+            during that decade. The keepers
+
+            closed the south windows.
+        """.trimIndent()
+        val spacedQuotes = quotesOf(spaced)
+        assertTrue(spacedQuotes.any { "public" in it && "repository" in it && "visiting scholars" in it && "during that decade." in it }, spacedQuotes.joinToString("\n"))
+        assertTrue(spacedQuotes.any { "keepers" in it && "south windows" in it }, spacedQuotes.joinToString("\n"))
+        assertTrue(spacedQuotes.any { "\n\n" in it })
+
+        val abbrev = "The society printed the list in Ph.Tr. and the keepers compared those notes with the field book."
+        val abbrevQuotes = quotesOf(abbrev)
+        assertEquals(1, abbrevQuotes.size, abbrevQuotes.joinToString("\n"))
+        assertTrue("Ph.Tr." in abbrevQuotes.single() && "field book" in abbrevQuotes.single())
+
+        val abbrevBlank = "The society printed the list in Ph.Tr.\n\nand the keepers compared those notes with the field book."
+        val blankQuotes = quotesOf(abbrevBlank)
+        assertEquals(1, blankQuotes.size, blankQuotes.joinToString("\n"))
+        assertTrue("Ph.Tr." in blankQuotes.single() && "field book" in blankQuotes.single())
+
+        val ratio = "The measured ratio was 3.14 and the keepers recorded it in the field book."
+        assertEquals(1, quotesOf(ratio).size)
+
+        val body = "The repository kept a public record and later writers returned to that record."
+        val pageCite = "The implication is that the keeper moved the cabinets into one smaller room (Hunter, 1989), p. 21."
+        val seeVolume = "For the importance of the early lists of the same plants see V."
+        val onWhom = "Several apprentices learned the same beds (on whom see Hunter, The Gardeners, 1989)."
+        val mixed = listOf(
+            body,
+            "Visitors described the cabinets in enough detail to reconstruct the early arrangement.",
+            "Minutes from the weekly meeting still name the keeper who opened the doors.",
+            "Shade reduced evaporation in this sample because the keepers closed the south windows.",
+            pageCite,
+            seeVolume,
+            onWhom,
+        ).joinToString("\n\n")
+        val mixedQuotes = quotesOf(mixed)
+        assertTrue(mixedQuotes.any { "public record" in it }, mixedQuotes.joinToString("\n"))
+        assertTrue(mixedQuotes.none { "p. 21" in it || "see V." in it || "on whom see" in it }, mixedQuotes.joinToString("\n"))
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

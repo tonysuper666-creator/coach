@@ -319,6 +319,13 @@ class BookMapWhatAboutTest {
         try {
             val library = TextbookLibrary(root)
             val book = makeMultiChapterBook("ui-book", "Health Economics Demo", chapterCount = 2, includeFrontMatterPages = 1)
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+                db.prepareStatement("INSERT INTO books(id,title,format,touched) VALUES(?,?,'pdf',1)").use { sql ->
+                    sql.setString(1, book.id)
+                    sql.setString(2, book.title)
+                    sql.executeUpdate()
+                }
+            }
             val batchCalls = AtomicInteger(0)
 
             // Mark Chapter 1 page 2 as dwelled (partial read) in book_chapter_progress.

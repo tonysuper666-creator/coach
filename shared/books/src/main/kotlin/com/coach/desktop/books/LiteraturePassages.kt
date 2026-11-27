@@ -58,6 +58,10 @@ internal object LiteraturePassages {
         "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig",
     )
     private val compactSpace = Regex("""\s+""")
+    private const val BODY_SENTENCE_MAX = 650
+    /** A real sentence that keeps an abbreviation such as Sig. or Ph.Tr. can run past the ordinary cap. */
+    private const val ABBREVIATED_SENTENCE_MAX = 1300
+    private val closingQuotes = "”’\"')]"
 
     /** Quiz and guide repair text. The part before the colon is the rule name. */
     const val FOOTNOTE_REJECTION = "footer_note:这是页脚注释或尾注，不能当作正文出处"
@@ -175,15 +179,38 @@ internal object LiteraturePassages {
     fun isDownloadBanner(line: String): Boolean = publisher.containsMatchIn(line)
 
     fun endsSentence(text: String): Boolean {
-        val trimmed = text.trim().dropLastWhile { it in "”’\"')]" }
-        if (trimmed.isEmpty()) return false
-        val last = trimmed.last()
+        val core = withoutTrailingNoteMark(text.trimEnd()).trimEnd().dropLastWhile { it in closingQuotes }
+        if (core.isEmpty()) return false
+        val last = core.last()
         if (last == '!' || last == '?' || last == '。' || last == '！' || last == '？') return true
         if (last != '.') return false
-        return !isAbbreviationPeriod(trimmed, trimmed.length - 1)
+        return !isAbbreviationPeriod(core, core.length - 1)
+    }
+
+    /** "meeting.12" and "society'.12" end at the period. A decimal such as "3.14" does not. */
+    private fun withoutTrailingNoteMark(text: String): String {
+        var i = text.length
+        var digits = 0
+        while (i > 0 && text[i - 1].isDigit() && digits < 3) {
+            digits++
+            i--
+        }
+        if (digits == 0 || i == 0) return text
+        var quote = i
+        while (quote > 0 && text[quote - 1] in closingQuotes) quote--
+        if (quote == 0 || text[quote - 1] != '.') return text
+        if (quote >= 2 && text[quote - 2].isDigit()) return text
+        return text.substring(0, quote)
     }
 
     /** Periods inside Ph.Tr., Phil., Sig., p. 21, and initials are not sentence boundaries. */
+    private fun containsAbbreviationPeriod(text: String): Boolean {
+        for (i in text.indices) {
+            if (text[i] == '.' && isAbbreviationPeriod(text, i)) return true
+        }
+        return false
+    }
+
     private fun isAbbreviationPeriod(text: String, period: Int): Boolean {
         if (period <= 0 || period >= text.length || text[period] != '.') return false
         var i = period - 1
@@ -220,13 +247,18 @@ internal object LiteraturePassages {
     /**
      * A period glued to a lowercase letter, a continuing digit, or a quote is not a cut.
      * "meeting.12" still ends: those digits are a note mark and are stripped from the next sentence.
+     * A closing quote with a note mark after it, as in "society'.12", also ends.
      */
     private fun staysInside(text: String, period: Int): Boolean {
         val next = period + 1
         if (next >= text.length) return false
         val ch = text[next]
         if (ch.isLowerCase()) return true
-        if (ch == '\'' || ch == '"' || ch == '\u2018' || ch == '\u2019' || ch == '\u201C' || ch == '\u201D') return true
+        if (ch == '\'' || ch == '"' || ch == '\u2018' || ch == '\u2019' || ch == '\u201C' || ch == '\u201D') {
+            var quote = next + 1
+            while (quote < text.length && text[quote] in closingQuotes) quote++
+            return noteDigitsAfter(text, quote) == 0
+        }
         return ch.isDigit() && noteDigitsAfter(text, next) == 0
     }
 
@@ -315,7 +347,8 @@ internal object LiteraturePassages {
 
     fun bodySentence(s: String): Boolean {
         val compact = compactSpace.replace(s, " ").trim()
-        return compact.length in 6..650 &&
+        val limit = if (containsAbbreviationPeriod(compact)) ABBREVIATED_SENTENCE_MAX else BODY_SENTENCE_MAX
+        return compact.length in 6..limit &&
             !LiteratureScaffoldNoise.rejectsSentence(compact) &&
             !hasControlOrBrokenChar(s) &&
             end.containsMatchIn(compact) &&

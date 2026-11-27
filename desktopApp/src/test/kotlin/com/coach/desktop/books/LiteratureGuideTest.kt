@@ -400,6 +400,72 @@ class LiteratureGuideTest {
         val byTextRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruleLine + afterRule, 10f)
         assertTrue(byTextRule.any { 200 in it }, byTextRule.toString())
         assertTrue(byTextRule.none { 180 in it }, byTextRule.toString())
+
+        // A note block that starts above the old 55% cut still reaches the bottom, so the whole run is a note.
+        val longNotes = (0 until 10).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 150f + i * 12f, size = 8f, start = 1000 + i * 40, end = 1030 + i * 40)
+        }
+        val longPage = body + longNotes
+        val longSpan = longPage.maxOf { it.y } - longPage.minOf { it.y }
+        val oldBottomCut = longPage.minOf { it.y } + longSpan * 0.55f
+        assertTrue(longNotes.first().y < oldBottomCut, "note block starts above the old bottom cut")
+        val longRanges = LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f)
+        assertTrue(longRanges.any { longNotes.first().start in it }, longRanges.toString())
+        assertTrue(longRanges.any { longNotes.last().start in it }, longRanges.toString())
+        assertTrue(longRanges.none { it.first < 1000 }, longRanges.toString())
+
+        val middle = LiteraturePdfLayout.FootnoteLine(y = 80f, size = 8f, start = 400, end = 440)
+        val afterMiddle = (0 until 4).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 100f + i * 12f, size = 10f, start = 500 + i * 20, end = 518 + i * 20)
+        }
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body.take(3) + middle + afterMiddle, 10f).isEmpty())
+
+        val folio = LiteraturePdfLayout.FootnoteLine(y = 280f, size = 10f, start = 1400, end = 1403)
+        val withFolio = LiteraturePdfLayout.layoutFootnoteRanges(longPage + folio, 10f)
+        assertTrue(withFolio.any { longNotes.first().start in it }, withFolio.toString())
+        assertTrue(withFolio.none { 1400 in it }, withFolio.toString())
+
+        val glyphs = buildList {
+            repeat(40) { add((it * 12f) to 10f) }
+            repeat(80) { add((520f + it * 10f) to 8f) }
+        }
+        assertEquals(10f, LiteraturePdfLayout.proseBodyHeight(glyphs, columnMedian = 8f))
+        assertEquals(10f, LiteraturePdfLayout.proseBodyHeight(List(40) { (it * 12f) to 10f }, columnMedian = 10f))
+    }
+
+    @Test fun abbreviationSentencesStayWholeWhenANoteMarkFollowsTheClosingQuote() {
+        fun quotesOf(text: String) = LiteraturePassages.extractCandidates(
+            Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(GuideRegion(text))))),
+        ).map { it.anchor.quoteAnchor }
+
+        val intro = "The catalog lists three later notes for the same cabinet."
+        val second = "The second note was printed in the public record after the manner of the Ph. Transactions."
+        val third = "The keeper was not the clerk of the R. Society when the list cited Ph.Tr. N.143 before the public business of that society.\u201912"
+        val after = "Visitors described the cabinets in enough detail to reconstruct the early arrangement."
+        val page = listOf(intro, second, third, after).joinToString("\n\n")
+        val quotes = quotesOf(page)
+        assertTrue(quotes.any { "Ph. Transactions." in it && "N.143" !in it }, quotes.joinToString("\n"))
+        val cited = quotes.single { "N.143" in it }
+        assertTrue("clerk of the R. Society" in cited, cited)
+        assertFalse(cited.last().isDigit(), cited)
+        assertTrue(cited.endsWith("\u2019"), cited)
+        assertFalse("Visitors described" in cited, cited)
+        assertTrue(quotes.any { "Visitors described" in it && "N.143" !in it }, quotes.joinToString("\n"))
+        assertFalse(LiteraturePassages.isFootnoteSentence(cited))
+
+        val prefix = "The plate in the public catalog is marked Sig. Maren Solano "
+        val longBody = "recorded the same specimen in the field book "
+        val signature = prefix + longBody.repeat(18) + "before the season closed."
+        assertTrue(signature.length > 650, "length=${signature.length}")
+        assertTrue(signature.length <= 1300, "length=${signature.length}")
+        val signatureQuotes = quotesOf(signature)
+        assertEquals(1, signatureQuotes.size, signatureQuotes.joinToString("\n"))
+        assertTrue("marked Sig. Maren Solano" in signatureQuotes.single(), signatureQuotes.single())
+        assertTrue(signatureQuotes.single().endsWith("season closed."))
+
+        val plain = "The repository kept a public record " + "for the visitors who came ".repeat(28) + "before the season closed."
+        assertTrue(plain.length > 650, "length=${plain.length}")
+        assertTrue(quotesOf(plain).isEmpty(), quotesOf(plain).joinToString("\n"))
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

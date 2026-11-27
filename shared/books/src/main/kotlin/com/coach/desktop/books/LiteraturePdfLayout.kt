@@ -558,8 +558,11 @@ internal object LiteraturePdfLayout {
     )
 
     /**
-     * Note zone: a run of lines at the bottom of the column, smaller than the body, and separated
-     * from the body by a large gap or by a rule. Equal-size body text is never in the zone.
+     * Note zone: the trailing run of smaller-than-body lines that reaches the bottom of the
+     * column, after a large gap or a rule. A long note can start above the midline; cutting at
+     * 55% of the column left the upper lines of that run unmarked, and the lines below them are
+     * only a normal note-leading apart, so the whole note stayed in the candidate pool.
+     * Equal-size body text is never in the zone. A short body-sized folio under the note is not the zone.
      */
     internal fun layoutFootnoteRanges(
         lines: List<FootnoteLine>,
@@ -572,12 +575,11 @@ internal object LiteraturePdfLayout {
         val span = lines.maxOf { it.y } - top
         if (span < bodyHeight * 4f) return emptyList()
         val smallerThanBody = bodyHeight * 0.92f
-        val bottomCut = top + span * 0.55f
+        fun blank(index: Int) = lines[index].rule || lines[index].end <= lines[index].start
         fun previousContent(index: Int): Int? {
             var cursor = index - 1
             while (cursor >= 0) {
-                val line = lines[cursor]
-                if (!line.rule && line.end > line.start) return cursor
+                if (!blank(cursor)) return cursor
                 cursor--
             }
             return null
@@ -591,21 +593,44 @@ internal object LiteraturePdfLayout {
             if (high > low && separatorYs.any { it in low..high }) return true
             return ((prevIndex + 1) until index).any { lines[it].rule }
         }
-        val start = lines.indices.firstOrNull { index ->
+        fun trailingFolio(index: Int): Boolean {
             val line = lines[index]
-            if (line.rule || line.end <= line.start) return@firstOrNull false
-            if (line.size >= smallerThanBody || line.y < bottomCut) return@firstOrNull false
-            val prev = previousContent(index) ?: return@firstOrNull false
-            separated(prev, index)
-        } ?: return emptyList()
+            if (blank(index)) return true
+            if (line.size < smallerThanBody) return false
+            return line.end - line.start <= 8
+        }
+        var anchor = lines.lastIndex
+        while (anchor >= 0 && trailingFolio(anchor)) anchor--
+        if (anchor < 0 || lines[anchor].size >= smallerThanBody) return emptyList()
+        var tail = anchor
+        while (tail > 0 && (blank(tail - 1) || lines[tail - 1].size < smallerThanBody)) tail--
+        val prev = previousContent(tail) ?: return emptyList()
+        val firstNote = (tail..anchor).first { !blank(it) }
+        if (!separated(prev, firstNote)) return emptyList()
         val ranges = mutableListOf<IntRange>()
-        for (index in start until lines.size) {
+        for (index in tail until lines.size) {
             val line = lines[index]
-            if (line.rule || line.end <= line.start) continue
-            if (line.size >= smallerThanBody) break
+            if (blank(index) || line.size >= smallerThanBody) continue
             ranges += line.start until line.end
         }
         return ranges
+    }
+
+    /**
+     * Size used to decide "smaller than the body". Long footnotes can outnumber body glyphs, and
+     * the column median then becomes the note size, so the note no longer looks smaller.
+     * The upper half of the column supplies a slightly larger size when it has one.
+     */
+    internal fun proseBodyHeight(glyphs: List<Pair<Float, Float>>, columnMedian: Float): Float {
+        if (columnMedian <= 0f || glyphs.size < 8) return columnMedian
+        val top = glyphs.minOf { it.first }
+        val span = glyphs.maxOf { it.first } - top
+        if (span < columnMedian * 4f) return columnMedian
+        val upperCut = top + span * 0.50f
+        val upper = glyphs.mapNotNull { (y, height) -> if (y <= upperCut && height > 0f) height else null }.sorted()
+        if (upper.size < 8) return columnMedian
+        val higher = upper[(upper.size * 7) / 10]
+        return if (higher > columnMedian * 1.08f && higher < columnMedian * 1.50f) higher else columnMedian
     }
 
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
@@ -681,6 +706,7 @@ internal object LiteraturePdfLayout {
         rows.forEach { it.words.sortBy(Word::x) }
         val positiveHeights = words.map { it.height }.filter { it > 0f }.sorted()
         val bodyHeight = if (positiveHeights.isNotEmpty()) positiveHeights[positiveHeights.size / 2] else 10f
+        val proseHeight = proseBodyHeight(words.map { it.y to it.height }, bodyHeight)
 
         // Search vertical gutter across the actual visible word span (handles both cropped scans and IEEE/ACL 2-column papers).
         val halfGap = maxOf(3f, minOf(bodyHeight * 0.65f, spanWidth * 0.008f))
@@ -843,7 +869,7 @@ internal object LiteraturePdfLayout {
             val separatorYs = drawnRules
                 .filter { it.maxX >= columnMinX && it.minX <= columnMaxX }
                 .map { it.displayY }
-            val footnoteRanges = layoutFootnoteRanges(builtLines, bodyHeight, separatorYs)
+            val footnoteRanges = layoutFootnoteRanges(builtLines, proseHeight, separatorYs)
             val reference = object : BookPdfStripper() {
                 override fun processTextPosition(position: BookPdfTextPosition) {
                     if (!insideCropBox(position, crop)) return

@@ -642,7 +642,9 @@ internal fun HostSettings(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 SettingsSection("账号与连接", "settings-section-account")
-                LocalAccountSettings.current?.invoke()
+                CompositionLocalProvider(LocalContentColor provides colors.fgPrimary) {
+                    LocalAccountSettings.current?.invoke()
+                }
                 Text(
                     "教材和进度保存在本地设备。提问与讲解时仅发送当前所选片段或本节正文至学习服务。",
                     style = MaterialTheme.typography.bodyMedium,
@@ -680,7 +682,9 @@ internal fun HostSettings(
                     }
                 }
                 SettingsSection("数据与关于", "settings-section-data")
-                LocalDataSettings.current?.invoke()
+                CompositionLocalProvider(LocalContentColor provides colors.fgPrimary) {
+                    LocalDataSettings.current?.invoke()
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                     SelectionContainer {

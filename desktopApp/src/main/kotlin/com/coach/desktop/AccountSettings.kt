@@ -5,6 +5,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.coach.client.PairingClient
 import com.coach.desktop.books.LearningJournal
@@ -133,7 +135,7 @@ internal fun DataSection(profile: LearningProfile, sync: SyncDisplay, updateResu
         Switch(offerReports, { enabled ->
             try { onReports(enabled) }
             catch (_: Exception) { notice = "偏好未保存，请检查本机目录权限。" }
-        })
+        }, modifier = Modifier.semantics { contentDescription = "问题上报提醒" })
     }
     if (notice.isNotEmpty()) Text(notice)
 }

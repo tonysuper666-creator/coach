@@ -67,6 +67,9 @@ class AccountSettingsTest {
                     onNodeWithText("检查更新").performScrollTo().performClick()
                     onNodeWithText("已经是最新版本").performScrollTo().assertIsDisplayed()
                     onNodeWithText("打开文件夹").performScrollTo().assertIsDisplayed()
+                    val reports = onNodeWithContentDescription("问题上报提醒").performScrollTo()
+                    reports.assertIsOn().performClick()
+                    reports.assertIsOff()
                     capture("data")
                 }
             }

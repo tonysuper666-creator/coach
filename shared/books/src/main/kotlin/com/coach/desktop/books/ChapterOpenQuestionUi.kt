@@ -39,6 +39,7 @@ internal fun ChapterOpenQuestionCard(
     bookId: String,
     chapterId: String,
     chapterTitle: String,
+    pageText: (Int) -> String?,
     blocks: List<SourceBlock>,
     draft: ChapterPracticeDraft,
     explainer: BookExplainer,
@@ -50,7 +51,9 @@ internal fun ChapterOpenQuestionCard(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    val question = remember(draft.openQuestionJson) { ChapterOpenJson.decodeQuestion(draft.openQuestionJson) }
+    val question = remember(draft.openQuestionJson, blocks, pageText) {
+        ChapterOpenJson.run { decodeQuestion(draft.openQuestionJson)?.withPageOffsets(blocks, pageText) }
+    }
     val attempts = remember(draft.openAttemptsJson) { ChapterOpenJson.decodeAttempts(draft.openAttemptsJson) }
     var busy by remember(chapterId) { mutableStateOf(false) }
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
@@ -67,7 +70,7 @@ internal fun ChapterOpenQuestionCard(
         busy = true
         error = null
         try {
-            val wire = ChapterOpenJson.buildGenerateRequest(bookId, chapterId, prose)
+            val wire = ChapterOpenJson.buildGenerateRequest(bookId, chapterId, prose, pageText)
             val res = withContext(Dispatchers.IO) { explainer.generateChapterOpenQuestion(wire) }
             val body = res.body
             if (body == null) {
@@ -132,7 +135,7 @@ internal fun ChapterOpenQuestionCard(
                     chapterId = chapterId,
                     question = question,
                     attempts = attempts,
-                    blocks = prose,
+                    pageText = pageText,
                     draft = draft,
                     explainer = explainer,
                     onDraftChange = onDraftChange,
@@ -151,7 +154,7 @@ private fun ChapterOpenAnswerBody(
     chapterId: String,
     question: ChapterOpenQuestion,
     attempts: List<ChapterOpenAttempt>,
-    blocks: List<SourceBlock>,
+    pageText: (Int) -> String?,
     draft: ChapterPracticeDraft,
     explainer: BookExplainer,
     onDraftChange: (ChapterPracticeDraft) -> Unit,
@@ -181,36 +184,16 @@ private fun ChapterOpenAnswerBody(
         RubricAnnotationSheet(
             studentDraft = attempt.answer,
             response = attempt.toGradeResponse(question),
-            onJumpPage = { page, quote ->
-                val point = question.points.firstOrNull { it.page == page && it.quoteAnchor == quote }
-                    ?: question.points.firstOrNull { it.id == attempt.items.getOrNull(0)?.id }
+            onJumpPage = { _, _ -> },
+            onJumpItem = { item ->
+                val point = question.points.firstOrNull { it.id == item.cid }
                 if (point != null) {
-                    val block = blocks.firstOrNull { it.id == point.blockId }
-                    val resolvedRange = if (block != null && point.startUtf16 in 0 until block.start) {
-                        val inBlock = block.text.indexOf(point.quoteAnchor)
-                        if (inBlock >= 0) {
-                            val absStart = block.start + inBlock
-                            absStart to (absStart + point.quoteAnchor.length)
-                        } else {
-                            point.startUtf16 to point.endUtf16
-                        }
-                    } else if (block != null && point.startUtf16 == 0 && block.start > 0) {
-                        val inBlock = block.text.indexOf(point.quoteAnchor)
-                        if (inBlock >= 0) {
-                            val absStart = block.start + inBlock
-                            absStart to (absStart + point.quoteAnchor.length)
-                        } else {
-                            point.startUtf16 to point.endUtf16
-                        }
-                    } else {
-                        point.startUtf16 to point.endUtf16
-                    }
                     onOpenAnchor(
                         BookCompanionAnchor(
                             pdfPage = point.page,
                             blockId = point.blockId,
-                            startUtf16 = resolvedRange.first,
-                            endUtf16 = resolvedRange.second,
+                            startUtf16 = point.startUtf16,
+                            endUtf16 = point.endUtf16,
                             quoteAnchor = point.quoteAnchor,
                         ),
                     )
@@ -238,7 +221,7 @@ private fun ChapterOpenAnswerBody(
                     try {
                         val retryIds = if (canRetry) missed else emptyList()
                         val wire = ChapterOpenJson.buildGradeRequest(
-                            bookId, chapterId, question, draft.openAnswerDraft, retryIds, blocks,
+                            bookId, chapterId, question, draft.openAnswerDraft, retryIds, pageText,
                         )
                         when (val res = withContext(Dispatchers.IO) { explainer.gradeAndDiagnosePractice(wire) }) {
                             is PracticeGradeDiagnoseResult.Ready -> {

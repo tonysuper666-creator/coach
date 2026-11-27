@@ -44,6 +44,7 @@ data class ChapterOpenRawPoint(
     val claim: String,
     val blockId: String,
     val quoteAnchor: String,
+    val anchorInBlock: Int? = null,
 )
 
 data class ChapterOpenAcceptedPoint(
@@ -159,13 +160,18 @@ object ChapterOpenGate {
             if (id.isBlank() || id in seen) continue
             if (claim.length !in 4..MAX_CLAIM_CHARS) continue
             if (copiesSource(claim, block.text)) continue
-            val placed = placeAnchor(anchor, block.text) ?: continue
-            seen += id
+            val placed = if (point.anchorInBlock != null) {
+                val offset = point.anchorInBlock
+                if (anchor.length !in 4..40 || !block.text.startsWith(anchor, offset)) continue
+                anchor to offset
+            } else placeAnchor(anchor, block.text) ?: continue
             val baseStart = if (block.startUtf16 > 0) {
                 block.startUtf16
             } else {
                 block.id.substringAfter(":p${block.page}:", "").toIntOrNull()?.coerceAtLeast(0) ?: 0
             }
+            if (baseStart > Int.MAX_VALUE - placed.second - placed.first.length) continue
+            seen += id
             val startUtf16 = baseStart + placed.second
             accepted += ChapterOpenAcceptedPoint(
                 id = id,
@@ -193,7 +199,9 @@ object ChapterOpenGate {
                 "PARTIAL" -> "PARTIAL"
                 else -> "ZERO"
             }
-            val verdict = if (point.sourceSentence.isNotBlank()) {
+            val verdict = if (answer.trim() == point.claim.trim() && model == "FULL") {
+                model
+            } else if (point.sourceSentence.isNotBlank()) {
                 meaningVerdict(point, answer, model)
             } else when {
                 isOffTopic(point.claim, answer) -> "ZERO"
@@ -234,10 +242,8 @@ object ChapterOpenGate {
      * English periods end a sentence unless they sit between digits. A long sentence
      * is trimmed to 180 characters without dropping [anchor].
      */
-    fun sentenceAround(pageText: String, anchor: String): String {
-        if (pageText.isBlank() || anchor.isBlank()) return ""
-        val start = pageText.indexOf(anchor)
-        if (start < 0) return ""
+    fun sentenceAround(pageText: String, anchor: String, start: Int = pageText.indexOf(anchor)): String {
+        if (anchor.isBlank() || start < 0 || !pageText.startsWith(anchor, start)) return ""
         var left = start
         while (left > 0 && !isSentenceBreak(pageText, left - 1)) left--
         var right = start + anchor.length

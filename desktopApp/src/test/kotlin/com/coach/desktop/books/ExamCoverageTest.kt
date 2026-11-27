@@ -214,4 +214,93 @@ class ExamCoverageTest {
         )
         assertEquals(listOf("Demand elasticity", "Consumer surplus", "Price ceiling"), decomposed.map { it.name })
     }
+
+    @Test
+    fun concatenatedCoverlessDualPaperSplitsBothPapersWhenNumberingRestartsAtOne() {
+        val paperA = """
+            1. Consider a simple market where buyers and sellers trade.
+            2). What happens to equilibrium price?
+            2. Explain Demand Elasticity for a normal good.
+            3. Discuss Price Ceiling effects on quantity supplied.
+        """.trimIndent()
+        val paperB = """
+            1. Define Consumer Surplus in competitive markets.
+            2. Explain Moral Hazard in health insurance.
+            3. Discuss Adverse Selection when risk is hidden.
+        """.trimIndent()
+        val identified = listOf(
+            "Simple market", "Demand elasticity", "Price ceiling",
+            "Consumer surplus", "Moral hazard", "Adverse selection",
+        )
+        val textbook = identified.joinToString("\n") { "$it: Synthetic definition." }
+        val bank = identified.map { CoverageBankPoint(it, choices = 2, essay = false) }
+
+        val forward = HeldOutDecomposer.questionsFromDocument("$paperA\n\n$paperB")
+        val reversed = HeldOutDecomposer.questionsFromDocument("$paperB\n$paperA")
+        assertEquals(6, forward.size)
+        assertEquals(6, reversed.size)
+        assertTrue(forward[0].contains("2). What happens to equilibrium price?"))
+
+        val forwardReport = ExamCoverage.evaluate(forward, identified, bank, textbook)
+        val reversedReport = ExamCoverage.evaluate(reversed, identified, bank, textbook)
+        assertEquals(6, forwardReport.heldOutPoints)
+        assertEquals(6, forwardReport.covered)
+        assertEquals(6, reversedReport.heldOutPoints)
+        assertEquals(6, reversedReport.covered)
+        assertEquals(identified.toSet(), forwardReport.coveredPoints.toSet())
+        assertEquals(identified.toSet(), reversedReport.coveredPoints.toSet())
+    }
+
+    @Test
+    fun concatenatedFullDualPaperWithNewCoverSplitsBothPapersAndDropsBothCovers() {
+        val fullPaperA = """
+            SYNTHETIC UNIVERSITY
+            ECON99999 Practice Midterm Examination
+            Time Allowed: 60 Minutes
+            Instructions to Candidates:
+            1. Write your student ID on the booklet.
+            2. Calculators are not permitted.
+
+            Part I: Microeconomics
+            1. Consider a simple market with linear demand.
+            2. Explain Demand Elasticity for luxury goods.
+            End of Examination
+        """.trimIndent()
+        val fullPaperB = """
+            SYNTHETIC UNIVERSITY
+            ECON99999 December 2025 Examination
+            Time Allowed: 120 Minutes
+            Instructions to Candidates:
+            Answer all questions in blue or black ink.
+
+            1. Discuss Moral Hazard in insurance contracts.
+            2. Explain Adverse Selection in credit markets.
+            3. Define Cost-Effectiveness Analysis in public health.
+            Space for Rough Work
+        """.trimIndent()
+        val identified = listOf(
+            "Simple market", "Demand elasticity",
+            "Moral hazard", "Adverse selection", "Cost-Effectiveness Analysis",
+        )
+        val textbook = identified.joinToString("\n") { "$it: Synthetic definition." }
+        val bank = identified.map { CoverageBankPoint(it, choices = 2, essay = false) }
+
+        val separateQuestions = HeldOutDecomposer.questionsFromDocument(fullPaperA) +
+            HeldOutDecomposer.questionsFromDocument(fullPaperB)
+        val combinedQuestions = HeldOutDecomposer.questionsFromDocument("$fullPaperA\n\n$fullPaperB")
+        val reversedQuestions = HeldOutDecomposer.questionsFromDocument("$fullPaperB\n\n$fullPaperA")
+
+        assertEquals(5, separateQuestions.size)
+        assertEquals(5, combinedQuestions.size)
+        assertEquals(5, reversedQuestions.size)
+        assertFalse(combinedQuestions.any { "SYNTHETIC UNIVERSITY" in it || "Instructions" in it || "Rough Work" in it || "End of Examination" in it })
+
+        val combinedReport = ExamCoverage.evaluate(combinedQuestions, identified, bank, textbook)
+        val reversedReport = ExamCoverage.evaluate(reversedQuestions, identified, bank, textbook)
+        assertEquals(5, combinedReport.heldOutPoints)
+        assertEquals(5, combinedReport.covered)
+        assertEquals(5, reversedReport.heldOutPoints)
+        assertEquals(5, reversedReport.covered)
+        assertEquals(identified.toSet(), combinedReport.coveredPoints.toSet())
+    }
 }

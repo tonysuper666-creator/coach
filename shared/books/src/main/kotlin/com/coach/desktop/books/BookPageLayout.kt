@@ -214,12 +214,12 @@ internal fun planBookChapters(
     }
     // Physical-page metadata belongs to the following heading unless the body
     // explicitly starts later, between the metadata and the heading.
-    val chapterStarts = headings.map { (heading, title) ->
+    val chapterStarts = mergeTitlePageChapters(source, headings.map { (heading, title) ->
         val base = starts.last { it.first <= heading }.first
         val prefix = source.substring(base, heading)
         val start = if (prefix.lineSequence().all { it.isBlank() || physicalPageMarkerRegex.matches(it.trim()) }) base else heading
         Triple(bodyBoundary?.takeIf { it in start..heading } ?: start, heading, title)
-    }.distinctBy { it.first }
+    }.distinctBy { it.first })
     // Isolate Project Gutenberg boilerplate headers/footers on their own sheets so opening at bodyStart
     // never mixes English Gutenberg license boilerplate onto the first body page.
     val boilerplateBreaks = gutenbergBoilerplateBoundaries(source)
@@ -706,3 +706,30 @@ internal fun bookChapterDisplayNumber(raw: String): String {
     }
     return (total + digit).toString().padStart(2, '0')
 }
+
+/**
+ * 书名页、作者行这类只有一两行字的前置「章」各占一整屏，打开书就是大片空白。
+ * 在第一个有实际篇幅的章之前，把这类只含几行短标题的章并进后一章，让它们和后面的标题排在同一屏。
+ */
+internal fun mergeTitlePageChapters(source: String, chapters: List<Triple<Int, Int, String>>): List<Triple<Int, Int, String>> {
+    val sorted = chapters.sortedBy { it.first }
+    val lengths = sorted.mapIndexed { i, c -> (sorted.getOrNull(i + 1)?.first ?: source.length) - c.first }
+    val firstSubstantial = lengths.indexOfFirst { it >= TITLE_PAGE_SUBSTANTIAL_CHARS }.takeIf { it >= 0 } ?: return chapters
+    val result = mutableListOf<Triple<Int, Int, String>>()
+    var carriedStart: Int? = null
+    for ((i, chapter) in sorted.withIndex()) {
+        val lines = source.substring(chapter.first, chapter.first + lengths[i]).lines()
+            .map { it.trim().trimStart('#').trim() }.filter { it.isNotEmpty() }
+        val titleOnly = i < firstSubstantial && lengths[i] < TITLE_PAGE_MAX_CHARS && lines.size <= TITLE_PAGE_MAX_LINES &&
+            lines.all { it.length <= TITLE_PAGE_MAX_LINE && it.last() !in "。！？.!?" }
+        if (titleOnly) { carriedStart = carriedStart ?: chapter.first; continue }
+        result += if (carriedStart != null) Triple(carriedStart, chapter.second, chapter.third) else chapter
+        carriedStart = null
+    }
+    return result
+}
+
+private const val TITLE_PAGE_SUBSTANTIAL_CHARS = 1000
+private const val TITLE_PAGE_MAX_CHARS = 200
+private const val TITLE_PAGE_MAX_LINES = 4
+private const val TITLE_PAGE_MAX_LINE = 80

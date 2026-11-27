@@ -2485,6 +2485,17 @@ internal class TextbookLibrary(
 
     @Synchronized fun <T> withCourseDatabase(block: (Connection) -> T): T = database().use(block)
 
+    /** EPUB 的书内链接（尾注、返回箭头等）；每本书只算一次，算不出或与已存页对不上就当没有。 */
+    private val epubLinkCache = java.util.concurrent.ConcurrentHashMap<String, EpubLinks>()
+    internal fun epubLinks(book: Textbook): EpubLinks {
+        if (book.format != "epub") return EpubLinks.NONE
+        val key = "${book.id}:${book.pages.size}"
+        epubLinkCache[key]?.let { return it }
+        val file = originalFileIfPresent(book.id, book.format) ?: return EpubLinks.NONE
+        val found = TextbookExtraction.epubLinks(file, book.pages) ?: EpubLinks.NONE
+        return found.also { epubLinkCache[key] = it }
+    }
+
     @Synchronized fun originalFileIfExists(bookId: String, format: String): Path? =
         runCatching { original(bookId, format) }.getOrNull()?.takeIf(Files::isRegularFile)
 
@@ -3971,6 +3982,13 @@ internal object TextbookExtraction {
         else EpubSourceMapping(EpubSourceMapping.Status.STALE_TEXT, emptyList())
     }
 
+    /** 按需从原 EPUB 重算书内链接；原文件抽出来的页文字和已存页对不上时不给（宁可不跳，也不跳错页）。 */
+    fun epubLinks(path: Path, canonicalPages: List<BookPage>): EpubLinks? = runCatching {
+        val collector = EpubLinkCollector()
+        val extracted = epub(path, "", navigationOnly = true, linkCollector = collector)
+        if (extracted.pages.map { it.text } == canonicalPages.map { it.text }) collector.finish() else null
+    }.getOrNull()
+
     fun epubNavigation(path: Path, canonicalPages: List<BookPage>): ExtractedBook? = runCatching {
         epub(path, "", withNavigation = true, navigationOnly = true)
             .takeIf { parsed -> parsed.pages.map { it.text } == canonicalPages.map { it.text } }
@@ -3978,7 +3996,7 @@ internal object TextbookExtraction {
 
     private fun epub(path: Path, fallback: String, elements: MutableList<EpubElementSource>? = null,
         control: BookImportControl = BookImportControl(), withNavigation: Boolean = false,
-        navigationOnly: Boolean = false): ExtractedBook = ZipFile(path.toFile()).use { zip ->
+        navigationOnly: Boolean = false, linkCollector: EpubLinkCollector? = null): ExtractedBook = ZipFile(path.toFile()).use { zip ->
         fun read(name: String): ByteArray {
             require(!name.startsWith('/') && name.split('/').none { it == ".." } && '\\' !in name) { "EPUB 内含无效的文件位置。" }
             val entry = requireNotNull(zip.getEntry(name)) { "EPUB 缺少阅读顺序中的正文。" }
@@ -4027,6 +4045,9 @@ internal object TextbookExtraction {
             var boilerplateEnd: Int? = null
             if (null in requestedFragments) targetOffsets[null] = 0
             val trace = if (elements != null) EpubTextTrace() else null
+            val memberIds = mutableMapOf<String, Int>()
+            var hasImage = false
+            val memberLinks = mutableListOf<Triple<Int, Int, String>>()
             fun visit(node: Node, elementPath: List<Int>) {
                 if (node.nodeType == Node.TEXT_NODE) { output.append(node.nodeValue); return }
                 val name = node.localName?.lowercase().orEmpty()
@@ -4036,6 +4057,14 @@ internal object TextbookExtraction {
                 val start = output.length
                 if (node is Element) {
                     imageExtractor?.record(node, start)
+                    // 只引用外部位图的 svg 外壳（封面页常见）导入时抽不出图，不算有图。
+                    if (name == "img" || name == "svg" && node.getElementsByTagNameNS("*", "image").length == 0) hasImage = true
+                    if (linkCollector != null) {
+                        for (attribute in listOf("id", "xml:id", "name")) {
+                            val fragment = node.getAttribute(attribute)
+                            if (fragment.isNotEmpty()) memberIds.putIfAbsent(fragment, start)
+                        }
+                    }
                     if (requestedFragments.isNotEmpty()) {
                         for (attribute in listOf("id", "xml:id", "name")) {
                             val fragment = node.getAttribute(attribute)
@@ -4057,6 +4086,10 @@ internal object TextbookExtraction {
                     visit(child, childPath)
                 }
                 if (node is Element) {
+                    if (linkCollector != null && name == "a" && output.length > start) {
+                        val href = node.getAttribute("href")
+                        if (href.isNotEmpty()) memberLinks += Triple(start, output.length, href)
+                    }
                     trace?.record(elementPath, node.namespaceURI.orEmpty(), node.localName ?: node.tagName, start, output.length)
                     if (name == "header" && node.getAttribute("id") == "pg-header") boilerplateEnd = output.length
                 }
@@ -4066,10 +4099,14 @@ internal object TextbookExtraction {
             val raw = output.toString()
             val cleaned = clean(raw)
             val localPages = paginate(cleaned.trim())
+            val memberIllustrations = imageExtractor?.finish(output.toString(), localPages, member, pageBase).orEmpty()
+            // 只有封面图、分隔页之类没有文字也没有插图的章节不进阅读顺序，否则读者会翻到整页空白。
+            if (localPages.all { it.text.isBlank() } && !hasImage) return@flatMap emptyList<BookPage>()
             if (navigation != null && targetOffsets.isNotEmpty()) {
                 navigation.recordMember(member, raw, cleaned, localPages, pageBase, targetOffsets, boilerplateEnd)
             }
-            imageExtractor?.let { illustrations += it.finish(output.toString(), localPages, member, pageBase) }
+            illustrations += memberIllustrations
+            linkCollector?.addMember(member, raw, cleaned, localPages, pageBase, memberIds, memberLinks)
             trace?.let { elements?.addAll(it.project(output.toString(), localPages, spineIndex, member, bytes, pageBase)) }
             pageBase += localPages.size
             localPages

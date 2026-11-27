@@ -49,6 +49,7 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import java.nio.file.Path
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -293,6 +295,9 @@ internal fun BookPageView(
     hardPointGutter: Boolean = false,
     onLoadPdfVisuals: (suspend (String, Collection<Int>) -> Unit)? = null,
     onOpenOriginalBlock: ((BookIllustration) -> Unit)? = null,
+    /** EPUB 书内链接（尾注编号、返回箭头等）；点中链接文字时用 [onFollowLink] 跳到目标位置。 */
+    links: EpubLinks = EpubLinks.NONE,
+    onFollowLink: ((BookPageAnchor) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { figure ->
@@ -593,7 +598,8 @@ internal fun BookPageView(
                                     pages.take(index + 1).count { it.chapter == page.chapter }
                                 BookSheet(book, page, typography, measurer, widthPx, leftInset, remaining, false, 0,
                                     libraryDirectory, onOpenTableRow, { preview = it }, hardPoints, onHardPointClick,
-                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered) { failed.add(it) }
+                                    topMargin = if (page.opener) openerTopMargin else topMargin, rendered = rendered,
+                                    links = links, onFollowLink = onFollowLink) { failed.add(it) }
                             }
                         }
                     }
@@ -649,7 +655,8 @@ internal fun BookPageView(
                         BookSheet(book, page, typography, measurer, widthPx, inset, remaining, spread, side,
                             libraryDirectory, onOpenTableRow, { preview = it }, displayedPoints, onHardPointClick,
                             topMargin = if (page.opener) openerTopMargin else topMargin,
-                            lastColumn = isLast, recordSourceOffsets = windowsPaged, rendered = rendered) { failed.add(it) }
+                            lastColumn = isLast, recordSourceOffsets = windowsPaged, rendered = rendered,
+                            links = links, onFollowLink = onFollowLink) { failed.add(it) }
                     }
                 }
             }
@@ -873,9 +880,12 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
     lastColumn: Boolean = spread && side == 1,
     recordSourceOffsets: Boolean = false,
     rendered: MutableMap<Int, TextLayoutResult>,
+    links: EpubLinks = EpubLinks.NONE,
+    onFollowLink: ((BookPageAnchor) -> Unit)? = null,
     onMissing: (BookIllustration) -> Unit) {
     val density = LocalDensity.current
     val colors = CoachTheme.colors
+    val linkColor = v7Pine()
     val column = with(density) { widthPx.toDp() }
     val runningTitle = remember(book, page) { BookBoundaries.runningHeaderTitle(book, page) }
     val compactHeader = topMargin < 44.dp
@@ -895,7 +905,7 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
         val layout = remember(run, widthPx, typography) { measurer.measure(run.text, typography.body,
             placeholders = run.placeholders, constraints = Constraints(maxWidth = widthPx)) }
         val inline = remember(run.placeholders) { run.placeholders.associate { it.tag to InlineTextContent(it.item) {} } }
-        val selectable = remember(run, recordSourceOffsets) { buildAnnotatedString {
+        val selectable = remember(run, recordSourceOffsets, links, linkColor, onFollowLink != null) { buildAnnotatedString {
             append(run.text)
             addStringAnnotation(PAGE_BODY, "", 0, length)
             if (recordSourceOffsets) {
@@ -908,6 +918,9 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
                 }
             }
             if (run.precedingCropText.isNotEmpty()) addStringAnnotation(CROP_GAP, run.precedingCropText, 0, 1)
+            if (onFollowLink != null) for (shown in run.linkRanges(links)) {
+                addStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline), shown.first.first, shown.first.last + 1)
+            }
         } }
         if (index == 0 && page.chapterNumber != null) DisableSelection {
             val number = bookChapterDisplayNumber(page.chapterNumber)
@@ -919,6 +932,21 @@ private fun BoxScope.BookSheet(book: Textbook, page: BookLaidPage, typography: B
         Text(selectable, style = typography.body, inlineContent = inline,
             onTextLayout = { rendered[run.topPx] = it },
             modifier = Modifier.padding(start = inset, top = topMargin + top).width(column)
+                .then(if (onFollowLink == null || links.isEmpty) Modifier else Modifier
+                    .pointerHoverIcon(PointerIcon.Hand, overrideDescendants = false)
+                    .pointerInput(run, links) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val up = waitForUpOrCancellation()
+                            if (up != null && (up.position - down.position).getDistance() < viewConfiguration.touchSlop) {
+                                val shown = layout.getOffsetForPosition(up.position)
+                                run.linkRanges(links).firstOrNull { shown in it.first }?.let { hit ->
+                                    up.consume()
+                                    onFollowLink(hit.second.target)
+                                }
+                            }
+                        }
+                    })
                 .semantics {
                     this[BookPageSources] = run.sources
                     // Expose original heading/citation ranges, as the reader did before
@@ -1240,4 +1268,20 @@ private fun highlightRunText(
         val style = SpanStyle(background = highlightColor)
         for ((start, end) in rangesToAdd) addStyle(style, start, end)
     }
+}
+
+/** 本段显示文字里的链接：显示偏移区间 → 链接。显示文字与导入页文字逐字对应，按来源片段累加偏移。 */
+private fun BookTextRun.linkRanges(links: EpubLinks): List<Pair<IntRange, EpubPageLink>> {
+    if (links.isEmpty) return emptyList()
+    val found = mutableListOf<Pair<IntRange, EpubPageLink>>()
+    var shownStart = 0
+    for (slice in sources) {
+        for (link in links.onPage(slice.importPage)) {
+            val from = maxOf(link.start, slice.startUtf16)
+            val to = minOf(link.end, slice.endUtf16)
+            if (from < to) found += (shownStart + from - slice.startUtf16 until shownStart + to - slice.startUtf16) to link
+        }
+        shownStart += slice.endUtf16 - slice.startUtf16
+    }
+    return found.filter { it.first.last < text.length }
 }

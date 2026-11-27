@@ -967,6 +967,7 @@ internal fun SingleBookCompanionPanel(
                         bookId = book.id,
                         chapterId = chapterGroup.chapterId,
                         chapterTitle = chapterGroup.chapterTitle,
+                        pageText = { page -> book.page(page)?.text },
                         blocks = ChapterCompanionGrouping.wireBlocks(proseGroup ?: chapterGroup),
                         draft = draft,
                         explainer = explainer,

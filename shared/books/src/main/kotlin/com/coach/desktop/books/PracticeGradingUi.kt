@@ -536,6 +536,7 @@ internal fun RubricAnnotationSheet(
     onJumpPage: (pdfPage: Int, quoteAnchor: String) -> Unit,
     modifier: Modifier = Modifier,
     onJumpSource: (bookId: String, pdfPage: Int, quoteAnchor: String) -> Unit = { _, page, quote -> onJumpPage(page, quote) },
+    onJumpItem: (PracticeRubricItemGrade) -> Unit = { item -> onJumpPage(item.pdfPage, item.quoteAnchor) },
 ) {
     val colors = CoachTheme.colors
     val pine = v7Pine()
@@ -671,7 +672,7 @@ internal fun RubricAnnotationSheet(
                             if (item.pdfPage > 0) {
                                 RubricPagePill(
                                     pdfPage = item.pdfPage,
-                                    onClick = { onJumpPage(item.pdfPage, item.quoteAnchor) },
+                                    onClick = { onJumpItem(item) },
                                     label = if (chapterPoint && item.verdict == "ZERO") "回到这一句" else "课本第 ${item.pdfPage} 页",
                                 )
                             }

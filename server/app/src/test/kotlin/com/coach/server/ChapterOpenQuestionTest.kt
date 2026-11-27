@@ -145,6 +145,50 @@ class ChapterOpenQuestionTest {
     }
 
     @Test
+    fun numberedSentenceSurvivesLongBlockIdAndRepeatedQuote() = runBlocking {
+        val repeated = "A lamp changes color before the bell sounds."
+        val text = "A brass dial measures the tide. $repeated $repeated"
+        val block = ChapterOpenSourceBlock("large-import-id".repeat(12), 63, text, 231)
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int,
+            ): BatchTransportReply {
+                assertTrue("[3] $repeated" in userPrompt)
+                return reply("""{"stem":"Explain the signals.","points":[
+                    {"id":"P1","claim":"Gauge the water level","sentenceId":1},
+                    {"id":"P2","claim":"Watch for a visual cue","sentenceId":2},
+                    {"id":"P3","claim":"Listen after the light shifts","sentenceId":3}]}""")
+            }
+        }
+        val points = PracticeGradeAndDiagnoseService(transport).generateChapterOpen("book", "chapter", listOf(block)).points
+        assertEquals(3, points.size)
+        assertEquals(block.startUtf16 + text.lastIndexOf(repeated), points.last().startUtf16)
+        points.forEach { point ->
+            assertEquals(block.id, point.blockId)
+            assertEquals(point.quoteAnchor, text.substring(point.startUtf16 - block.startUtf16, point.endUtf16 - block.startUtf16))
+        }
+    }
+
+    @Test
+    fun exactClaimEarnsOnlyItsOwnPointWithVerbatimEvidence() = runBlocking {
+        val claims = listOf("The gauge measures depth.", "The valve limits flow.", "The spring holds the lid.")
+        val transport = object : BatchAiTransport {
+            override suspend fun generateSection(
+                systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int,
+            ) = reply("""{"items":[{"cid":"P1","verdict":"ZERO"},{"cid":"P2","verdict":"ZERO"},{"cid":"P3","verdict":"ZERO"}]}""")
+        }
+        val service = PracticeGradeAndDiagnoseService(transport)
+        val request = gradeRequest("book", "chapter", claims, claims.first())
+        val items = service.process(request).rubricItems
+        assertEquals(listOf("FULL", "ZERO", "ZERO"), items.map { it.verdict.name })
+        assertEquals(1.0, items.first().awardedMarks)
+        assertEquals(claims.first(), items.first().studentQuote)
+        assertTrue(items.first().studentQuoteVerified)
+        assertTrue(service.process(request.copy(studentAnswer = "It is false that: " + claims.first()))
+            .rubricItems.all { it.verdict == PracticeRubricVerdict.ZERO })
+    }
+
+    @Test
     fun sampleAnswersNeverTreatOffTopicAsHit() = runBlocking {
         val prompts = mutableListOf<String>()
         val transport = object : BatchAiTransport {

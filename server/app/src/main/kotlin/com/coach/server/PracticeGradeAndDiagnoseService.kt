@@ -841,8 +841,12 @@ class PracticeGradeAndDiagnoseService(
                 }
 
                 val matchingNumeric = numericFacts.firstOrNull { it.cid == crit.cid }
-                var enforcedVerdict = rawVerdict
-                var enforcedAwarded = rawAwarded
+                val exactClaim = mode == "CHAPTER_OPEN" && request.studentAnswer.trim() == crit.slotLabel.trim() &&
+                    StudentQuoteGate.isExactContiguousSubstring(crit.slotLabel.trim(), request.studentAnswer)
+                // A missing grader row is a failed request, not evidence of a missed point.
+                check(mode != "CHAPTER_OPEN" || rawItem != null || exactClaim) { "开放题批改缺少得分点。" }
+                var enforcedVerdict = if (exactClaim) PracticeRubricVerdict.FULL else rawVerdict
+                var enforcedAwarded = if (exactClaim) maxMarks else rawAwarded
                 if (matchingNumeric != null && !matchingNumeric.correct && enforcedVerdict == PracticeRubricVerdict.FULL) {
                     enforcedVerdict = if (request.studentAnswer.isBlank()) PracticeRubricVerdict.ZERO else PracticeRubricVerdict.PARTIAL
                     if (maxMarks > 0.0) {
@@ -850,7 +854,7 @@ class PracticeGradeAndDiagnoseService(
                     }
                 }
 
-                var quote = rawItem?.studentQuote?.trim().orEmpty()
+                var quote = if (exactClaim) request.studentAnswer.trim() else rawItem?.studentQuote?.trim().orEmpty()
                 var quoteVerified = StudentQuoteGate.isExactContiguousSubstring(quote, request.studentAnswer)
                 var quoteRepairAttempted = false
                 var quoteGateZeroed = false
@@ -904,7 +908,7 @@ class PracticeGradeAndDiagnoseService(
                 val anchorVerified = verifiedAnchor != null
 
                 val guarded = NoRewriteOutputGuard.enforce(
-                    rawNote = rawItem?.feedbackNoteZh.orEmpty(),
+                    rawNote = if (exactClaim && enforcedVerdict == PracticeRubricVerdict.FULL && rawVerdict != enforcedVerdict) "这一点答到了。" else rawItem?.feedbackNoteZh.orEmpty(),
                     verdict = enforcedVerdict,
                     pdfPage = finalPage,
                 )
@@ -1310,9 +1314,10 @@ class PracticeGradeAndDiagnoseService(
         if (request.mode.trim().equals("CHAPTER_OPEN", ignoreCase = true)) {
             append("Chapter-open judging, which overrides the shared FULL/PARTIAL wording for this call:\n")
             append("Each criterion's courseDefinitionExcerpt is the sentence that point hangs on. ")
-            append("Judge the student's meaning against that sentence, not against shared words. ")
-            append("FULL means their own wording covers the sentence, even when none of its words appear. ")
-            append("PARTIAL means only part of that sentence is covered. ")
+            append("Judge each slotLabel independently. The excerpt supports the claim, and can contain other ideas. ")
+            append("Credit an answer that states the claim, even if other points or other parts of the excerpt are absent. ")
+            append("FULL means their own wording covers the claim, even when none of its words appear. ")
+            append("PARTIAL means only part of that claim is covered. ")
             append("ZERO means the point is missing, wrong, or about something else. ")
             append("Do not mark a correct paraphrase PARTIAL for using different words. ")
             append("Do not mark an off-topic answer FULL. ")
@@ -1652,11 +1657,14 @@ class PracticeGradeAndDiagnoseService(
         pages: List<PracticeSourcePageInput>,
     ): String {
         val onPage = pages.filter { it.pdfPage == criterion.pdfPage }
+        val given = criterion.sourceExcerpt.trim()
+        if (given.isNotEmpty() && criterion.quoteAnchor.isNotBlank() && criterion.quoteAnchor in given &&
+            onPage.any { given in it.text }
+        ) return given
         val page = (onPage.firstOrNull { criterion.quoteAnchor.isNotBlank() && criterion.quoteAnchor in it.text }
             ?: onPage.firstOrNull())?.text.orEmpty()
         val cut = ChapterOpenGate.sentenceAround(page, criterion.quoteAnchor)
         if (cut.isNotBlank() && (criterion.quoteAnchor.isBlank() || criterion.quoteAnchor in cut)) return cut
-        val given = criterion.sourceExcerpt.trim()
         if (criterion.quoteAnchor.isNotBlank() && criterion.quoteAnchor in given) return given
         return cut.ifBlank { given }
     }
@@ -1680,7 +1688,7 @@ class PracticeGradeAndDiagnoseService(
                 PracticeRubricVerdict.ZERO -> 0.0
                 PracticeRubricVerdict.PARTIAL ->
                     if (item.maxMarks > 0.0) minOf(item.awardedMarks, item.maxMarks * 0.5) else 0.0
-                PracticeRubricVerdict.FULL -> item.awardedMarks
+                PracticeRubricVerdict.FULL -> item.maxMarks.takeIf { it > 0.0 } ?: item.awardedMarks
             }
             item.copy(
                 verdict = verdict,
@@ -1713,7 +1721,7 @@ class PracticeGradeAndDiagnoseService(
             bookId,
             chapterId,
             usable,
-            repairNote = "The previous points were dropped because a claim copied the chapter or the quote was not an exact substring. Write new claims in your own words.",
+            repairNote = "Return at least three distinct claims in your own words, with a unique point id and a valid sentenceId for each.",
         )
         require(second.stem.isNotBlank() && second.points.size >= ChapterOpenGate.MIN_POINTS) {
             "这一章没能整理出足够的得分点，请稍后再试。"
@@ -1728,17 +1736,31 @@ class PracticeGradeAndDiagnoseService(
         blocks: List<ChapterOpenSourceBlock>,
         repairNote: String,
     ): ChapterOpenPack {
+        // The model selects a sentence by number. Keep the exact source string and its UTF-16
+        // position here so page wrapping, punctuation and long import IDs never need transcription.
+        data class Sentence(val block: ChapterOpenSourceBlock, val offset: Int, val text: String)
+        val sentences = buildList {
+            val iterator = java.text.BreakIterator.getSentenceInstance(java.util.Locale.ROOT)
+            for (block in blocks) {
+                iterator.setText(block.text)
+                var start = iterator.first()
+                var end = iterator.next()
+                while (end != java.text.BreakIterator.DONE) {
+                    val slice = block.text.substring(start, end)
+                    val sentence = slice.trim()
+                    if (sentence.length >= 4) add(Sentence(block, start + slice.indexOf(sentence), sentence))
+                    start = end
+                    end = iterator.next()
+                }
+            }
+        }
         val user = buildString {
             if (repairNote.isNotBlank()) append(repairNote).append("\n\n")
-            append("Chapter blocks. Cite a blockId and copy a short quoteAnchor from that block. ")
-            append("The claim must say what the student should explain. ")
-            append("Do not paste 12 consecutive Chinese characters or 8 consecutive English words from the block.\n")
-            for (block in blocks) {
-                append("[${block.id} p.${block.page}]\n")
-                append(block.text)
-                append("\n\n")
+            append("Numbered source sentences. For each claim return the number of its supporting sentence.\n")
+            sentences.forEachIndexed { index, sentence ->
+                append("[${index + 1}] ${sentence.text}\n")
             }
-            append("Return JSON only: {\"stem\":\"...\",\"points\":[{\"id\":\"P1\",\"claim\":\"...\",\"blockId\":\"${blocks.first().id}\",\"quoteAnchor\":\"exact substring\"}]}\n")
+            append("Return JSON only: {\"stem\":\"...\",\"points\":[{\"id\":\"P1\",\"claim\":\"...\",\"sentenceId\":1}]}\n")
             append("Provide 4 to 6 points.")
         }
         val key = "co-${sha256("$bookId|$chapterId|$repairNote|$user".toByteArray(Charsets.UTF_8)).take(16)}"
@@ -1754,7 +1776,17 @@ class PracticeGradeAndDiagnoseService(
         val raw = (obj?.get("points") as? JsonArray).orEmpty().mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             fun s(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
-            ChapterOpenRawPoint(id = s("id"), claim = s("claim"), blockId = s("blockId"), quoteAnchor = s("quoteAnchor"))
+            val sentence = if ("sentenceId" in o) {
+                val number = s("sentenceId").toIntOrNull() ?: return@mapNotNull null
+                sentences.getOrNull(number - 1) ?: return@mapNotNull null
+            } else null
+            if (sentence == null) {
+                ChapterOpenRawPoint(s("id"), s("claim"), s("blockId"), s("quoteAnchor"))
+            } else {
+                val prefix = sentence.text.take(40).trimEnd()
+                val anchor = if (prefix.last().isHighSurrogate()) prefix.dropLast(1) else prefix
+                ChapterOpenRawPoint(s("id"), s("claim"), sentence.block.id, anchor, sentence.offset)
+            }
         }
         return ChapterOpenPack(stem = stem, points = ChapterOpenGate.acceptPoints(raw, blocks))
     }
@@ -1769,8 +1801,8 @@ private const val CHAPTER_OPEN_SYSTEM: String = """
 You write one open question for a chapter the student has just read.
 Rules:
 1. One question that asks the student to explain the chapter in their own words.
-2. Four to six scoring points. Each point's claim is what a good answer would say, written freshly, at most 160 characters. Do not paste 12 or more consecutive Chinese characters, or 8 or more consecutive English words, from any block into a claim.
-3. Each point cites one blockId and a quoteAnchor of 4 to 40 characters copied exactly from that block, used only as a location.
+2. Four to six scoring points. Write each claim as a short factual statement a student could make, rather than an instruction to explain something. Use fresh wording, at most 160 characters. Do not paste 12 or more consecutive Chinese characters, or 8 or more consecutive English words, from any block into a claim.
+3. Cite the numbered source sentence supporting each claim using its integer sentenceId.
 4. Do not write a model answer, and do not include a rewrite field.
 Output one JSON object only.
 """

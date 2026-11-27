@@ -67,6 +67,29 @@ internal object ChapterOpenJson {
         return ChapterOpenQuestion(stem, points)
     }
 
+    // Earlier saved questions have block-relative offsets. Verify against the actual page
+    // before using a range, including pages whose extracted line endings are CRLF.
+    fun ChapterOpenQuestion.withPageOffsets(blocks: List<SourceBlock>, pageText: (Int) -> String?): ChapterOpenQuestion =
+        copy(points = points.map { point ->
+            val page = pageText(point.page) ?: return@map point
+            val block = blocks.firstOrNull { it.id == point.blockId && it.page == point.page } ?: return@map point
+            if (point.startUtf16 >= block.start && point.endUtf16 - point.startUtf16 == point.quoteAnchor.length &&
+                page.startsWith(point.quoteAnchor, point.startUtf16)
+            ) return@map point
+            val local = block.text.indexOf(point.quoteAnchor)
+            if (local < 0 || block.start !in page.indices) return@map point
+            val offset = block.start + local
+            val range = if (page.startsWith(point.quoteAnchor, offset)) {
+                offset until offset + point.quoteAnchor.length
+            } else {
+                val pattern = point.quoteAnchor.split(Regex("""\s+""")).joinToString("""\s+""") { Regex.escape(it) }
+                val found = Regex(pattern).find(page, block.start) ?: return@map point
+                if (found.range.first > block.end + block.text.count { it == '\n' }) return@map point
+                found.range
+            }
+            point.copy(startUtf16 = range.first, endUtf16 = range.last + 1, quoteAnchor = page.substring(range))
+        })
+
     fun encodeQuestion(question: ChapterOpenQuestion): String = buildJsonObject {
         put("stem", question.stem)
         put("points", buildJsonArray {
@@ -133,25 +156,33 @@ internal object ChapterOpenJson {
     fun missedIds(attempt: ChapterOpenAttempt?): List<String> =
         attempt?.items?.filter { it.verdict != "FULL" && it.verdict != "PARTIAL" }?.map { it.id }.orEmpty()
 
-    fun buildGenerateRequest(bookId: String, chapterId: String, blocks: List<SourceBlock>): JsonObject {
-        var remaining = 8_000
-        val chosen = ArrayList<SourceBlock>()
-        for (block in blocks) {
-            if (block.heading || block.text.isBlank() || remaining <= 0) continue
-            if (chosen.size >= 12) break
-            chosen += block
-            remaining -= block.text.length.coerceAtMost(900)
+    fun buildGenerateRequest(
+        bookId: String,
+        chapterId: String,
+        blocks: List<SourceBlock>,
+        pageText: (Int) -> String?,
+    ): JsonObject {
+        val prose = blocks.filter { !it.heading && it.text.isNotBlank() }
+        val count = minOf(12, prose.size)
+        val chosen = if (count == prose.size) prose else List(count) { index ->
+            prose[(index.toLong() * prose.lastIndex / (count - 1)).toInt()]
         }
+        val limit = minOf(900, 8_000 / count.coerceAtLeast(1))
         return buildJsonObject {
             put("bookId", bookId)
             put("chapterId", chapterId)
             put("blocks", buildJsonArray {
                 chosen.forEach { block ->
+                    val page = pageText(block.page) ?: return@forEach
+                    val end = minOf(block.end, page.length)
+                    if (block.start !in 0 until end) return@forEach
+                    val excerpt = page.substring(block.start, block.start + minOf(limit, end - block.start))
+                        .dropLastWhile { it.isHighSurrogate() }
                     add(buildJsonObject {
                         put("id", block.id)
                         put("page", block.page)
-                        put("text", block.text.take(900))
                         put("startUtf16", block.start)
+                        put("text", excerpt)
                     })
                 }
             })
@@ -164,11 +195,14 @@ internal object ChapterOpenJson {
         question: ChapterOpenQuestion,
         answer: String,
         retryIds: List<String>,
-        blocks: List<SourceBlock>,
+        pageText: (Int) -> String?,
     ): JsonObject {
         val wanted = retryIds.toSet()
         val points = if (wanted.isEmpty()) question.points else question.points.filter { it.id in wanted }
-        val pages = points.map { it.page }.toSet()
+        val sentences = points.associateWith { point ->
+            val page = pageText(point.page).orEmpty()
+            ChapterOpenGate.sentenceAround(page, point.quoteAnchor, point.startUtf16)
+        }
         return buildJsonObject {
             put("mode", "CHAPTER_OPEN")
             put("bookId", bookId)
@@ -182,9 +216,7 @@ internal object ChapterOpenJson {
             }
             put("rubricCriteria", buildJsonArray {
                 points.forEach { point ->
-                    val host = blocks.firstOrNull { it.id == point.blockId && point.quoteAnchor in it.text }
-                        ?: blocks.firstOrNull { !it.heading && point.quoteAnchor in it.text }
-                    val sentence = host?.let { ChapterOpenGate.sentenceAround(it.text, point.quoteAnchor) }.orEmpty()
+                    val sentence = sentences.getValue(point)
                     add(buildJsonObject {
                         put("cid", point.id)
                         put("slotLabel", point.claim)
@@ -196,16 +228,13 @@ internal object ChapterOpenJson {
                 }
             })
             put("sourcePages", buildJsonArray {
-                blocks.filter { it.page in pages && !it.heading && it.text.isNotBlank() }
-                    .distinctBy { it.id }
-                    .take(12)
-                    .forEach { block ->
-                        add(buildJsonObject {
-                            put("pdfPage", block.page)
-                            put("text", block.text.take(1_200))
-                            put("authorityRank", 1)
-                        })
-                    }
+                sentences.forEach { (point, sentence) ->
+                    if (sentence.isNotBlank()) add(buildJsonObject {
+                        put("pdfPage", point.page)
+                        put("text", sentence)
+                        put("authorityRank", 1)
+                    })
+                }
             })
         }
     }

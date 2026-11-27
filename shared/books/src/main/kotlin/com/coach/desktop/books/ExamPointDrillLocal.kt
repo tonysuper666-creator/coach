@@ -46,6 +46,7 @@ internal data class ExamPointDrill(
     val emptyReason: String?,
     val generatorModel: String = "",
     val checkerModel: String = "",
+    val generationVersion: Int = 1,
 )
 
 internal data class ExamPointDrillReport(
@@ -92,6 +93,8 @@ internal object ExamPointDrillLocal {
         if (!point.packSourcesHash.isNullOrBlank() && pack.generatedFromHash.isNotBlank() &&
             pack.generatedFromHash != point.packSourcesHash
         ) return false
+        // Re-run old zero-choice batches once with the bounded context and format repair.
+        if (drill.generationVersion < 2 && drill.choices.isEmpty() && drill.essay == null) return false
         return drill.choices.isNotEmpty() || !drill.emptyReason.isNullOrBlank() || drill.checked > 0 || drill.discards.isNotEmpty()
     }
 
@@ -185,6 +188,7 @@ internal object ExamPointDrillLocal {
     }
 
     fun encode(drill: ExamPointDrill): JsonObject = buildJsonObject {
+        put("generationVersion", drill.generationVersion)
         put("choices", buildJsonArray {
             for (choice in drill.choices) {
                 add(buildJsonObject {
@@ -276,6 +280,7 @@ internal object ExamPointDrillLocal {
             emptyReason = (body["emptyReason"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
             generatorModel = body.str("generatorModel"),
             checkerModel = body.str("checkerModel"),
+            generationVersion = body.int("generationVersion").coerceAtLeast(1),
         )
     }
 

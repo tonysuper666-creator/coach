@@ -606,7 +606,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         postCourseEndpoint("v1/library/course/topic-pack", input, timeoutMs = 180_000L, timeoutMsg = "专题合卷超时，请稍后重试。")
 
     suspend fun examPointDrill(input: JsonObject): MockReply =
-        postCourseEndpoint("v1/library/course/exam-point-drill", input, timeoutMs = 900_000L, timeoutMsg = "考点出题等待超时，已保留原来的题。")
+        postCourseEndpoint("v1/library/course/exam-point-drill", input, timeoutMs = 900_000L, timeoutMsg = "考点出题等待超时，已保留原来的题。", busyRetry = true)
 
     suspend fun courseVision(input: JsonObject): MockReply =
         postCourseEndpoint("v1/library/course/vision", input, timeoutMs = 180_000L, timeoutMsg = "视觉识别等待超时，请稍后重试。")

@@ -254,6 +254,36 @@ class ExamPointDrillTest {
     }
 
     @Test
+    fun malformedChoiceOnlyBatchIsRegeneratedOnceAndBlindChecked() = runBlocking {
+        val keys = listOf("c1" to "A", "c2" to "B", "c3" to "C", "c4" to "D", "c5" to "A")
+        val gen = script(haiku) { call -> if (call == 1) """{"choices":[""" else choicesJson(keys) }
+        val check = script(gpt) { votes(keys) }
+        val body = ExamPointDrillPipeline(gen, check).generate(input(choiceOnly = true))
+        assertEquals(2, gen.keys.distinct().size)
+        assertEquals(5, body.arr("choices").size)
+        assertEquals(5, body.int("agreed"))
+    }
+
+    @Test
+    fun longMultibyteBooksFitBothBridgeRequestsAndKeepOriginalCitationOffsets() = runBlocking {
+        val filler = "旁边还有别的章节内容。".repeat(500)
+        val text = "$filler\n$quote"
+        val blocks = buildJsonArray {
+            for (page in 1..24) add(block("tb", "CORE_TEXTBOOK", if (page == 24) text else filler, "Textbook", page))
+        }
+        val gen = script(haiku) { choicesJson(listOf("c1" to "A")) }
+        val check = script(gpt) { votes(listOf("c1" to "A")) }
+        val body = ExamPointDrillPipeline(gen, check).generate(input(choiceOnly = true, blocks = blocks))
+        for (transport in listOf(gen, check)) {
+            val bytes = (transport.systems.single() + transport.prompts.single()).toByteArray().size
+            assertTrue(bytes + 4096 < 90_000)
+        }
+        val citation = option(body, 0, 0).obj("citation")
+        assertEquals(24, citation.int("page"))
+        assertEquals(text.indexOf(quote), citation.int("startUtf16"))
+    }
+
+    @Test
     fun fencedJsonStillParses() = runBlocking {
         val gen = script(haiku) { "```json\n${choicesJson(listOf("c1" to "A", "c2" to "B", "c3" to "C"))}\n```" }
         val check = script(gpt) { votes(listOf("c1" to "A", "c2" to "B", "c3" to "C")) }

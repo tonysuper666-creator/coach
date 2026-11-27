@@ -1,6 +1,7 @@
 package com.coach.server
 
 import com.coach.ai.BridgeClient
+import com.coach.store.sha256
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -75,6 +76,7 @@ data class ExamPointAdmission(
     val checkerModel: String,
 ) {
     fun toJson(): JsonObject = buildJsonObject {
+        put("generationVersion", 2)
         put("choices", choices)
         if (essay != null) put("essay", essay) else put("essay", kotlinx.serialization.json.JsonNull)
         put("missingChoices", missingChoices)
@@ -403,7 +405,7 @@ object ExamPointDrillGate {
             ChoiceDraft(
                 id = obj.str("id").ifBlank { "c${index + 1}" },
                 stem = obj.str("stem").trim(),
-                options = options,
+                options = options.sortedBy { it.letter },
             )
         }.take(ExamPointDrillLimits.MAX_CHOICES)
     }
@@ -846,18 +848,20 @@ class ExamPointDrillPipeline(
             .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
         val essayWanted = ExamPointDrillGate.essayEligible(input.str("examFormat"), techniques)
         val blocks = readBlocks(input)
-        val (kept, emptyReason) = ExamPointDrillGate.prepare(blocks)
-        if (kept.isEmpty()) {
+        val (prepared, emptyReason) = ExamPointDrillGate.prepare(blocks)
+        if (prepared.isEmpty()) {
             return ExamPointDrillGate.emptyAdmission(
                 ExamPointDrillLimits.MIN_CHOICES, essayWanted, emptyMap(), 0, 0, emptyReason, "", "",
             ).toJson()
         }
-        val scope = input.str("sourcesHash").ifBlank {
-            kept.joinToString("|") { "${it.bookId}:${it.page}:${it.startUtf16}:${it.text.hashCode()}" }
-        }.take(80)
+        val kept = selectEvidence(topicTitle, prepared)
+        val system = generatorSystem(essayWanted)
+        val prompt = sourcePrompt(topicTitle, kept, essayWanted)
+        // Durable batches cache their result by key, even after a prompt or exam format changes.
+        val scope = sha256("$system\u0000$prompt".toByteArray(Charsets.UTF_8))
         val first = generator.generateSection(
-            systemPrompt = generatorSystem(essayWanted),
-            userPrompt = sourcePrompt(topicTitle, kept, essayWanted),
+            systemPrompt = system,
+            userPrompt = prompt,
             task = "exam_point_drill",
             batchKey = "drill-gen-$topicId-$scope",
             maxTokens = ExamPointDrillLimits.MAX_TOKENS,
@@ -884,10 +888,16 @@ class ExamPointDrillPipeline(
         val failedIds = failedReasons.keys.toList()
         val essayNeedsRewrite = essayWanted &&
             ExamPointDrillGate.localEssayFailure(essay, indexes.byPage, indexes.byBook, textbookIds, sourceTexts) != null
-        if (failedIds.isNotEmpty() || essayNeedsRewrite) {
+        val choiceRows = firstJson["choices"] as? JsonArray
+        val malformedBatch = choiceRows == null || (choiceRows.isNotEmpty() && drafts.isEmpty())
+        if (failedIds.isNotEmpty() || essayNeedsRewrite || malformedBatch) {
             val repair = generator.generateSection(
                 systemPrompt = generatorSystem(essayWanted),
-                userPrompt = repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite, failedReasons),
+                userPrompt = if (malformedBatch) {
+                    "$prompt\n上一份单选题格式不完整，请重新输出包含 choices 数组的完整 JSON 对象。"
+                } else {
+                    repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite, failedReasons)
+                },
                 task = "exam_point_drill",
                 batchKey = "drill-repair-$topicId-$scope",
                 maxTokens = ExamPointDrillLimits.MAX_TOKENS,
@@ -1004,15 +1014,14 @@ class ExamPointDrillPipeline(
     private fun generatorSystem(essayWanted: Boolean) = """
         你在为备考写教学题。题干考理解，不考原句复述，不得连续摘抄材料里 8 个英文词或 12 个汉字。
         语言要求：所有题干（stem）、选项（text）、理由（reason）以及论述提纲（thesis、claim）一律使用简体中文书写；专业术语、缩写和公式可在中文句子中保留英文原词；原句引用（citation.quote）必须保持材料原文语言逐字摘抄，不得翻译。
-        每道题必须直接考查 topicTitle（当前考点本身），严禁拿同页出现的其他概念或定义凑数。如果材料里关于当前考点本身的实质内容不足，宁可少写（如写 3 道，或确实无内容时返回空数组 []），也不要偏题。
-        写 3 到 5 道单选题，各题必须考查当前考点的不同角度（例如：核心机制、适用前提/边界、与相近概念区分、实证含义、情境应用），禁止多道题重复考同一个定义。
+        用中文写 5 道围绕 topicTitle 的单选题，各题从机制、边界、概念区分或情境应用等不同角度提问。材料只够支撑较少题目时可少写，确实无依据时返回 {"choices":[],"essay":null}。不要考同页无关概念、重复考同一定义或凑数。
         严禁出「哪一节/哪一章/第几页讲 X」这类目录定位题；严禁把章末习题、判断题（True/False/Unclear）的待判陈述或分析题题设当作教材结论出处。
         每题恰好 4 个选项，字母固定为 A、B、C、D，恰好一个 correct 为 true。
-        每个选项（包括正确项和 3 个错项）都要写一句忠实于原文的对错理由 reason，不能凭空加入原文没提到的判断或概念；并给 citation：bookId、page、startUtf16、endUtf16、quote。quote 必须是材料里能直接支撑该条 reason 的完整连续原句或子句（不要只摘一两个词）。
+        每个选项都写一句有据可查的对错理由 reason。citation 填 bookId、page、quote，连续抄录直接支持理由的原文子句，保留原文语言。字符位置由服务端核准。
         材料里有 CORE_TEXTBOOK 时，引用只能来自教材，不能引用课件或讲义。
         不要使用往年题，不要输出材料里没有的页码。
         ${if (essayWanted) "另外写一份论述提纲：thesis，2 到 6 个 paragraphs，每段 claim 紧扣当前考点并挂一处完整教材原句。论点用自己的话，不要照抄原文。" else "不要写论述提纲，essay 设为 null。"}
-        只输出 JSON：{"choices":[{"id":"c1","stem":"...","options":[{"letter":"A","text":"...","correct":false,"reason":"...","citation":{"bookId":"...","page":1,"startUtf16":0,"endUtf16":1,"quote":"..."}}]}],"essay":null}
+        只输出 JSON：{"choices":[{"id":"c1","stem":"...","options":[{"letter":"A","text":"...","correct":false,"reason":"...","citation":{"bookId":"...","page":1,"quote":"..."}}]}],"essay":null}
     """.trimIndent()
 
     private fun sourcePrompt(topicTitle: String, blocks: List<CourseMaterialTextBlock>, essayWanted: Boolean) = buildJsonObject {
@@ -1039,19 +1048,35 @@ class ExamPointDrillPipeline(
         put("materials", materialsJson(blocks))
     }.toString()
 
-    private fun materialsJson(blocks: List<CourseMaterialTextBlock>) = buildJsonArray {
-        for (block in blocks) {
-            add(buildJsonObject {
-                put("blockId", block.blockId)
-                put("bookId", block.bookId)
-                put("bookTitle", block.bookTitle)
-                put("role", block.role)
-                put("page", block.page)
-                put("startUtf16", block.startUtf16)
-                put("text", block.text)
-            })
+    // The bridge counts serialized UTF-8 bytes for both the Haiku batch and the GPT check.
+    // Leave room within its 90 kB bound for instructions, the blind paper and the reservation.
+    private fun selectEvidence(topic: String, blocks: List<CourseMaterialTextBlock>): List<CourseMaterialTextBlock> {
+        var remaining = 32_000
+        val matches = Regex(Regex.escape(topic), RegexOption.IGNORE_CASE)
+        val ranked = blocks.sortedWith(compareBy<CourseMaterialTextBlock> { it.role != "CORE_TEXTBOOK" }
+            .thenByDescending { matches.findAll(it.text).take(10).count() })
+        return buildList {
+            for (block in ranked) {
+                val hit = block.text.indexOf(topic, ignoreCase = true)
+                val start = (hit - 600).coerceIn(0, (block.text.length - 3200).coerceAtLeast(0))
+                val excerpt = block.copy(startUtf16 = block.startUtf16 + start, text = block.text.drop(start).take(3200))
+                val bytes = materialJson(excerpt).toString().toByteArray(Charsets.UTF_8).size + 1
+                if (bytes <= remaining) {
+                    add(excerpt)
+                    remaining -= bytes
+                }
+            }
         }
     }
+
+    private fun materialJson(block: CourseMaterialTextBlock) = buildJsonObject {
+        put("bookId", block.bookId)
+        put("role", block.role)
+        put("page", block.page)
+        put("text", block.text)
+    }
+
+    private fun materialsJson(blocks: List<CourseMaterialTextBlock>) = JsonArray(blocks.map(::materialJson))
 
     private fun readBlocks(input: JsonObject): List<CourseMaterialTextBlock> =
         (input["blocks"] as? JsonArray).orEmpty().mapNotNull { el ->

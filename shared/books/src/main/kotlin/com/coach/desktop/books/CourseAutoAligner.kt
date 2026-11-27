@@ -1034,15 +1034,19 @@ internal object CourseAutoAligner {
 
         val blocks = buildJsonArray {
             for ((src, pageNum, text) in selected) {
+                val hit = if (topic.weekLabel == CourseExamPoints.LABEL && text.length > 4500) {
+                    text.indexOf(topic.title, ignoreCase = true)
+                } else 0
+                val start = (hit - 900).coerceIn(0, (text.length - 4500).coerceAtLeast(0))
                 add(buildJsonObject {
-                    put("blockId", "${src.bookId}:p$pageNum:0")
+                    put("blockId", "${src.bookId}:p$pageNum:$start")
                     put("bookId", src.bookId)
                     put("bookTitle", src.bookTitle)
                     put("role", src.role.wire)
                     put("authorityRank", src.authorityRank)
                     put("page", pageNum)
-                    put("startUtf16", 0)
-                    put("text", text.take(4500))
+                    put("startUtf16", start)
+                    put("text", text.drop(start).take(4500))
                 })
             }
         }

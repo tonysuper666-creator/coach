@@ -66,6 +66,17 @@ class FreeGrantExhaustionTest {
         busy { HaikuStudyModeBatchTransport(bridge).complete("BOOK_MAP_BATCH_CHUNK", "k", "s", "u", 1024, false, null, null) }
     }
 
+    @Test fun examDrillWriterAndCheckerForwardTemporaryCapacityAndQuotaSeparately() = StubTutor().use { stub ->
+        val bridge = BridgeClient(BridgeConfig(baseUrl = stub.baseUrl))
+        for (task in listOf("exam_point_drill", "exam_point_check")) {
+            val transport = HaikuPinnedBridgeTransport(bridge, backgroundBatch = task == "exam_point_drill")
+            stub.failedCompletion("reservations_busy", retryAfterSec = 5)
+            busy { runBlocking { transport.generateSection("s", "u", task, "k", 512) } }
+            stub.failedCompletion(FREE_GRANT_EXHAUSTED)
+            exhausted { runBlocking { transport.generateSection("s", "u", task, "k", 512) } }
+        }
+    }
+
     @Test fun fallbackWrappersAndOptionalCallsNeverSwallowTheExhaustedGrant() {
         val refusing = object : BatchAiTransport {
             override suspend fun generateSection(systemPrompt: String, userPrompt: String, task: String, batchKey: String, maxTokens: Int): BatchTransportReply =

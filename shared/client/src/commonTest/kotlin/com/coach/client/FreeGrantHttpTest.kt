@@ -28,6 +28,7 @@ class FreeGrantHttpTest {
             client(friend).explainLibrary(buildJsonObject { }),
             client(friend).companionChapter(buildJsonObject { }),
             client(friend).gradeAndDiagnosePractice(buildJsonObject { }),
+            client(friend).examPointDrill(buildJsonObject { }),
             client(friend).askCollection(buildJsonObject { }),
             // Owner routes send the sentence without a friend code.
             client("""{"error":"这个月的免费额度用完了"}""").askCollection(buildJsonObject { }),
@@ -65,6 +66,7 @@ class FreeGrantHttpTest {
             busyClient(HttpStatusCode.ServiceUnavailable, busy, ContentType.Application.Json).streamStudyModePack("bk-1", "EXAM_FOCUS", buildJsonObject { }),
             busyClient(HttpStatusCode.OK, "event: error\ndata: $busy\n\n", ContentType.Text.EventStream).streamStudyModePack("bk-1", "EXAM_FOCUS", buildJsonObject { }),
             busyClient(HttpStatusCode.ServiceUnavailable, busy, ContentType.Application.Json).fetchBookMapBatch("bk-1", buildJsonObject { }),
+            busyClient(HttpStatusCode.ServiceUnavailable, busy, ContentType.Application.Json).examPointDrill(buildJsonObject { }),
         )
         for (reply in replies) {
             assertEquals(SERVICE_BUSY_CODE, reply.code)

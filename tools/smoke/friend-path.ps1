@@ -1,10 +1,13 @@
 ﻿# 朋友路径七步冒烟（winbox 真窗口）。一条命令：
 #   powershell -File tools\smoke\friend-path.ps1 [-Url http://<mac>:<隔离端口>] [-PairCode 123456]
+# 对安装版加 -InstalledExe <LearningCoach.exe>，用独立本地目录启动，不编译源码。
 # 输出 N/7，每步一张截图在 D:\agent\evidence\friend-path\<时间>\（含教材原文，只留在 winbox，不上传）。
 param(
     [string]$Url = '', [string]$PairCode = '', [string]$ClientSeed = '', [string]$Selection = '', [switch]$KeepGoing, [int]$LessonNumber = 113, [int]$LessonPage = 150, [int]$StopAfter = 7,
     [switch]$Background,
     [string]$Runtime = '',
+    [string]$InstalledExe = '',
+    [string]$BookTitle = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [string]$Book = 'D:\agent\friend-path-books\health-economics.pdf',   # 健康经济学教材，不进 Git
     [string]$Evidence = 'D:\agent\evidence\friend-path',
@@ -13,6 +16,8 @@ param(
     [int]$TimeoutSec = 1500
 )
 $ErrorActionPreference = 'Stop'
+if ($InstalledExe -and ($Runtime -or $Background)) { throw '-InstalledExe requires the foreground installed client' }
+if ($InstalledExe) { $InstalledExe = (Resolve-Path -LiteralPath $InstalledExe).Path }
 if (-not $PSBoundParameters.ContainsKey('TimeoutSec')) { $TimeoutSec = 600 + $BuildTimeoutSec }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $out = Join-Path $Evidence ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -24,6 +29,8 @@ if ($KeepGoing) { $args2 += ' -KeepGoing' }
 $args2 += " -LessonNumber $LessonNumber -LessonPage $LessonPage -StopAfter $StopAfter"
 if ($Background) { $args2 += ' -Background' }
 if ($Runtime) { $args2 += " -Runtime '$($Runtime.Replace("'", "''"))'" }
+if ($InstalledExe) { $args2 += " -InstalledExe '$($InstalledExe.Replace("'", "''"))'" }
+if ($BookTitle) { $args2 += " -BookTitle '$($BookTitle.Replace("'", "''"))'" }
 if ($Marker) { $args2 += " -Marker '$Marker'" }
 if ($ClientSeed) { $args2 += " -ClientSeed '$ClientSeed'" }
 if ($Selection) { $args2 += " -Selection '$Selection'" }

@@ -10,6 +10,8 @@ param(
     [string]$Selection = '',                    # private JSON {selection, blocks[id=<sha>:p<page>:0]}; stays on winbox
     [switch]$Background,
     [string]$Runtime = '',
+    [string]$InstalledExe = '',
+    [string]$BookTitle = '',
     [ValidatePattern('^[\p{L}\p{N}_-]{1,32}$')][string]$Marker = '',
     [int]$StartTimeoutSec = 150,
     [int]$BuildTimeoutSec = 900,
@@ -21,6 +23,8 @@ param(
     [switch]$KeepGoing                          # 某步失败后仍尝试后面不依赖它的步骤（默认停在第一个失败）
 )
 $ErrorActionPreference = 'Stop'
+if ($InstalledExe -and ($Runtime -or $Background)) { throw '-InstalledExe requires the foreground installed client' }
+if (-not $BookTitle) { $BookTitle = [IO.Path]::GetFileNameWithoutExtension($Book) }
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
 . (Join-Path $PSScriptRoot 'Smoke-Memory.ps1')
 . (Join-Path $PSScriptRoot 'Lesson-Range.ps1')
@@ -739,7 +743,53 @@ function Resolve-LectureRefusalAction($lines, [bool]$AlreadyRetried) {
     }
     return [pscustomobject]@{ Action = 'fail'; Reason = $e.Text; Button = $null }
 }
-# 第 2 步：书必须真出现在 2.0 首页上（焦点卡「上次停在第 N / M 页」或书卡「N 页 · 读到第 M 页」）。
+# 首页上同一列、紧挨书名的页码属于该书，书单标题和云端待下载卡都没有本地读到的页码。
+function Normalize-Step2Title([string]$Title) {
+    # Windows OCR 经常把 Health 的小写 l 识成大写 I。
+    return ($Title.ToLowerInvariant() -replace '[il]', 'l' -replace '[^\p{L}\p{Nd}]', '')
+}
+function Test-Step2Home($lines) {
+    $settings = Find-Text $lines '设置'
+    # The native title bar also says LearningCoach. Only the in-app header has Settings on the same row.
+    return [bool](Find-OnRow $lines 'LearningCoach' $settings 22)
+}
+function Find-Step2HomeBook($lines, [string]$Title) {
+    if (-not (Test-Step2Home $lines)) { return $null }
+    $titleKey = Normalize-Step2Title $Title
+    if (-not $titleKey) { return $null }
+    $titles = @($lines | Where-Object { (Normalize-Step2Title $_.Text) -eq $titleKey })
+    $progress = @($lines | Where-Object {
+        ($_.Text -replace '\s', '') -match '读到第|上次停在|第[\d一二三四五六七八九十巧OIl]+[页頁贞貞]'
+    })
+    # A focused book can render its title and page in one metadata line. The separate
+    # title is sometimes lost to OCR, so require the matching title prefix and its CTA.
+    foreach ($line in $progress) {
+        $label = ($line.Text -split '[·•．。]', 2)[0]
+        if ((Normalize-Step2Title $label) -ne $titleKey) { continue }
+        $box = Get-LineBox $line
+        $continueButton = Find-OnRow $lines '继续' $box 26
+        if ($continueButton -and $continueButton.X -gt $box.X2) {
+            return [pscustomobject]@{ Text = $line.Text; Click = $continueButton }
+        }
+    }
+    foreach ($titleLine in $titles) {
+        $titleBox = Get-LineBox $titleLine
+        foreach ($line in $progress) {
+            $box = Get-LineBox $line
+            $dy = $box.Y - $titleBox.Y
+            if ($dy -le 0 -or $dy -gt 62 -or [Math]::Abs($box.X1 - $titleBox.X1) -gt 24) { continue }
+            $continueButton = Find-OnRow $lines '继续' $box 46
+            if ($continueButton -and $continueButton.X -gt $box.X2 -and ($line.Text -notmatch '读到第')) {
+                return [pscustomobject]@{ Text = $line.Text; Click = $continueButton }
+            }
+            if ($line.Text -match '读到第') {
+                return [pscustomobject]@{ Text = $line.Text; Click = (Get-LineClick $titleLine) }
+            }
+        }
+    }
+    return $null
+}
+# 第 2 步：目标书必须真出现在首页上。阅读器底栏的页码不能代替这个检查。
 # 阅读器底栏读出页号只证明书导进来了、阅读器开了，不证明首页上有这本书——退回首页那三下都没读到卡片时，
 # 曾经走一条「导入后直接打开在阅读器」的 Pass，等于没验「书上首页」就过了（20:05 评审指出的假绿）。
 function Resolve-Step2HomeVerdict($Row, [string]$ReaderPage) {
@@ -748,9 +798,9 @@ function Resolve-Step2HomeVerdict($Row, [string]$ReaderPage) {
         return [pscustomobject]@{ Fail = $null; Pass = "书在首页上（行：$($Row.Text)），$when" }
     }
     if ($ReaderPage) {
-        return [pscustomobject]@{ Fail = "书导入后确实打开在阅读器（底栏读到第 $ReaderPage 页），但退回首页 3 次都没读到书卡上的「读到第 / 上次停在」——「书上首页」没验成，不能算过（见 2-shelf*.png）"; Pass = $null }
+        return [pscustomobject]@{ Fail = "书导入后确实打开在阅读器（底栏读到第 $ReaderPage 页），但没有在首页确认目标书名和同卡进度（见 2-after-back*.png / 2-shelf-scroll*.png）"; Pass = $null }
     }
-    return [pscustomobject]@{ Fail = '既没读到阅读器底栏页号，也没在首页读到「读到第 / 上次停在」的书卡'; Pass = $null }
+    return [pscustomobject]@{ Fail = '既没读到阅读器底栏页号，也没在首页确认目标书名和同卡进度'; Pass = $null }
 }
 # 阅读器顶栏/底栏的页码在 OCR 里可能被拆成「第 1 5 0 页」，高分屏也常把「页」认成「贞 / 虫」，先去空白再取数。
 function Get-CitePageNumber([string]$CiteText) {
@@ -1001,11 +1051,101 @@ function Send-PageDigits([int]$page) {
     }
 }
 
+function Jump-Step4Page([int]$physPage, [int]$midX, [int]$hoverY, [string]$tag) {
+    # Ctrl+G 打开跳页框。逐位敲，先读回数字，再核对阅读器底栏的物理页。
+    Send-Keys '^g'; Start-Sleep -Milliseconds 900
+    $opened = [bool](Await-Text 4 "$tag-goto" @('前往') 10)
+    if (-not $opened) { Fail 4 "Ctrl+G 没展开跳页框（读不到「前往」，见 4-$tag-goto.png）" }
+    # 一次把「154」送进父状态会丢位（框里只剩 15，回车就跳到目录页）。逐位敲，敲完先认框里的数字。
+    # 认成别的数就整段重敲，最多 3 次；三次都是错的数就不按回车。这一帧没认出数字才提交，交给下面的页码断言。
+    $typedSeen = $null
+    $typedOk = $false
+    foreach ($attempt in 1..3) {
+        Send-Keys '^a'
+        Start-Sleep -Milliseconds 150
+        Send-Keys '{BACKSPACE}'
+        Start-Sleep -Milliseconds 120
+        Send-PageDigits $physPage
+        Start-Sleep -Milliseconds 300
+        $typedLines = Shot 4 $(if ($attempt -eq 1) { "$tag-goto-typed" } else { "$tag-goto-typed$attempt" })
+        $typedSeen = Get-JumpFieldText $typedLines
+        if ($typedSeen -eq "$physPage") { $typedOk = $true; break }
+        if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，整段重敲" }
+        else { Note "跳页框里的数字这一帧没认出来（第 $attempt 次），提交后交给页码断言"; break }
+    }
+    if ($typedSeen -and -not $typedOk) { Fail 4 "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 4-$tag-goto-typed*.png）" }
+    Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
+    $pageNow = $null
+    foreach ($try in 1..6) {
+        Start-Sleep -Seconds 2
+        Hover $midX $hoverY; Start-Sleep -Milliseconds 700
+        $null = Shot 4 "$tag-jumped"
+        $c = Get-HudCounter $script:LastPng
+        if ($c) { $pageNow = "$($c.Cur)" }
+        if ($pageNow -eq "$physPage") { break }
+    }
+    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow，见 4-$tag-jumped.png）" }
+}
+
+function Click-Step2ImportPoint([int]$screenX, [int]$screenY) {
+    $point = New-Object WD+POINT
+    $point.X = $screenX; $point.Y = $screenY
+    [WD]::SetCursorPos($screenX, $screenY) | Out-Null
+    Start-Sleep -Milliseconds 120
+    Assert-OurForeground
+    $pidAtPoint = 0
+    [void][WD]::GetWindowThreadProcessId([WD]::WindowFromPoint($point), [ref]$pidAtPoint)
+    if ($pidAtPoint -ne $script:AppPid) { throw 'Import target does not belong to the smoke client' }
+    [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)
+    try { Start-Sleep -Milliseconds 60 } finally { [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) }
+}
+
+function Open-Step2ImportMenu($lines, [int]$attempt) {
+    $settings = Find-Text $lines '设置'
+    if (-not $settings -or -not (Test-Step2Home $lines)) { return }
+    $dpi = [WD]::GetDpiForWindow($script:Win)
+    $scale = [Math]::Max(1, $dpi / 96.0)
+    # The add control sits just left of Settings. Its popup belongs to a separate
+    # window, so keep the same foreground lease until the item has been clicked.
+    Invoke-ForegroundStep -InjectsInput -Action {
+        $rect = Get-Rect
+        $x = $rect.L + $settings.X - [int](62 * $scale)
+        $y = $rect.T + $settings.Y
+        Click-Step2ImportPoint $x $y
+        Start-Sleep -Milliseconds 550
+        Assert-OurForeground
+        $left = [Math]::Max($rect.L, $x - [int](160 * $scale))
+        $top = $y + [int](15 * $scale)
+        $height = [Math]::Min($rect.B - $top, [int](160 * $scale))
+        if ($height -le 0 -or $left -ge $rect.R) { return }
+        $png = Join-Path $OutDir "2-import-menu$attempt.png"
+        $image = [Drawing.Bitmap]::new(($rect.R - $left), $height)
+        try {
+            $graphics = [Drawing.Graphics]::FromImage($image)
+            try { $graphics.CopyFromScreen($left, $top, 0, 0, $image.Size) } finally { $graphics.Dispose() }
+            $image.Save($png, [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $image.Dispose() }
+        $menu = @(Read-Screen $png)
+        $item = Find-Text $menu '导入文件'
+        if ($item -and (Find-Text $menu '新建书单')) { Click-Step2ImportPoint ($left + $item.X) ($top + $item.Y) }
+    }
+}
+
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'; $incidents = Join-Path $OutDir 'incidents'
 New-Item -ItemType Directory -Force $lib, $client, $incidents | Out-Null
 $env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_INCIDENT_DIR = $incidents; $env:COACH_TOKEN_FILE = (Join-Path $OutDir 'unused-token')
 $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
+if ($InstalledExe) {
+    $InstalledExe = (Resolve-Path -LiteralPath $InstalledExe).Path
+    if ([IO.Path]::GetFileName($InstalledExe) -ne 'LearningCoach.exe' -or -not (Test-Path -LiteralPath $InstalledExe -PathType Leaf)) {
+        throw '-InstalledExe must point to an installed LearningCoach.exe file'
+    }
+    $env:COACH_COURSE = $null
+    $isolatedJavaHome = Join-Path $OutDir 'java-home'
+    New-Item -ItemType Directory -Force -Path $isolatedJavaHome | Out-Null
+    $env:JAVA_TOOL_OPTIONS = "-Duser.home=`"$isolatedJavaHome`""
+}
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
 $script:RepoMarker = $Repo
@@ -1083,7 +1223,7 @@ $memoryLease = Enter-SmokeMemory
 try {
 if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $buildResult = $null
-if (-not $Runtime) {
+if (-not $Runtime -and -not $InstalledExe) {
     Note '构建开始：gradlew :desktopApp:classes'
     $buildResult = Invoke-FriendBuild -BuildRepo $Repo -BuildOutDir $OutDir -IsBackground ([bool]$Background) -TimeoutSec $BuildTimeoutSec
     if ($buildResult.TimedOut) {
@@ -1139,7 +1279,14 @@ $gradle = $null
 $gradleStartTicks = 0L
 $launchSw = $null
 if (-not $buildResult -or $buildResult.ExitCode -eq 0) {
-    if ($Runtime) {
+    if ($InstalledExe) {
+        $launchSw = [Diagnostics.Stopwatch]::StartNew()
+        $gradle = Start-Process -FilePath $InstalledExe -WorkingDirectory (Split-Path -Parent $InstalledExe) -PassThru
+        $script:InstalledClientPid = $gradle.Id
+        $script:InstalledClientStartTicks = Get-TrackedProcessStartTicks $gradle
+        $script:InstalledClientPath = $InstalledExe
+        Note "启动安装版 LearningCoach（$((Get-Item -LiteralPath $InstalledExe).VersionInfo.FileVersion)）"
+    } elseif ($Runtime) {
         $Runtime = (Resolve-Path -LiteralPath $Runtime).Path
         $revision = (& git -C $Repo rev-parse HEAD).Trim()
         if ($LASTEXITCODE -ne 0 -or (Get-Content (Join-Path $Runtime 'revision.txt') -Raw).Trim() -ne $revision) { throw 'Runtime source revision differs from checkout' }
@@ -1175,7 +1322,7 @@ try {
     # + 三张路线卡（为一门课备考 / 单读一本书 / 读一组书）；库里有书时首屏是焦点卡
     # （封面、书名、「上次停在第 N / M 页」、「继续」）。1.1.1 的书架行和侧栏都没有了，
     # 这两种首页都算窗口起来了，认任何一句结构性文字即可。
-    $m = Await-Text 1 'start' @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第') 30
+    $m = Await-Text 1 'start' @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库') 30
     if (-not $m) {
         # 服务端拒过一次（配对被吊销 / 401）以后客户端会退回登录页：那一帧是「登录 LearningCoach /
         # Sable 账号登录 / 没有 sable 账号？用配对码」，首页的一个锚点都没有。这不是首页认错了，
@@ -1185,7 +1332,7 @@ try {
         }
         Fail 1 '窗口出来了，但 30 秒内没读出 2.0 首页（导入文件 / 单读一本书 / 为一门课备考）'
     }
-    if ($launchSw) { Note ("起窗完成：编译结束后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
+    if ($launchSw) { Note ("起窗完成：启动后 {0:N2} 秒" -f $launchSw.Elapsed.TotalSeconds) }
     Pass 1 '客户端窗口出现，2.0 首页可见'
 
     # ② 导入一本书
@@ -1193,15 +1340,19 @@ try {
     # 「导入文件 · <可读格式>」，所以按钮和框都认「导入文件」这个前缀。
     # 只认原生选书框弹出来：四路同时开框时这一下可能在交锁后 3 ms 被别路抢前台吞掉（11-21 04:26 L4），
     # 框根本没开，Choose-File 干等 20 秒才判失败。没弹框就重定位再点，弹过框以后的失败交给 Choose-File 报。
-    Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero }
+    if ($InstalledExe) {
+        foreach ($attempt in 1..4) {
+            $homeFrame = Shot 2 "import-home$attempt"
+            Open-Step2ImportMenu $homeFrame $attempt
+            Start-Sleep -Milliseconds 850
+            if ((Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero) { break }
+        }
+        if ((Find-AppWindowByTitle '导入文件') -eq [IntPtr]::Zero) { Fail 2 '顶栏导入菜单未打开原生选书对话框（见 2-import-home*.png / 2-import-menu*.png）' }
+    } else {
+        Click-Until-Dialog 2 '导入文件' { (Find-AppWindowByTitle '导入文件') -ne [IntPtr]::Zero }
+    }
     if (-not (Choose-File '导入文件' $Book)) { Fail 2 $script:ChooseFileWhy }
-    # 2.0 导入收尾直接把阅读器打开（TextbookController.launchImport 每条收尾都置 screen = READER），
-    # 首页也不再弹「教材已加入书架 / 先读」卡。所以第 2 步分两半认：
-    #   · 书真进来了：阅读器底栏读出页号（导入后就停在这本书的第 1 页）；
-    #   · 书真进了首页：点阅读器左上「← 书架」退回 2.0 首页——焦点卡副标题是「上次停在第 N / M 页」，
-    #     「阅读」组里那张书卡的副标题是「N 页 · 读到第 M 页」；两句都是库里的页码拼出来的结构性文字，
-    #     书名来自 PDF 不用猜，认其中一句就够。
-    # 620 页那本走渐进 OCR（#571），导入期间首页上有进度条，书卡已经落库、点得开。
+    # 导入通常先打开阅读器。还要回首页验证本地书卡，课程和书单可能把它推到首屏以下。
     $r = Get-Rect; $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
     $hoverY = $winH - 10
     # 画布的上缘从客户区算，客户区上面还压着窗口标题栏；指针得真落进画布顶上那条 48dp 带子里
@@ -1217,37 +1368,38 @@ try {
         Hover $midX $hoverY; Start-Sleep -Milliseconds 600
         $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
         $c = Get-HudCounter $script:LastPng
-        if ($c) { $readerPage = $c.Text } else { $shelfHit = Has $lines @('读到第', '上次停在') }
+        if ($c) { $readerPage = $c.Text } else { $shelfHit = Find-Step2HomeBook $lines $BookTitle }
         if (-not $readerPage -and -not $shelfHit) { Start-Sleep -Seconds 2 }
     }
     if (-not $readerPage -and -not $shelfHit) { Fail 2 '选了书但 150 秒内既没进阅读器，书架里也没出现这本书' }
-    # 退回书架认这本书的行：指针贴上缘把顶栏叫出来，返回键在最左边。
-    $row = $null
+    $row = $shelfHit
     if ($readerPage) {
+        $homeFrame = $null
         foreach ($try in 1..3) {
-            Hover $midX $topY; Start-Sleep -Milliseconds 700
-            $null = Shot 2 "back$try"
-            $back = Find-Text $script:Last '书架'
-            if (-not $back) { Note "第 $try 次没读到顶栏的「书架」返回键"; continue }
+            $frame = Shot 2 "before-back$try"
+            if (Test-Step2Home $frame) { $homeFrame = $frame; break }
+            $back = Find-Text (Show-ReaderTop 2 "back$try" 3) '书架'
+            if (-not $back -or $back.X -gt $winW / 3 -or $back.Y -gt 150) { continue }
             Click-At ([int]$back.X) ([int]$back.Y); Start-Sleep -Milliseconds 1200
-            $lines = Shot 2 "shelf$try"
-            foreach ($l in $lines) { if ($l.Text -match '读到第|上次停在') { $row = $l; break } }
-            if ($row) { break }
-            Note "退回后这一帧没读到书行（见 2-shelf$try.png）"
+            $frame = Shot 2 "after-back$try"
+            if (Test-Step2Home $frame) { $homeFrame = $frame; break }
+        }
+        if ($homeFrame) {
+            $row = Find-Step2HomeBook $homeFrame $BookTitle
+            foreach ($scroll in 1..8) {
+                if ($row) { break }
+                Scroll-At $midX ([int]($winH * 0.75)) -2
+                Start-Sleep -Milliseconds 500
+                $row = Find-Step2HomeBook (Shot 2 "shelf-scroll$scroll") $BookTitle
+            }
         }
     }
-    # 导入那一帧直接看到首页时（书没经过阅读器），书行就是那一下读到的「读到第 / 上次停在」。
-    if (-not $row) { $row = $shelfHit }
     $v2 = Resolve-Step2HomeVerdict $row $readerPage
     if ($v2.Fail) { Fail 2 $v2.Fail }
     Pass 2 $v2.Pass
 
     # ③ 翻页
-    # 2.0（#573）首页一条单栏：有书时首屏是焦点卡（封面 + 书名 +「上次停在第 N / M 页」），
-    # 卡里唯一的实底钮是「继续」（testTag home-read → TextbookController.read）；
-    # 再往下「阅读」组里每本书一张 HomeBookCard（整卡可点 → onOpenBook，副标题「N 页 · 读到第 M 页」）。
-    # 1.1.1 的书架行和卡片按钮「开始阅读 / 继续阅读」都没了。
-    # 阅读器是单层满铺画布：底栏平时收起，指针贴到下缘才浮出「‹ 页号 ›」。
+    # 从刚验证过的目标书卡回到阅读器。焦点卡的「继续」也可能指向别的书或书单。
     $page0 = $null
     $deadline = (Get-Date).AddSeconds(150)
     $tries = 0
@@ -1258,20 +1410,10 @@ try {
         $c = Get-HudCounter $script:LastPng
         if (-not $c) { $c = Get-PageCounter $lines $script:LastPng }
         if ($c) { $page0 = $c.Text; break }
-        # 只在首页上才点：阅读器正文里也可能出现「继续」两个字，点正文会把选段带跑。
-        $onHome = Has $lines @('单读一本书', '为一门课备考', '上次停在', '读到第')
-        $go = if ($onHome) { Find-Text $lines '继续' } else { $null }
-        $row = $null
-        foreach ($l in $lines) { if ($l.Text -match '读到第') { $row = $l; break } }
-        if ($go) {
-            $pressed = Click-At ([int]$go.X) ([int]$go.Y); Start-Sleep -Milliseconds 1500
-            Note "第 $tries 次点了首页焦点卡「继续」，按下=$pressed"
-        } elseif ($row) {
-            $rb3 = Get-LineBox $row
-            $pressed = Click-At ([int](($rb3.X1 + $rb3.X2) / 2)) ([int]$rb3.Y); Start-Sleep -Milliseconds 1500
-            Note "第 $tries 次点了书卡（$($row.Text)），按下=$pressed"
-        } else {
-            Note "第 $tries 次既没读到首页「继续」也没看到书卡，先当阅读器在起（见 3-find$tries.png）"
+        $bookCard = Find-Step2HomeBook $lines $BookTitle
+        if ($bookCard) {
+            $pressed = Click-At $bookCard.Click.X $bookCard.Click.Y; Start-Sleep -Milliseconds 1500
+            Note "第 $tries 次点了目标书卡，按下=$pressed"
         }
         Hover $midX $hoverY; Start-Sleep -Milliseconds 700
         $lines = Shot 3 $(if ($tries -eq 1) { 'reader' } else { "reader$tries" })
@@ -1281,7 +1423,7 @@ try {
         # 还在首页说明这一下没生效，把认到的字记进日志，下一轮重定位再来。
         if ($tries -le 3) { Note ('这一帧读到：' + (($lines | ForEach-Object { $_.Text }) -join ' / ')) }
     }
-    if (-not $page0) { Fail 3 '首页点「继续」也没进到阅读器，或底栏读不到页号（见 3-find*.png / 3-reader*.png）' }
+    if (-not $page0) { Fail 3 '首页目标书卡未打开阅读器，或底栏读不到页号（见 3-find*.png / 3-reader*.png）' }
     # 2.0 的翻页键只在阅读区真拿到焦点时才生效，先点正文中间把焦点交给页面，再按 →。
     Click-At $midX $midY; Start-Sleep -Milliseconds 400
     $page1 = $page0
@@ -1311,86 +1453,12 @@ try {
     # 1.1.1（TON-1766）删掉了每段的「讲解这段」：选中文字后浮出的工具条「讲讲」才是这条路径的入口。
     $sel = Get-Content $Selection -Raw -Encoding UTF8 | ConvertFrom-Json
     $physPage = [int]([regex]::Match($sel.blocks[0].id, ':p(\d+):').Groups[1].Value)
-    # 2.0 的跳页框不是常驻的：按 Ctrl+G 直接展开（TextbookReader 的 onPreviewKeyEvent：mod+G → hudVisible + editingJump），
-    # 输入框带 LaunchedEffect requestFocus，敲完数字回车就是 onSubmitJump；不靠 OCR 找「第 N 页 / M」那一行。
-    $r = Get-Rect; $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
-    $midX = [int]($winW / 2); $hoverY = $winH - 10; $topY = 10
-    Send-Keys '^g'; Start-Sleep -Milliseconds 900
-    $opened = [bool](Await-Text 4 'goto' @('前往') 10)
-    if (-not $opened) { Fail 4 'Ctrl+G 没展开跳页框（读不到「前往」，见 4-goto.png）' }
-    # 一次把「154」送进父状态会丢位（框里只剩 15，回车就跳到目录页）。逐位敲，敲完先认框里的数字。
-    # 认成别的数就整段重敲，最多 3 次；三次都是错的数就不按回车。这一帧没认出数字才提交，交给下面的页码断言。
-    $typedSeen = $null
-    $typedOk = $false
-    foreach ($attempt in 1..3) {
-        Send-Keys '^a'
-        Start-Sleep -Milliseconds 150
-        Send-Keys '{BACKSPACE}'
-        Start-Sleep -Milliseconds 120
-        Send-PageDigits $physPage
-        Start-Sleep -Milliseconds 300
-        $typedLines = Shot 4 $(if ($attempt -eq 1) { 'goto-typed' } else { "goto-typed$attempt" })
-        $typedSeen = Get-JumpFieldText $typedLines
-        if ($typedSeen -eq "$physPage") { $typedOk = $true; break }
-        if ($typedSeen) { Note "跳页框读到 $typedSeen，要的是 $physPage，整段重敲" }
-        else { Note "跳页框里的数字这一帧没认出来（第 $attempt 次），提交后交给页码断言"; break }
-    }
-    if ($typedSeen -and -not $typedOk) { Fail 4 "跳页框三次都没敲成 $physPage（最后读到 $typedSeen，见 4-goto-typed*.png）" }
-    Send-Keys '{ENTER}'; Start-Sleep -Seconds 1
-    $pageNow = $null
-    foreach ($try in 1..6) {
-        Start-Sleep -Seconds 2
-        Hover $midX $hoverY; Start-Sleep -Milliseconds 700
-        $null = Shot 4 'jumped'
-        $c = Get-HudCounter $script:LastPng
-        if ($c) { $pageNow = "$($c.Cur)" }
-        if ($pageNow -eq "$physPage") { break }
-    }
-    if ($pageNow -ne "$physPage") { Fail 4 "页码没跳到 $physPage（现在 $pageNow，见 4-jumped*.png）" }
-    # 「原页 / 文字」两段胶囊（ViewModeSwitchPill，testTag view-mode-text/original）：
-    # #599（阅读页外壳）起它不在顶栏上了，收进了顶栏最右边的「⋯」菜单（immersive-more-menu）的第一项；
-    # 旧版客户端还在顶栏上。两处都认：顶栏读到「文字」就直接点，读不到就点「⋯」在菜单里找。
-    # 已经选中「文字」时点它不会切走，所以直接点「文字」是安全的。
-    # 两处都没点成时退到快捷键 V（TextbookReader：非输入状态下 V = switchView(!textView)，是切换不是置位），
-    # 下面找段落时按「找不到就再按一次 V」兜回来。
-    Hover $midX $topY; Start-Sleep -Milliseconds 700
-    $lines = Shot 4 'mode'
-    $txtHit = Has $lines @('文字')
-    $viewBy = ''
-    if ($txtHit) {
-        Click-At ([int]$txtHit.X) ([int]$txtHit.Y); Start-Sleep -Seconds 1
-        $null = Shot 4 'text-mode'
-        $viewBy = 'bar'
-    } else {
-        # 「⋯」是顶栏最后一颗按钮，紧挨「伴读 / 收起」右边；OCR 不一定认得出这个字形，就按「伴读」右侧落点点。
-        $more = Has $lines @('⋯', '…', '...')
-        $comp = Find-ReaderCompanionToggle $lines $winW $winH
-        if (-not $comp) { $comp = Find-Text $lines '收起' }
-        $mx = $null; $my = $null
-        $band = [int]($winH * 0.2)
-        if ($more -and $more.X -gt [int]($winW * 0.7) -and $more.Y -lt $band) { $mx = [int]$more.X; $my = [int]$more.Y }
-        elseif ($comp -and $comp.Y -lt $band) { $mx = [Math]::Min($winW - 14, [int]$comp.X2 + 22); $my = [int]$comp.Y }
-        if ($null -ne $mx) {
-            Click-At $mx $my; Start-Sleep -Milliseconds 900
-            $menu = Shot 4 'more-menu'
-            $txtHit = Has $menu @('文字')
-            if ($txtHit) {
-                Click-At ([int]$txtHit.X) ([int]$txtHit.Y); Start-Sleep -Seconds 1
-                $null = Shot 4 'text-mode'
-                $viewBy = 'menu'
-            } else {
-                Send-Keys '{ESC}'; Start-Sleep -Milliseconds 500
-            }
-        }
-        if (-not $viewBy) {
-            Note '顶栏和「⋯」菜单里都没读到「文字」，按快捷键 V 切文字视图'
-            Hover $midX ([int]($winH * 0.5)); Start-Sleep -Milliseconds 300
-            Send-Keys 'v'; Start-Sleep -Seconds 1
-            $null = Shot 4 'text-mode'
-            $viewBy = 'key'
-        }
-    }
-    Note "步骤4 文字视图切换方式：$viewBy"
+    Jump-Step4Page $physPage $midX $hoverY 'initial'
+    # V 在阅读器内切换原页和文字。避开 OCR 未识别的菜单和会返回首页的 Esc。
+    Hover $midX $hoverY; Start-Sleep -Milliseconds 400
+    Send-Keys 'v'; Start-Sleep -Seconds 1
+    Jump-Step4Page $physPage $midX $hoverY 'after-mode'
+    $null = Shot 4 'text-mode'
     # 文字视图一屏只放得下一页的一部分：这一页开头是页眉，可信选段在这页下半部分，常在下一张纸上。
     $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
     $paraLine = $null; $lines = @()
@@ -1420,10 +1488,12 @@ try {
             }
             $prevFrame = $frame
         }
-        if ($paraLine -or $viewBy -ne 'key') { break }
+        if ($paraLine -or $pass -eq 2) { break }
         # V 是切换：要是按之前本来就在文字视图，上面那一下把它切回了原页，再按一次切回来。
         Note '按 V 后没找到段落，再按一次 V 再找'
         Send-Keys 'v'; Start-Sleep -Seconds 1
+        Jump-Step4Page $physPage $midX $hoverY 'retry-mode'
+        $nextSheets = 0
     }
     if (-not $paraLine) { Fail 4 '文字视图里找不到可信选段所在的段落（见 4-blocks.png）' }
     $box = Get-LineBox $paraLine

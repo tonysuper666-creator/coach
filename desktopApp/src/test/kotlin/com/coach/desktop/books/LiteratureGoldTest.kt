@@ -51,6 +51,30 @@ class LiteratureGoldTest {
         }
     }
 
+    @Test fun noteBandsRejectForcedCitationsAtTheirPageOffsets() {
+        val root = Files.createTempDirectory("literature-note-bands")
+        try {
+            val file = Path.of(checkNotNull(javaClass.getResource("/literature-gold/ocr-bands.pdf")).toURI())
+            val notes = Files.readAllLines(file.resolveSibling("sentences.tsv")).map { it.split('\t', limit = 4) }
+                .filter { it[0] == "ocr-bands" && it[2] == "note" }
+            val library = TextbookLibrary(root)
+            val book = library.literatureBook(library.importBook(file).id)
+            kotlin.test.assertEquals(6, notes.size)
+            for ((_, number, _, quote) in notes) {
+                val page = checkNotNull(book.page(number.toInt()))
+                val region = page.guideRegions.single { quote in it.text }
+                val start = page.text.indexOf(quote)
+                val anchor = BookCompanionAnchor(page.number, "probe", start, start + quote.length, quote)
+                val (_, reason) = LiteratureCitationCheck.check(listOf(GuideExcerpt(book, anchor, region)), 0, book.id) { _, _ ->
+                    error("Note reached OCR")
+                }
+                kotlin.test.assertEquals(LiteraturePassages.FOOTNOTE_REJECTION, reason)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     // Keep punctuation and every word: a truncated or joined body sentence is a miss.
     private fun key(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
         .replace(Regex("""(?<=\p{L})-\s*\n\s*(?=\p{Ll})"""), "")

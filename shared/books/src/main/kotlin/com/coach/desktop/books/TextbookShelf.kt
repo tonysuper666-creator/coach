@@ -137,6 +137,7 @@ internal fun LibraryHome(
     onDismissMultiDrop: () -> Unit = {},
     onRetryUpload: (String) -> Unit = {},
     library: TextbookLibrary? = null,
+    firstOpenGuide: Boolean = false,
 ) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
@@ -194,6 +195,10 @@ internal fun LibraryHome(
                         onOpenBook(id)
                     },
                 )
+            } else if (isEmpty && firstOpenGuide) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    FirstOpenInvite(ui, onImport)
+                }
             } else if (isEmpty) {
                 // 空态首页：居中单栏，唯一主钮「导入文件」+ 3 张可点引导卡（加顶栏 ＋ / 设置，共 6 个零死路入口）。
                 Box(Modifier.fillMaxSize(), contentAlignment = if (showToday) Alignment.TopCenter else Alignment.Center) {

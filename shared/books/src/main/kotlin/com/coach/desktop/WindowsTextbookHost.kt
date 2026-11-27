@@ -92,6 +92,7 @@ internal fun WindowsTextbookHost(
     chooseBooks: (suspend () -> List<Path>)? = null,
     bookExplainer: BookExplainer? = null,
     chooseReviewedBlocks: (suspend () -> List<Path>)? = null,
+    firstOpenGuide: Boolean = false,
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
@@ -166,6 +167,24 @@ internal fun WindowsTextbookHost(
     }
 
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
+    var sawEmptyShelf by remember { mutableStateOf(false) }
+    var tasteActive by remember { mutableStateOf(false) }
+    var tasteDone by remember(controller.library.directory) {
+        mutableStateOf(com.coach.desktop.books.FirstOpenStore.isDone(controller.library.directory))
+    }
+    LaunchedEffect(firstOpenGuide, ui.initialized, isEmptyLibrary, ui.book?.id, ui.screen, tasteDone) {
+        if (!firstOpenGuide || tasteDone) {
+            tasteActive = false
+            return@LaunchedEffect
+        }
+        if (ui.initialized && isEmptyLibrary && ui.book == null) sawEmptyShelf = true
+        tasteActive = sawEmptyShelf && ui.book != null && ui.screen == com.coach.desktop.books.BookScreen.READER
+    }
+    fun finishFirstTaste() {
+        com.coach.desktop.books.FirstOpenStore.markDone(controller.library.directory)
+        tasteDone = true
+        tasteActive = false
+    }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
         ui.screen == BookScreen.COURSE ||
         ui.screen == BookScreen.COURSE_MOCK ||
@@ -291,6 +310,7 @@ internal fun WindowsTextbookHost(
                             onPickBooklistFiles = pickMultiple,
                             explainProvider = hostExplainer,
                             chooseBook = chooseBook,
+                            firstOpenGuide = firstOpenGuide,
                         )
                     }
 
@@ -357,6 +377,17 @@ internal fun WindowsTextbookHost(
                     }
                 }
                 BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
+                val tasteBook = ui.book
+                if (tasteActive && tasteBook != null) {
+                    com.coach.desktop.books.FirstTastePanel(
+                        book = tasteBook,
+                        explainer = hostExplainer,
+                        connectivity = connectivity,
+                        onReadBook = ::finishFirstTaste,
+                        onDone = ::finishFirstTaste,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
 
             if (settings) {

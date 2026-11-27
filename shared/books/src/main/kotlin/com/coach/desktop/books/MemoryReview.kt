@@ -176,7 +176,7 @@ internal object MemoryReview {
             ).use { sql ->
                 sql.setString(1, item.objectId)
                 sql.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
-            }
+            }?.trim()?.takeIf { it.isNotEmpty() && collectionRowExists(db, it) }
             MasteryStore.recordEvidence(
                 db = db,
                 bookId = item.bookId,
@@ -191,6 +191,14 @@ internal object MemoryReview {
                 detailJson = """{"source":"concept_review"}""",
                 nowMs = nowMs,
             )
+        }
+    }
+
+    private fun collectionRowExists(db: Connection, id: String): Boolean {
+        if (!BookSchemaMigration.tableExists(db, "collections")) return false
+        return db.prepareStatement("SELECT 1 FROM collections WHERE id=?").use { sql ->
+            sql.setString(1, id)
+            sql.executeQuery().use { rows -> rows.next() }
         }
     }
 

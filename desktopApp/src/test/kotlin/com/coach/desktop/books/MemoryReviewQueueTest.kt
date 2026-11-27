@@ -94,6 +94,12 @@ class MemoryReviewQueueTest {
             val offset = page.text.indexOf(quote)
             assertTrue(offset >= 0 && quote.length >= 2)
             connect(store).use { db ->
+                db.prepareStatement(
+                    "INSERT INTO collections(id, kind, title, created_at, updated_at) VALUES(?, 'CUSTOM', 'review', 0, 0)",
+                ).use { sql ->
+                    sql.setString(1, "col-live-concept")
+                    sql.executeUpdate()
+                }
                 insertConcept(db, "live-concept", book.id, page.number, offset, "Osmosis", quote)
                 insertNote(db, book.id, "live-note", page.number, offset, quote, "my first note")
             }
@@ -116,8 +122,36 @@ class MemoryReviewQueueTest {
                     }
                 }
                 assertTrue(mastery > 0.15, "mastery was $mastery")
+                assertEquals("col-live-concept", text(db, "SELECT collection_id FROM concept_mastery_ledger WHERE concept_key='live-concept'"))
                 val due = longValue(db, "SELECT due_day FROM book_fsrs_cards WHERE lesson='concept:live-concept'")
                 assertTrue(due > clock.day)
+            }
+            connect(store).use { db ->
+                insertConcept(db, "stale-concept", book.id, page.number, offset, "Osmosis", quote)
+            }
+            val stale = store.reviewQueue().memory.single { it.objectId == "stale-concept" }
+            store.rateMemoryReview(stale, remembered = true, editedNote = null)
+            connect(store).use { db ->
+                val mastery = db.prepareStatement(
+                    "SELECT p_mastery FROM concept_mastery_ledger WHERE concept_key=?",
+                ).use { sql ->
+                    sql.setString(1, "stale-concept")
+                    sql.executeQuery().use { rows ->
+                        assertTrue(rows.next())
+                        rows.getDouble(1)
+                    }
+                }
+                assertTrue(mastery > 0.15, "stale collection mastery was $mastery")
+                val storedCollection = db.prepareStatement(
+                    "SELECT collection_id FROM concept_mastery_ledger WHERE concept_key=?",
+                ).use { sql ->
+                    sql.setString(1, "stale-concept")
+                    sql.executeQuery().use { rows ->
+                        assertTrue(rows.next())
+                        rows.getString(1)
+                    }
+                }
+                assertNull(storedCollection)
             }
             store.rateMemoryReview(note, remembered = true, editedNote = "改过的批注")
             connect(store).use { db ->

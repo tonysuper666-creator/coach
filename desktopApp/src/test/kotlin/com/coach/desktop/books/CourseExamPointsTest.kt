@@ -644,4 +644,106 @@ class CourseExamPointsTest {
             titles,
         )
     }
+
+    @Test
+    fun tableCellLabelsAreRejectedWhileSectionSpanPagesRunningChapterHeadersAndMultiSlideTopicsStay() {
+        // 1. Synthetic table rows ("All care: -0.22", "Dental care Source: ...", "100.0 All medical" near chart ticks)
+        //    must NEVER become exam points.
+        // 2. Real textbook chapter/section titles repeating as running headers ("192 ADVERSE SELECTION")
+        //    and real multi-slide topic titles (3 slides out of 12 in one lecture deck) MUST NOT be suppressed.
+        // 3. Multi-page TOC section spans (e.g. 12.4 spanning p.271..274 where p.272 omits the literal heading)
+        //    and orphan Conclusion pages (p.280 inside Ch 12) must remain attached to exam points,
+        //    while stripped exercise pages (p.281) must NEVER be pulled back in.
+        val textbookPages = listOf(
+            ExamTeachingPage("tb", 50, CourseMaterialRole.CORE_TEXTBOOK, """
+                Table 2.1 Synthetic Elasticity Estimates
+                Dental care Source: Synthetic Panel Survey (1999)
+                All care: -0.22
+                Inpatient: -0.17
+                Outpatient: -0.31
+                Restaurant meals: -2.27 (or -1.6)
+                Fresh tomatoes: -4.6
+                Experiment: Summary table of synthetic trials.
+                Price elasticity of demand: Percentage change in quantity demanded divided by percentage change in price.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 190, CourseMaterialRole.CORE_TEXTBOOK, """
+                8 Adverse selection
+                Adverse selection: Buyers with higher hidden risk selectively choose fuller coverage contracts.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 191, CourseMaterialRole.CORE_TEXTBOOK, "191 ADVERSE SELECTION\nFurther analysis of hidden information in insurance pools."),
+            ExamTeachingPage("tb", 192, CourseMaterialRole.CORE_TEXTBOOK, "192 ADVERSE SELECTION\nEmpirical tests of risk selection across tiers."),
+            ExamTeachingPage("tb", 193, CourseMaterialRole.CORE_TEXTBOOK, "193 ADVERSE SELECTION\nPolicy tools for mitigating risk spirals."),
+            ExamTeachingPage("tb", 271, CourseMaterialRole.CORE_TEXTBOOK, """
+                12.4 Induced innovation
+                Induced innovation: Larger expected market size shifts research investment toward corresponding technologies.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 272, CourseMaterialRole.CORE_TEXTBOOK, """
+                Demographic shifts expand expected sales volume and stimulate private laboratory funding across decades.
+                50.0
+                100.0
+                150.0 All medical
+                200.0
+                250.0
+            """.trimIndent()),
+            ExamTeachingPage("tb", 275, CourseMaterialRole.CORE_TEXTBOOK, """
+                12.5 Regulation of synthetic markets
+                Safety approval trials verify efficacy before commercial release.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 280, CourseMaterialRole.CORE_TEXTBOOK, """
+                12.6 Conclusion
+                Patent length and market size jointly shape research pipelines and retail pricing.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 281, CourseMaterialRole.CORE_TEXTBOOK, """
+                12.7 Exercises
+                Determine whether each of the following statements is true, false, or unclear.
+                1. Patent length has zero effect on research effort.
+            """.trimIndent()),
+        )
+        // A 12-slide deck where "Lemon market equilibrium" is the top title on 3 consecutive slides (25% < 35%) -> MUST stay!
+        val slidePages = listOf(
+            ExamTeachingPage("slides-w4", 1, CourseMaterialRole.LECTURE_SLIDES, "Lemon market equilibrium\nAdverse selection unravels pooled contracts."),
+            ExamTeachingPage("slides-w4", 2, CourseMaterialRole.LECTURE_SLIDES, "Lemon market equilibrium\nLow-risk buyers exit when premiums rise."),
+            ExamTeachingPage("slides-w4", 3, CourseMaterialRole.LECTURE_SLIDES, "Lemon market equilibrium\nEquilibrium quality falls toward worst risk."),
+            ExamTeachingPage("slides-w4", 4, CourseMaterialRole.LECTURE_SLIDES, "1. Aging population:\nDemographic shifts alter spending."),
+        ) + (5..12).map { n ->
+            ExamTeachingPage("slides-w4", n, CourseMaterialRole.LECTURE_SLIDES, "Slide topic $n\nAdditional lecture detail $n.")
+        } + listOf(
+            ExamTeachingPage("slides-w5", 1, CourseMaterialRole.LECTURE_SLIDES, "Review of Lemon market equilibrium and Aging population."),
+        )
+
+        val identified = CourseExamPoints.identifyFromPages(
+            courseId = "r5-regression",
+            pages = textbookPages + slidePages,
+            chapterStartPagesByBook = mapOf("tb" to setOf(50, 190, 271)),
+            sectionSpansByBook = mapOf(
+                "tb" to listOf(
+                    ExamSectionSpan("induced innovation", 271..274),
+                    ExamSectionSpan("regulation of synthetic markets", 275..279),
+                ),
+            ),
+            chapterRangesByBook = mapOf("tb" to listOf(50..55, 190..195, 271..285)),
+        )
+        val byTitle = identified.associateBy { it.title }
+        val titles = byTitle.keys
+
+        // Table cells / chart ticks / source labels must be completely rejected
+        for (bad in listOf("Dental care Source", "All care", "Inpatient", "Outpatient", "Restaurant meals", "Fresh tomatoes", "All medical", "Experiment", "Aging population:")) {
+            assertFalse(bad in titles, "Table/noise title '$bad' must be filtered out: $titles")
+        }
+
+        // Running-header chapter topic & multi-slide topic & cleaned trailing-colon topic must be preserved
+        assertTrue("Price elasticity of demand" in titles)
+        assertTrue("Adverse selection" in titles, "Chapter topic repeating in textbook running headers must stay: $titles")
+        assertTrue("Lemon market equilibrium" in titles, "3-slide topic in a 12-slide deck must NOT be killed as a header: $titles")
+        assertTrue("Aging population" in titles, "Trailing colon should be stripped cleanly: $titles")
+
+        // Section span page 272 (doesn't repeat literal "induced innovation") must be linked to "Induced innovation"
+        val inducedPages = byTitle.getValue("Induced innovation").sources.filter { it.bookId == "tb" }.map { it.startPage }.toSet()
+        assertTrue(271 in inducedPages && 272 in inducedPages, "Section 12.4 span must include p.272: $inducedPages")
+
+        // Orphan Conclusion page 280 must be attached to preceding Ch 12 section, while exercise page 281 stays excluded
+        val allLinkedTbPages = identified.flatMap { it.sources }.filter { it.bookId == "tb" }.map { it.startPage }.toSet()
+        assertTrue(280 in allLinkedTbPages, "Orphan chapter conclusion page 280 must be covered: $allLinkedTbPages")
+        assertFalse(281 in allLinkedTbPages, "Stripped exercise page 281 must never be re-attached: $allLinkedTbPages")
+    }
 }

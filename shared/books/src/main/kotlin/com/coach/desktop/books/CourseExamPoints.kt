@@ -10,8 +10,14 @@ internal object CourseExamPoints {
     private val teachingRoles = setOf(
         CourseMaterialRole.CORE_TEXTBOOK, CourseMaterialRole.LECTURE_SLIDES, CourseMaterialRole.HANDOUT,
     )
-    private val sectionNumber = Regex("""(?i)^(?:(?:chapter|section|lecture|week)\s+\d+(?:\.\d+)*|第[一二三四五六七八九十\d]+[章节周]|\d+(?:\.\d+)*)[\s.、:：—-]+""")
-    private val definition = Regex("""^([^:：]{2,64})[:：]\s*\S""")
+    private val sectionNumber = Regex(
+        """(?i)^(?:(?:chapter|section|lecture|week)\s+\d+(?:\.\d+)*|第[一二三四五六七八九十\d]+[章节周]|(?:[1-9]|[1-5]\d)(?:\.(?:[1-9]|[1-3]\d)){0,2})[\s.、:：—-]+""",
+    )
+    private val explicitSectionPrefix = Regex("""(?i)^(?:(?:chapter|section|lecture|week)\s+\d|第[一二三四五六七八九十\d]+[章节周])""")
+    private val pureNumericTickLine = Regex("""^[\(\[]?[-−+$£€¥]?\d+(?:[.,]\d+)?%?(?:[\)\]])?$""")
+    private val definition = Regex("""^([^:：]{2,64})[:：]\s*(\S.*)$""")
+    private val numericLeadValue = Regex("""^[\(\[]?[-−+$£€¥]?\d""")
+    private val latinWord = Regex("""[A-Za-z]+""")
     private val whitespace = Regex("""[\s\p{Z}]+""")
     private val cjkChar = Regex("""[\u4E00-\u9FFF]""")
     private val trailingPageNum = Regex("""^(.+?\S)(?:\s*[…⋯]+|\s*(?:[.．·•\-–—_]\s*){2,}|\s+)(\d{1,4}|[ivxlcdm]{1,5})\s*$""")
@@ -23,17 +29,18 @@ internal object CourseExamPoints {
     private val institutionOrFooterNoise = Regex("""(?i)\b(?:university\s+of|department\s+of|school\s+of|faculty\s+of|semester\s+\d|academic\s+year|lecture\s+\d+\s*[-–—|])\b""")
     private val lecturerTitlePrefix = Regex("""^(?:Dr\.?|Prof\.?|Professor)\s+[A-Z]""")
     private val trailingSlideFraction = Regex("""\s+\d{1,3}\s*/\s*\d{1,3}\s*$""")
+    private val tableMetaSuffixNoise = Regex("""(?i)\s+(?:source|sources|note|notes|table|figure|fig\.?|panel|column|row)$""")
     private val numericCohortLabelNoise = Regex("""(?i)^(?:ages?|years?|months?|days?|grades?|groups?|cohorts?|panels?|periods?|waves?|quartiles?|quintiles?|deciles?)\s+\d""")
     private val parentheticalUnitCohortNoise = Regex("""(?i)\(\s*\d+(?:\s*[-–—]\s*\d+)?\s*(?:yrs?|years?|mos?|months?|wks?|weeks?|days?|hrs?|hours?|mins?|%|kg|mg|cm|mm)\s*\)""")
     private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise)\s+""")
-    private val conversationalLeadNoise = Regex("""(?i)^(?:let\s+us|let's|consider\s+the|suppose\s+(?:that|a|an|we)|assume\s+(?:that|a|an|we)|imagine\s+(?:that|a|an)|think\s+about|notice\s+that|note\s+that|recall\s+that|remember\s+that|(?:a\s+)?special\s+note\s+for)\b""")
+    private val conversationalLeadNoise = Regex("""(?i)^(?:let\s+us|let's|consider\s+(?:the|two|three|a|an|how|why|what)|suppose\s+(?:that|a|an|we)|assume\s+(?:that|a|an|we)|imagine\s+(?:that|a|an)|think\s+about|notice\s+that|note\s+that|recall\s+that|remember\s+that|those\s+(?:in|who|with|conceived|born|aged)\b|(?:a\s+)?special\s+note\s+for)\b""")
     private val truncatedTrailingWordNoise = Regex("""(?i)\s+(?:the|a|an|of|for|and|or|to|in|on|at|by|from|with|into|onto|upon|as|than|that|which|who|whose|where|when|while|between|among|under|over|through|during|without|within|against|about|across|after|before|toward|towards)$""")
     private val leadingEdgeCounterNoise = Regex("""^(?:\d{1,3}\s*/\s*\d{1,3}|\d{1,3}[.)]?)\s+""")
     private val trailingEdgeCounterNoise = Regex("""(?i)(?:\s*\(\s*\d{1,3}\s*/\s*\d{1,3}\s*\)|\s+\d{1,3}\s*/\s*\d{1,3}|\s+page\s+\d{1,4}|\s+\d{4}(?:\s*[-/]\s*\d{2,4})?|\s+\d{1,4})+$""")
     private val edgeSeparatorTrim = Regex("""^[\s\-–—|·•:：,，/]+|[\s\-–—|·•:：,，/]+$""")
     private val functionCallNoise = Regex("""^[A-Za-z]{1,2}\([^)]{1,20}\)$""")
     private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
-    private val sentenceVerbNoise = Regex("""(?i)\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows)\b""")
+    private val sentenceVerbNoise = Regex("""(?i)\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes)\b""")
     private val nonTopicLabel = Regex(
         """(?i)^(?:example|examples|note|notes|side\s*note|sidebar|aside|figure|fig\.?|table|box|source|sources|step|steps|case|cases|question|questions|problem|problems|exercise|exercises|answer|answers|solution|solutions|hint|hints|remark|remarks|proof|equation|eq\.?|formula|definition|def\.?|theorem|lemma|proposition|corollary|assumption|assumptions|chart|graph|panel|exhibit|diagram|warning|tip|recall|key|true|false|unclear|uncertain|appendix|part|chapter|section|unit|module|lecture|week)(?:\s+[a-z0-9]+(?:\.[a-z0-9]+)*)?$""",
     )
@@ -45,7 +52,7 @@ internal object CourseExamPoints {
         "intuition", "application", "applications", "extension", "extensions", "empirics",
         "evidence", "results", "findings", "setup", "framework", "implications", "remarks",
         "readings", "suggested reading", "review", "wrap-up", "today", "plan", "lecture plan",
-        "sources", "examples", "side note", "sidebar", "enrollment", "next week", "last week",
+        "sources", "examples", "experiment", "experiments", "side note", "sidebar", "enrollment", "next week", "last week",
         "hypothesis", "hypotheses", "possible explanation", "possible explanations",
         "alternative explanation", "stylized facts", "key facts", "empirical evidence",
         "empirical results", "main results", "main findings", "key findings",
@@ -478,6 +485,19 @@ internal object CourseExamPoints {
         return lines.any { it.length >= 20 }
     }
 
+    private fun isSubstantiveDefinitionBody(rhs: String): Boolean {
+        val trimmed = rhs.trim()
+        if (trimmed.isEmpty()) return false
+        val cjkCount = cjkChar.findAll(trimmed).count()
+        if (cjkCount >= 6) return true
+        val alphaWords = latinWord.findAll(trimmed).count()
+        if (numericLeadValue.containsMatchIn(trimmed) && alphaWords < 4) return false
+        if (alphaWords < 3 && cjkCount < 4) return false
+        val nonWs = trimmed.count { !it.isWhitespace() }
+        val letters = trimmed.count(Char::isLetter)
+        return nonWs > 0 && letters * 100 >= nonWs * 55
+    }
+
     fun isValidExamPointTitle(
         rawLine: String,
         heading: String,
@@ -486,7 +506,7 @@ internal object CourseExamPoints {
         markdown: Boolean,
     ): Boolean {
         if (heading.length !in 2..64) return false
-        if (heading.any { it in "。！？!?；;." }) return false
+        if (heading.any { it in "。！？!?；;.:：" }) return false
         if (heading.none(Char::isLetter)) return false
         if (ExplainClassifier.isTocLine(rawLine) || hasTrailingPageNumber(rawLine) || hasTrailingPageNumber(heading)) {
             return false
@@ -494,7 +514,7 @@ internal object CourseExamPoints {
         if (formulaOrNoiseChar.containsMatchIn(heading)) return false
         if (courseCodeNoise.containsMatchIn(heading) || institutionOrFooterNoise.containsMatchIn(heading) ||
             lecturerTitlePrefix.containsMatchIn(heading) || trailingSlideFraction.containsMatchIn(rawLine) ||
-            trailingSlideFraction.containsMatchIn(heading) ||
+            trailingSlideFraction.containsMatchIn(heading) || tableMetaSuffixNoise.containsMatchIn(heading) ||
             numericCohortLabelNoise.containsMatchIn(heading) || parentheticalUnitCohortNoise.containsMatchIn(heading) ||
             conditionalLeadNoise.containsMatchIn(heading) || conversationalLeadNoise.containsMatchIn(heading) ||
             truncatedTrailingWordNoise.containsMatchIn(heading) ||
@@ -521,7 +541,7 @@ internal object CourseExamPoints {
             val words = heading.split(whitespace)
             if (words.size > 8) return false
             if (!markdown && !defined && !numbered && words.size > 7) return false
-            if (words.size >= 6 && sentenceVerbNoise.containsMatchIn(heading)) return false
+            if (words.size >= 5 && sentenceVerbNoise.containsMatchIn(heading)) return false
         }
         return true
     }
@@ -555,6 +575,8 @@ internal object CourseExamPoints {
         if (teaching.size < 2) return emptyList()
         val pages = mutableListOf<ExamTeachingPage>()
         val chapterStartsByBook = mutableMapOf<String, Set<Int>>()
+        val chapterRangesByBook = mutableMapOf<String, List<IntRange>>()
+        val sectionSpansByBook = mutableMapOf<String, List<ExamSectionSpan>>()
         for (mat in teaching) {
             val excludedRanges = excluded.filter { it.bookId == mat.bookId }.map { it.startPage..it.endPage }
             val bookPages = CourseStore.loadPagesForBook(db, mat.bookId, mat.pageCount.coerceAtLeast(1))
@@ -566,8 +588,22 @@ internal object CourseExamPoints {
             val first = corrected ?: structure?.correctedStart ?: structure?.nativeBodyStart?.importPage ?: openingStart ?: 1
             val hasChapters = structure?.tocNodes?.any { it.kind == TocNodeKind.CHAPTER } == true
             if (structure != null) {
-                val starts = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }.map { it.startPage }.toSet()
+                val chapterNodes = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
+                val starts = chapterNodes.map { it.startPage }.toSet()
                 if (starts.isNotEmpty()) chapterStartsByBook[mat.bookId] = starts
+                val chRanges = chapterNodes.map { it.startPage..it.endPage.coerceAtLeast(it.startPage) }
+                if (chRanges.isNotEmpty()) chapterRangesByBook[mat.bookId] = chRanges
+                val spans = structure.tocNodes
+                    .filter { it.kind in setOf(TocNodeKind.SECTION, TocNodeKind.SUBSECTION) }
+                    .mapNotNull { node ->
+                        val rawTitle = node.title.trim()
+                        if (exerciseHeadingLine.matches(rawTitle)) return@mapNotNull null
+                        val cleanTitle = rawTitle.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
+                        val normTitle = normalize(cleanTitle)
+                        if (normTitle.length < 2 || normTitle in boilerplate) return@mapNotNull null
+                        ExamSectionSpan(normTitle, node.startPage..node.endPage.coerceAtLeast(node.startPage))
+                    }
+                if (spans.isNotEmpty()) sectionSpansByBook[mat.bookId] = spans
             }
             for (page in bookPages) {
                 if (page.number < first || page.ocrPending || excludedRanges.any { page.number in it }) continue
@@ -583,7 +619,7 @@ internal object CourseExamPoints {
             }
         }
         val cleaned = stripExercisesFromTextbookPages(pages, chapterStartsByBook)
-        return identifyFromPages(courseId, cleaned, chapterStartsByBook)
+        return identifyFromPages(courseId, cleaned, chapterStartsByBook, sectionSpansByBook, chapterRangesByBook)
     }
 
     private fun normalizeEdgeCandidate(line: String): String {
@@ -591,6 +627,20 @@ internal object CourseExamPoints {
         s = leadingEdgeCounterNoise.replace(s, "")
         s = trailingEdgeCounterNoise.replace(s, "")
         return edgeSeparatorTrim.replace(s, "")
+    }
+
+    private fun edgeKeysOf(raw: String): Set<String> {
+        val keys = linkedSetOf<String>()
+        val full = normalize(raw)
+        val stripped = normalizeEdgeCandidate(raw)
+        if (full.length >= 3) keys += full
+        if (stripped.length >= 3) keys += stripped
+        val colonIdx = stripped.indexOfFirst { it == ':' || it == '：' }
+        if (colonIdx >= 3) {
+            val prefix = edgeSeparatorTrim.replace(stripped.substring(0, colonIdx), "")
+            if (prefix.length >= 3) keys += prefix
+        }
+        return keys
     }
 
     /**
@@ -601,57 +651,58 @@ internal object CourseExamPoints {
         courseId: String,
         pages: List<ExamTeachingPage>,
         chapterStartPagesByBook: Map<String, Set<Int>> = emptyMap(),
+        sectionSpansByBook: Map<String, List<ExamSectionSpan>> = emptyMap(),
+        chapterRangesByBook: Map<String, List<IntRange>> = emptyMap(),
     ): List<CourseTopicPlan> {
         val bodyPages = stripExercisesFromTextbookPages(
             pages.filter { it.role in teachingRoles && it.text.isNotBlank() && !isTocOrIndexPage(it.text) },
             chapterStartPagesByBook,
         )
-        // Detect repeating running headers / slide footers (lecturer name + course name, with or without slide counters).
-        val edgeFreqByBook = HashMap<Pair<String, String>, Int>()
-        val slideEdgeFreq = HashMap<String, Int>()
+        // Detect repeating running headers / slide footers without suppressing legitimate multi-slide topic titles
+        // or textbook chapter titles that repeat as running headers.
+        val pageCountByBook = HashMap<String, Int>()
+        val roleByBook = HashMap<String, CourseMaterialRole>()
+        val topEdgeFreqByBook = HashMap<Pair<String, String>, Int>()
+        val bottomEdgeFreqByBook = HashMap<Pair<String, String>, Int>()
+        val textbookEdgeFreqByBook = HashMap<Pair<String, String>, Int>()
+        val slideTopEdgeBooks = HashMap<String, MutableSet<String>>()
         val slideBottomEdgeBooks = HashMap<String, MutableSet<String>>()
         for (page in bodyPages) {
+            pageCountByBook[page.bookId] = (pageCountByBook[page.bookId] ?: 0) + 1
+            roleByBook[page.bookId] = page.role
             val nonEmpty = page.text.lineSequence().map(String::trim)
                 .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) && !ExplainClassifier.isPageNumber(it) }
                 .toList()
             if (nonEmpty.isEmpty()) continue
-            val edgesRaw = (nonEmpty.take(3) + nonEmpty.takeLast(3)).distinct()
-            val edgeKeys = linkedSetOf<String>()
-            for (raw in edgesRaw) {
-                val full = normalize(raw)
-                val stripped = normalizeEdgeCandidate(raw)
-                if (full.length >= 3) edgeKeys += full
-                if (stripped.length >= 3) edgeKeys += stripped
-                val colonIdx = stripped.indexOfFirst { it == ':' || it == '：' }
-                if (colonIdx >= 3) {
-                    val prefix = edgeSeparatorTrim.replace(stripped.substring(0, colonIdx), "")
-                    if (prefix.length >= 3) edgeKeys += prefix
+            val topKeys = nonEmpty.take(2).flatMap(::edgeKeysOf).toSet()
+            val bottomKeys = if (nonEmpty.size >= 2) nonEmpty.drop(1).takeLast(3).flatMap(::edgeKeysOf).toSet() else emptySet()
+            if (page.role == CourseMaterialRole.CORE_TEXTBOOK) {
+                for (edge in (topKeys + bottomKeys)) {
+                    val key = page.bookId to edge
+                    textbookEdgeFreqByBook[key] = (textbookEdgeFreqByBook[key] ?: 0) + 1
                 }
-            }
-            for (edge in edgeKeys) {
-                val key = page.bookId to edge
-                edgeFreqByBook[key] = (edgeFreqByBook[key] ?: 0) + 1
-                if (page.role != CourseMaterialRole.CORE_TEXTBOOK) {
-                    slideEdgeFreq[edge] = (slideEdgeFreq[edge] ?: 0) + 1
+            } else {
+                for (edge in topKeys) {
+                    val key = page.bookId to edge
+                    topEdgeFreqByBook[key] = (topEdgeFreqByBook[key] ?: 0) + 1
+                    slideTopEdgeBooks.getOrPut(edge) { linkedSetOf() }.add(page.bookId)
                 }
-            }
-            if (page.role != CourseMaterialRole.CORE_TEXTBOOK && nonEmpty.size >= 2) {
-                val bottomOnly = nonEmpty.drop(1).takeLast(3).distinct()
-                for (raw in bottomOnly) {
-                    val stripped = normalizeEdgeCandidate(raw)
-                    if (stripped.length >= 3) {
-                        slideBottomEdgeBooks.getOrPut(stripped) { linkedSetOf() }.add(page.bookId)
-                    }
-                    val full = normalize(raw)
-                    if (full.length >= 3) {
-                        slideBottomEdgeBooks.getOrPut(full) { linkedSetOf() }.add(page.bookId)
-                    }
+                for (edge in bottomKeys) {
+                    val key = page.bookId to edge
+                    bottomEdgeFreqByBook[key] = (bottomEdgeFreqByBook[key] ?: 0) + 1
+                    slideBottomEdgeBooks.getOrPut(edge) { linkedSetOf() }.add(page.bookId)
                 }
             }
         }
-        val repeatingEdgesByBook = edgeFreqByBook.filterValues { it >= 3 }.keys
-        val repeatingSlideEdges = slideEdgeFreq.filterValues { it >= 4 }.keys
-        val repeatingSlideBottomEdges = slideBottomEdgeBooks.filterValues { it.size >= 2 }.keys
+        val repeatingTextbookEdgesByBook = textbookEdgeFreqByBook.filterValues { it >= 3 }.keys
+        // Slide top headers only count as banners when spanning >= 3 slides AND >= 35% of that deck, or >= 3 decks.
+        val repeatingSlideTopByBook = topEdgeFreqByBook.filter { (bookAndEdge, count) ->
+            val deckPages = pageCountByBook[bookAndEdge.first] ?: 1
+            count >= 3 && count * 100 >= deckPages * 35
+        }.keys
+        val repeatingSlideBottomByBook = bottomEdgeFreqByBook.filterValues { it >= 3 }.keys
+        val repeatingSlideTopAcrossDecks = slideTopEdgeBooks.filterValues { it.size >= 3 }.keys
+        val repeatingSlideBottomAcrossDecks = slideBottomEdgeBooks.filterValues { it.size >= 2 }.keys
 
         val titles = linkedMapOf<String, String>()
         val textbookStrong = mutableSetOf<String>()
@@ -661,46 +712,150 @@ internal object CourseExamPoints {
                 .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
                 .toList()
             val isSlideLike = page.role != CourseMaterialRole.CORE_TEXTBOOK
-            fun isRepeatingEdge(candidate: String): Boolean {
+            fun isRepeatingSlideEdge(candidate: String): Boolean {
                 val norm = normalize(candidate)
                 val stripped = normalizeEdgeCandidate(candidate)
-                if ((page.bookId to norm) in repeatingEdgesByBook || (page.bookId to stripped) in repeatingEdgesByBook) return true
-                if (norm in repeatingSlideEdges || stripped in repeatingSlideEdges) return true
-                if (isSlideLike && (norm in repeatingSlideBottomEdges || stripped in repeatingSlideBottomEdges)) return true
-                return false
+                return (page.bookId to norm) in repeatingSlideTopByBook ||
+                    (page.bookId to stripped) in repeatingSlideTopByBook ||
+                    (page.bookId to norm) in repeatingSlideBottomByBook ||
+                    (page.bookId to stripped) in repeatingSlideBottomByBook ||
+                    norm in repeatingSlideTopAcrossDecks ||
+                    stripped in repeatingSlideTopAcrossDecks ||
+                    norm in repeatingSlideBottomAcrossDecks ||
+                    stripped in repeatingSlideBottomAcrossDecks
+            }
+            fun isRepeatingTextbookEdge(candidate: String): Boolean {
+                val norm = normalize(candidate)
+                val stripped = normalizeEdgeCandidate(candidate)
+                return (page.bookId to norm) in repeatingTextbookEdgesByBook ||
+                    (page.bookId to stripped) in repeatingTextbookEdgesByBook
             }
             for ((index, line) in lines.withIndex()) {
-                if (isRepeatingEdge(line)) continue
-                val defined = definition.containsMatchIn(line)
+                if (isSlideLike && isRepeatingSlideEdge(line)) continue
+                val defMatch = definition.matchEntire(line)
+                val defined = defMatch != null && isSubstantiveDefinitionBody(defMatch.groupValues[2])
                 val markdown = line.startsWith("#")
                 val numbered = sectionNumber.containsMatchIn(line)
+                // On textbook pages, only skip bare unnumbered/undefined running headers — never ban real chapter/section definitions.
+                if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(line)) continue
+                // Skip bare numeric chart/table axis labels surrounded by pure numeric tick lines (e.g. "100.0 All medical").
+                if (numbered && !defined && !markdown && !explicitSectionPrefix.containsMatchIn(line)) {
+                    val neighborhood = lines.subList(maxOf(0, index - 3), minOf(lines.size, index + 4))
+                    val numericTickNeighbors = neighborhood.count { it != line && pureNumericTickLine.matches(it) }
+                    if (numericTickNeighbors >= 3) continue
+                }
                 val heading = when {
                     markdown -> line.trimStart('#', ' ')
-                    defined -> definition.find(line)!!.groupValues[1]
+                    defined -> defMatch!!.groupValues[1]
                     numbered || index == 0 -> line
                     else -> continue
-                }.replace(sectionNumber, "").trim()
+                }.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
                 val key = normalize(heading)
-                if (isRepeatingEdge(heading)) continue
+                if (isSlideLike && isRepeatingSlideEdge(heading)) continue
+                if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(heading)) continue
                 if (!isValidExamPointTitle(line, heading, defined, numbered, markdown)) continue
                 titles.putIfAbsent(key, heading)
                 if (page.role == CourseMaterialRole.CORE_TEXTBOOK && (defined || numbered || markdown)) textbookStrong += key
             }
             indexed += page.copy(text = normalize(page.text))
         }
-        return titles.mapNotNull { (key, title) ->
-            val pattern = termPattern(key)
-            val sources = indexed.filter { pattern.containsMatchIn(it.text) }.map {
-                CourseTopicLinkPlan(it.bookId, startPage = it.page, endPage = it.page, role = it.role)
+
+        val cleanedTextbookPagesByBook = bodyPages
+            .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            .groupBy({ it.bookId }, { it.page })
+            .mapValues { (_, pgs) -> pgs.toSet() }
+        val sectionRangesByKey = HashMap<String, MutableList<Pair<String, IntRange>>>()
+        for ((bookId, spans) in sectionSpansByBook) {
+            for (span in spans) {
+                sectionRangesByKey.getOrPut(span.normalizedTitle) { mutableListOf() }.add(bookId to span.pages)
             }
+        }
+
+        data class DraftTopic(
+            val key: String,
+            val title: String,
+            val sources: MutableList<CourseTopicLinkPlan>,
+            val sectionStartByBook: Map<String, Int>,
+        )
+
+        val drafts = titles.mapNotNull { (key, title) ->
+            val pattern = termPattern(key)
+            val linkMap = LinkedHashMap<Pair<String, Int>, CourseTopicLinkPlan>()
+            for (pg in indexed) {
+                if (pattern.containsMatchIn(pg.text)) {
+                    linkMap.putIfAbsent(
+                        pg.bookId to pg.page,
+                        CourseTopicLinkPlan(pg.bookId, startPage = pg.page, endPage = pg.page, role = pg.role),
+                    )
+                }
+            }
+            val secStartByBook = HashMap<String, Int>()
+            for ((bookId, range) in sectionRangesByKey[key].orEmpty()) {
+                val available = cleanedTextbookPagesByBook[bookId].orEmpty()
+                secStartByBook[bookId] = minOf(secStartByBook[bookId] ?: Int.MAX_VALUE, range.first)
+                for (p in range) {
+                    if (p in available) {
+                        linkMap.putIfAbsent(
+                            bookId to p,
+                            CourseTopicLinkPlan(bookId, startPage = p, endPage = p, role = CourseMaterialRole.CORE_TEXTBOOK),
+                        )
+                    }
+                }
+            }
+            val sources = linkMap.values.sortedWith(compareBy({ it.role.authorityRank }, { it.bookId }, { it.startPage })).toMutableList()
             val textbookBacked = key in textbookStrong && sources.any { it.role == CourseMaterialRole.CORE_TEXTBOOK }
             // A name that is only a slide title stays on its weekly topic. A textbook definition does not.
             if (sources.distinctBy { it.bookId }.size < 2 && !textbookBacked) return@mapNotNull null
-            val id = UUID.nameUUIDFromBytes("$courseId|point|$key".toByteArray(Charsets.UTF_8))
-            CourseTopicPlan("point-$id", LABEL, null, 0, title, CourseTopicStatus.EXAMINABLE, sources = sources)
-        }.mapIndexed { index, topic -> topic.copy(ord = index + 1) }
+            DraftTopic(key, title, sources, secStartByBook)
+        }
+
+        // Attach orphan cleaned textbook body pages (e.g. a chapter's Conclusion or unrepeated section page)
+        // to the nearest preceding exam point in the same chapter so no taught body page is silently dropped.
+        if (chapterRangesByBook.isNotEmpty() && sectionSpansByBook.isNotEmpty() && drafts.isNotEmpty()) {
+            val coveredPages = HashSet<Pair<String, Int>>()
+            for (d in drafts) {
+                val tbSources = d.sources.filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+                if (tbSources.size <= 20) {
+                    for (s in tbSources) coveredPages += s.bookId to s.startPage
+                }
+            }
+            for ((bookId, chapterRanges) in chapterRangesByBook) {
+                val cleanedPages = cleanedTextbookPagesByBook[bookId].orEmpty().sorted()
+                for (p in cleanedPages) {
+                    if ((bookId to p) in coveredPages) continue
+                    val chapter = chapterRanges.firstOrNull { p in it } ?: continue
+                    val candidate = drafts
+                        .filter { d ->
+                            val tbPages = d.sources.filter { it.role == CourseMaterialRole.CORE_TEXTBOOK && it.bookId == bookId }
+                            tbPages.size < 16 && tbPages.any { it.startPage in chapter && it.startPage <= p }
+                        }
+                        .maxByOrNull { d ->
+                            val maxBefore = d.sources
+                                .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK && it.bookId == bookId && it.startPage in chapter && it.startPage <= p }
+                                .maxOf { it.startPage }
+                            val sectionBoost = if (bookId in d.sectionStartByBook) 10_000 else 0
+                            sectionBoost + maxBefore
+                        } ?: continue
+                    if (candidate.sources.none { it.bookId == bookId && it.startPage == p }) {
+                        candidate.sources += CourseTopicLinkPlan(bookId, startPage = p, endPage = p, role = CourseMaterialRole.CORE_TEXTBOOK)
+                        candidate.sources.sortWith(compareBy({ it.role.authorityRank }, { it.bookId }, { it.startPage }))
+                        coveredPages += bookId to p
+                    }
+                }
+            }
+        }
+
+        return drafts.mapIndexed { index, d ->
+            val id = UUID.nameUUIDFromBytes("$courseId|point|${d.key}".toByteArray(Charsets.UTF_8))
+            CourseTopicPlan("point-$id", LABEL, null, index + 1, d.title, CourseTopicStatus.EXAMINABLE, sources = d.sources)
+        }
     }
 }
+
+internal data class ExamSectionSpan(
+    val normalizedTitle: String,
+    val pages: IntRange,
+)
 
 internal data class ExamTeachingPage(
     val bookId: String,

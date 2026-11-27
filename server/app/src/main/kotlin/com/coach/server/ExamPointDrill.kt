@@ -141,6 +141,10 @@ object ExamPointDrillGate {
         """(?i)^\s*(?:\d{1,2}[.)]\s+)?(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show\s+that|Prove|Derive|Draw|Graph|Sketch|Use|Why|How|What|Which|Is\s+it|Are\s+the|True\s+or\s+false|Does|Do|Can|Could|Would|Should|Briefly|Illustrate|Analyze|Analyse|State|Indicate|Decide)\b""",
     )
     private val subPartMarker = Regex("""(?m)(?:^|\s)(?:\([a-e]\)|[a-e]\.)\s+[A-Z]""")
+    private val exerciseSubPartPrompt = Regex(
+        """(?m)(?:^|\s)(?:\([a-e]\)|[a-e]\.)\s+(?:Explain|Discuss|Compare|Contrast|Calculate|Compute|Suppose|Assume|Consider|Evaluate|Determine|Show|Prove|Derive|Draw|Graph|Sketch|Use|Using|Find|Identify|Describe|State|Indicate|Decide|Interpret|Illustrate|Analyze|Analyse|Why|How|What|Which|Is|Are|Does|Do|Can|Could|Would|Should)\b""",
+        RegexOption.IGNORE_CASE,
+    )
 
     private val tocQuestionStemRegex = Regex(
         """(?i)(?:(?:哪一|第几)\s*[章节页部分].{0,12}(?:讲|讨论|介绍|涵盖|涉及|位于|出现)|(?:教材|本书|目录).{0,10}(?:哪一|第几)\s*[章节页]|\b(?:which|what)\s+(?:chapter|section|subsection|part|page)\b.{0,35}\b(?:covers?|discusses?|presents?|introduces?|explains?|contains?|deals?\s+with|focuses?\s+on|addresses?)\b|\btable\s+of\s+contents\b)""",
@@ -203,17 +207,19 @@ object ExamPointDrillGate {
         return pageTok.all { it in "ivxlcdm" } && !tocTailExcludedWord.containsMatchIn(prefix)
     }
 
-    fun stripExerciseText(text: String): String {
-        val rawLines = text.lines()
-        val cutIndex = rawLines.indexOfFirst { line ->
+    private fun findExerciseStartLineIndex(rawLines: List<String>): Int =
+        rawLines.indexOfFirst { line ->
             val trimmed = line.trim()
             trimmed.isNotEmpty() && (exerciseHeadingLine.matches(trimmed) || exerciseInstructionLine.containsMatchIn(trimmed))
         }
+
+    fun stripExerciseText(text: String): String {
+        val rawLines = text.lines()
+        val cutIndex = findExerciseStartLineIndex(rawLines)
         if (cutIndex >= 0) {
             val before = rawLines.subList(0, cutIndex).joinToString("\n").trim()
             return if (before.count { !it.isWhitespace() } >= 30) before else ""
         }
-        if (looksLikeExerciseBlock(text)) return ""
         return text
     }
 
@@ -222,22 +228,30 @@ object ExamPointDrillGate {
         if (trimmed.isEmpty()) return false
         if (exerciseInstructionLine.containsMatchIn(trimmed)) return true
         val lines = trimmed.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.any { exerciseHeadingLine.matches(it) }) return true
         val numbered = lines.filter { numberedItemLine.containsMatchIn(it) }
         val promptLike = numbered.count { it.endsWith("?") || exercisePromptLead.containsMatchIn(it) }
         val subParts = subPartMarker.findAll(trimmed).count()
+        val promptSubParts = exerciseSubPartPrompt.findAll(trimmed).count()
         val questionMarks = trimmed.count { it == '?' || it == '？' }
-        if (subParts >= 3 && (numbered.isNotEmpty() || questionMarks >= 1)) return true
-        if (numbered.size >= 2 && (promptLike >= 2 || (subParts >= 2 && questionMarks >= 1))) return true
+        // Figure/table panel captions like "(a) Outpatient ... (b) Inpatient ..." plus a rhetorical question are NOT exercises.
+        if (promptSubParts >= 3) return true
+        if (promptSubParts >= 2 && (numbered.isNotEmpty() || questionMarks >= 2)) return true
+        if (numbered.size >= 2 && (promptLike >= 2 || (subParts >= 2 && promptSubParts >= 1 && questionMarks >= 1))) return true
         if (numbered.size < 3) return false
-        return promptLike >= 1 || subParts >= 2 || questionMarks >= 3
+        return promptLike >= 1 || promptSubParts >= 2 || questionMarks >= 3
     }
 
-    private fun isChapterOpeningBlock(text: String, exerciseChapterNum: Int? = null): Boolean {
+    private fun isChapterOpeningBlock(
+        text: String,
+        inExerciseTail: Boolean = false,
+        exerciseChapterNum: Int? = null,
+    ): Boolean {
         val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
         if (lines.isEmpty()) return false
         val topLines = lines.take(6)
         if (topLines.any { chapterBoundaryLine.containsMatchIn(it) }) return true
-        if (looksLikeExerciseBlock(text)) return false
+        if (inExerciseTail && looksLikeExerciseBlock(text)) return false
         for (line in topLines) {
             val numMatch = numericChapterHeadingLine.matchEntire(line)
             if (numMatch != null) {
@@ -307,17 +321,18 @@ object ExamPointDrillGate {
                 }
                 currentTextbook = block.bookId
                 lastTextbookPage = block.page
-                if (isChapterOpeningBlock(block.text, if (inExerciseTail) exerciseChapterNum else null)) {
+                if (isChapterOpeningBlock(block.text, inExerciseTail, if (inExerciseTail) exerciseChapterNum else null)) {
                     inExerciseTail = false
                     tailPages = 0
                     exerciseChapterNum = null
                 }
-                val stripped = stripExerciseText(block.text)
+                val rawLines = block.text.lines()
+                val cutIndex = findExerciseStartLineIndex(rawLines)
                 if (inExerciseTail) {
-                    val stillExercise = stripped != block.text || looksLikeExerciseBlock(block.text)
+                    val stillExercise = cutIndex == 0 || looksLikeExerciseBlock(block.text)
                     if (stillExercise || tailPages < 6) {
-                        val hasNoExercise = !stillExercise && block.text.lines().none { numberedItemLine.containsMatchIn(it.trim()) } &&
-                            !subPartMarker.containsMatchIn(block.text) && block.text.count { it == '?' || it == '？' } < 3 &&
+                        val hasNoExercise = !stillExercise && rawLines.none { numberedItemLine.containsMatchIn(it.trim()) } &&
+                            !exerciseSubPartPrompt.containsMatchIn(block.text) && block.text.count { it == '?' || it == '？' } < 3 &&
                             block.text.length >= 500
                         if (tailPages >= 1 && hasNoExercise) {
                             inExerciseTail = false
@@ -334,11 +349,11 @@ object ExamPointDrillGate {
                         exerciseChapterNum = null
                     }
                 }
-                if (stripped != block.text) {
+                if (cutIndex >= 0) {
+                    val stripped = stripExerciseText(block.text)
                     inExerciseTail = true
                     tailPages = 1
-                    exerciseChapterNum = block.text.lineSequence().map(String::trim)
-                        .firstOrNull { exerciseHeadingLine.matches(it) }
+                    exerciseChapterNum = rawLines.getOrNull(cutIndex)?.trim()
                         ?.let { Regex("""^(?:#{1,6}\s*)?(\d{1,2})\.\d+""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
                     if (stripped.isBlank()) {
                         droppedExercise = true

@@ -582,4 +582,66 @@ class CourseExamPointsTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun bodyPageWithFigureSubpanelsAndQuestionsNotFollowingExercisesIsKeptAndCounteredSlideFootersAreFiltered() {
+        // 1. Mid-chapter body page (p.44) has (a)(b)(c) figure/table panel captions + rhetorical questions
+        //    and does NOT follow an exercise section. Neither p.44 nor p.45..53 may be stripped!
+        //    Real end-of-chapter exercises (p.54) and their immediate continuation (p.55) MUST still be stripped.
+        val figureBodyPage = """
+            2.4 Experimental Evidence on Usage
+            Figure 2.5 Usage shifts across service categories
+            (a) Daytime usage rose by 35 percent after enrollment. (b) Nighttime usage showed smaller changes. (c) Peak demand remained stable.
+            Why did daytime usage respond more strongly than peak demand? Does pricing alone explain the gap?
+            Pilot enrollment lottery: Randomized assignment used to measure causal utilization effects across households.
+        """.trimIndent()
+        val bookPages = listOf(
+            BookPage(40, "2 Pricing and Usage\nUsage elasticity: Responsiveness of service volume to user fees."),
+            BookPage(44, figureBodyPage),
+            BookPage(45, "Follow-up evidence after two years confirms persistent utilization gains across outpatient clinics.\nOutpatient utilization: Visits to non-hospital facilities observed during the pilot window."),
+            BookPage(46, "Inpatient utilization also increased modestly in the second year of the synthetic trial."),
+            BookPage(54, "2.6 Exercises\nDetermine whether each of the following statements is true, false, or unclear.\n1. Pilot enrollment lottery always lowers usage."),
+            BookPage(55, "2. Suppose a subsidy halves user fees. (a) Compute new volume. (b) Derive welfare change. (c) Explain deadweight loss?"),
+            BookPage(56, "3 Dynamic Capacity Planning\nCapacity buffer: Extra supply maintained to absorb demand shocks."),
+        )
+        assertFalse(CourseExamPoints.looksLikeExerciseContinuationPage(figureBodyPage))
+        val cleaned = CourseExamPoints.cleanTextbookPagesByNumber(bookPages, chapterStartPages = setOf(40, 56))
+        assertEquals(setOf(40, 44, 45, 46, 56), cleaned.keys)
+        assertTrue(cleaned[44]!!.contains("Pilot enrollment lottery"))
+        assertTrue(cleaned[45]!!.contains("Outpatient utilization"))
+
+        // 2. Slide footers with varying slide counters ("1/30", "12 Lecturer - Course"), cross-deck bottom footers,
+        //    conditional/conversational/truncated/cohort/boilerplate headings must all be filtered out.
+        val pages = bookPages.map { ExamTeachingPage("tb", it.number, CourseMaterialRole.CORE_TEXTBOOK, it.text) } + listOf(
+            ExamTeachingPage("tb", 47, CourseMaterialRole.CORE_TEXTBOOK, """
+                If healthy: Conditional table header fragment.
+                Hypothesis: Generic structural heading.
+                Possible explanation: Generic discussion heading.
+                Nonsmokers - oldest (55 yrs): Demographic table row label.
+                Let us consider a thought experiment: Conversational opener.
+                Consider the alternative: Imperative opener.
+                A special note for non-local readers: Editorial aside.
+                The labor market for: Truncated line-wrapped heading.
+                Grid components and the: Truncated conjunction heading.
+            """.trimIndent()),
+            ExamTeachingPage("slides-w1", 1, CourseMaterialRole.LECTURE_SLIDES, "1 Alex Morgan - Energy Systems\nPilot enrollment lottery overview\nAlex Morgan - Energy Systems 1/30"),
+            ExamTeachingPage("slides-w1", 2, CourseMaterialRole.LECTURE_SLIDES, "2 Alex Morgan - Energy Systems\nOutpatient utilization summary\nAlex Morgan - Energy Systems 2/30"),
+            ExamTeachingPage("slides-w1", 3, CourseMaterialRole.LECTURE_SLIDES, "3 Alex Morgan - Energy Systems\nUsage elasticity notes\nAlex Morgan - Energy Systems 3/30"),
+            ExamTeachingPage("slides-w2", 1, CourseMaterialRole.LECTURE_SLIDES, "Week 2 Lecture\nCapacity buffer discussion\nJordan Lee - Grid Policy"),
+            ExamTeachingPage("slides-w3", 1, CourseMaterialRole.LECTURE_SLIDES, "Week 3 Lecture\nJordan Lee - Grid Policy: Review\nJordan Lee - Grid Policy"),
+        )
+        val titles = CourseExamPoints.identifyFromPages("r4-regression", pages, mapOf("tb" to setOf(40, 56))).map { it.title }.toSet()
+        assertEquals(
+            setOf(
+                "Pricing and Usage",
+                "Usage elasticity",
+                "Experimental Evidence on Usage",
+                "Pilot enrollment lottery",
+                "Outpatient utilization",
+                "Dynamic Capacity Planning",
+                "Capacity buffer",
+            ),
+            titles,
+        )
+    }
 }

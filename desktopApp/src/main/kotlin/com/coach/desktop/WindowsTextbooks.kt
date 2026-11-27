@@ -256,7 +256,12 @@ internal fun runWindowsTextbooks() {
                     selected ?: return@WindowsTextbookGate
                 } else LearningProfile(directory,null)
                 key(profile.directory) {
-                    val controller = remember { windowsBookController(profile.directory) }
+                    val controller = remember(profile.directory) {
+                        WindowsRollback.prepareLaunch(profile.directory, runningAppVersion())
+                        windowsBookController(profile.directory).also {
+                            WindowsRollback.mergeParked(profile.directory)
+                        }
+                    }
                     val drafts = rememberAnswerDrafts(controller)
                     val exams = rememberLocalExamController(controller.library)
                     DisposableEffect(controller,drafts,exams) {
@@ -266,11 +271,23 @@ internal fun runWindowsTextbooks() {
                         }
                         onDispose { saveDrafts = { true } }
                     }
+                    val updates = rememberWindowsUpdateSession(
+                        libraryDir = profile.directory,
+                        save = {
+                            controller.state.first { !it.busy }
+                            saveDrafts()
+                        },
+                        close = ::exitApplication,
+                    )
                     LearningSyncEffect(identity,profile)
                     WindowsTextbookHost(
                         controller = controller,
                         drafts = drafts,
                         exams = exams,
+                        onRollback = updates::rollback,
+                        rollbackStatus = updates.rollbackStatus,
+                        rollbackBusy = updates.rollbackBusy,
+                        updateBanner = { idle -> UpdateBanner(updates, idle) },
                         chooseReviewedBlocks = { pickReviewedBlocks(window) },
                         chooseBooks = {
                             withContext(Dispatchers.Swing) {
@@ -293,10 +310,6 @@ internal fun runWindowsTextbooks() {
                         },
                         firstOpenGuide = true,
                     )
-                    WindowsUpdatePrompt(save = {
-                        controller.state.first { !it.busy }
-                        saveDrafts()
-                    }, close = ::exitApplication)
                 }
             }
             TextbookCloseWarning(closeGuard)

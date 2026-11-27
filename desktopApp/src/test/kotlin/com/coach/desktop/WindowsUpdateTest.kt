@@ -94,4 +94,51 @@ class WindowsUpdateTest {
             Files.delete(dir)
         }
     }
+
+    @Test fun reportsInterruptedChecksumAndFullDiskWithoutKeepingAPartialFile() {
+        val dir = Files.createTempDirectory("coach-update-fail")
+        val release = update.candidate(json())!!
+        try {
+            val interrupted = assertFailsWith<UpdateFailed> {
+                update.stage(release, dir, bytes.copyOf(8).inputStream()) {}
+            }
+            assertEquals(UpdateFailure.INTERRUPTED, interrupted.failure)
+            assertEquals(UPDATE_INTERRUPTED, interrupted.message)
+            val checksum = assertFailsWith<UpdateFailed> {
+                update.stage(release, dir, bytes.copyOf().also { it[8] = 1 }.inputStream()) {}
+            }
+            assertEquals(UpdateFailure.CHECKSUM, checksum.failure)
+            assertEquals(UPDATE_CHECKSUM, checksum.message)
+            val space = assertFailsWith<UpdateFailed> {
+                update.stage(release, dir, bytes.inputStream(), freeBytes = { 0L }) {}
+            }
+            assertEquals(UpdateFailure.SPACE, space.failure)
+            assertEquals(UPDATE_SPACE, space.message)
+            assertEquals(0L, Files.list(dir).use { it.count() })
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun readsOneOlderPackageWithoutChangingTheNewerOffer() {
+        val older = """{"version":"1.8.0","arch":"x64","file":"LearningCoach-1.8.0-x64.msi","size":9,"sha256":"$hash"}"""
+        val newer = json(version = "1.10.0")
+        val manifest = """{"packages":[$newer],"previous":[$older,{"version":"1.8.0","arch":"arm64","file":"LearningCoach-1.8.0-arm64.msi","size":9,"sha256":"$hash"}]}"""
+        assertEquals("1.10.0", update.candidate(manifest)?.version)
+        assertEquals("LearningCoach-1.8.0-x64.msi", update.previousRelease(manifest)?.file)
+        assertNull(update.previousRelease("""{"previous":[$newer]}"""))
+        assertNull(update.previousRelease(json()))
+    }
+
+    @Test fun updateLineStaysHiddenWhileReadingOrAfterDeferral() {
+        assertFalse(shouldShowUpdateLine(idle = false, ready = true, failed = false, deferred = false))
+        assertFalse(shouldShowUpdateLine(idle = false, ready = false, failed = true, deferred = false))
+        assertFalse(shouldShowUpdateLine(idle = true, ready = true, failed = false, deferred = true))
+        assertTrue(shouldShowUpdateLine(idle = true, ready = true, failed = false, deferred = false))
+        assertTrue(shouldShowUpdateLine(idle = true, ready = false, failed = true, deferred = false))
+        assertTrue(updateWouldInterrupt(com.coach.desktop.books.BookScreen.READER))
+        assertTrue(updateWouldInterrupt(com.coach.desktop.books.BookScreen.LEARNING))
+        assertTrue(updateWouldInterrupt(com.coach.desktop.books.BookScreen.COURSE_MOCK))
+        assertFalse(updateWouldInterrupt(com.coach.desktop.books.BookScreen.HOME))
+    }
 }

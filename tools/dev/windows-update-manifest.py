@@ -33,6 +33,7 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("version")
     parser.add_argument("--version-code", type=int, help="Android versionCode paired with the APK")
+    parser.add_argument("--previous-version", help="also publish this older version as the one-step rollback package")
     args = parser.parse_args()
     if not VERSION.fullmatch(args.version):
         parser.error("expected a three-part release version")
@@ -61,11 +62,30 @@ def main():
     if not packages:
         parser.error(f"no LearningCoach-{args.version}-<arch>.msi or -android.apk in {args.directory}")
 
+    previous = []
+    if args.previous_version:
+        if not VERSION.fullmatch(args.previous_version):
+            parser.error("expected a three-part previous version")
+        if tuple(map(int, args.previous_version.split("."))) >= tuple(map(int, args.version.split("."))):
+            parser.error("previous version must be older than the release")
+        for arch in ("x64", "arm64"):
+            path = args.directory / f"LearningCoach-{args.previous_version}-{arch}.msi"
+            if not path.exists():
+                continue
+            name, size, sha256 = package(path, 2 * 1024**3)
+            previous.append(dict(version=args.previous_version, arch=arch, file=name, size=size, sha256=sha256))
+        if not previous:
+            parser.error(f"no LearningCoach-{args.previous_version}-<arch>.msi in {args.directory}")
+
+    payload = {"packages": packages}
+    if previous:
+        payload["previous"] = previous
+
     temporary = NamedTemporaryFile(dir=args.directory, mode="w", encoding="utf-8", delete=False)
     staged = Path(temporary.name)
     try:
         with temporary:
-            json.dump({"packages": packages}, temporary, indent=2)
+            json.dump(payload, temporary, indent=2)
             temporary.write("\n")
         staged.replace(args.directory / "latest.json")
     finally:

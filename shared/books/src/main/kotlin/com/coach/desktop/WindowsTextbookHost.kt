@@ -96,6 +96,10 @@ internal fun WindowsTextbookHost(
     bookExplainer: BookExplainer? = null,
     chooseReviewedBlocks: (suspend () -> List<Path>)? = null,
     firstOpenGuide: Boolean = false,
+    onRollback: (() -> Unit)? = null,
+    rollbackStatus: String = "",
+    rollbackBusy: Boolean = false,
+    updateBanner: (@Composable BoxScope.(idle: Boolean) -> Unit)? = null,
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
@@ -383,6 +387,12 @@ internal fun WindowsTextbookHost(
                     }
                 }
                 BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
+                val updateIdle = !settings && !tasteActive &&
+                    ui.screen != BookScreen.READER &&
+                    ui.screen != BookScreen.LEARNING &&
+                    ui.screen != BookScreen.REVIEWING &&
+                    ui.screen != BookScreen.COURSE_MOCK
+                updateBanner?.invoke(this, updateIdle)
                 val tasteBook = ui.book
                 if (tasteActive && tasteBook != null) {
                     com.coach.desktop.books.FirstTastePanel(
@@ -397,7 +407,14 @@ internal fun WindowsTextbookHost(
             }
 
             if (settings) {
-                HostSettings(controller.library.directory, onPersonalCourse, preferences) { settings = false }
+                HostSettings(
+                    controller.library.directory,
+                    onPersonalCourse,
+                    preferences,
+                    onRollback = onRollback,
+                    rollbackStatus = rollbackStatus,
+                    rollbackBusy = rollbackBusy,
+                ) { settings = false }
             }
             if (searchOpen) {
                 HostSearchDialog(

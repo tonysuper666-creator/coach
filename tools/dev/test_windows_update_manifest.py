@@ -57,6 +57,21 @@ class UpdateManifest(unittest.TestCase):
         self.assertIn("--version-code", done.stderr)
         self.assertFalse((self.root / "latest.json").exists())
 
+    def test_previous_version_is_listed_separately_for_one_step_rollback(self):
+        self.stage("LearningCoach-1.2.0-x64.msi", b"new-msi")
+        self.stage("LearningCoach-1.1.0-x64.msi", b"old-msi")
+        done = run(self.root, "1.2.0", "--previous-version", "1.1.0")
+        self.assertEqual(0, done.returncode, done.stderr)
+        body = self.manifest()
+        self.assertEqual(["x64"], [entry["arch"] for entry in body["packages"]])
+        self.assertEqual("1.2.0", body["packages"][0]["version"])
+        self.assertEqual("1.1.0", body["previous"][0]["version"])
+        self.assertEqual("LearningCoach-1.1.0-x64.msi", body["previous"][0]["file"])
+        self.assertEqual(len(b"old-msi"), body["previous"][0]["size"])
+        refused = run(self.root, "1.2.0", "--previous-version", "1.2.0")
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("older", refused.stderr)
+
     def test_rejects_a_version_that_cannot_be_published_on_both_platforms(self):
         self.stage("LearningCoach-256.0.0-android.apk", b"apk")
         done = run(self.root, "256.0.0", "--version-code", "3")

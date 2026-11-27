@@ -660,6 +660,63 @@ $script:onClick = { $script:screen = $studyMenuOnly }
 $openedMenu = Ensure-CompanionDrawerOpen 5 752 552 -tries 2 -missTag 'explain-tab0' -openTagPrefix 'explain-tab'
 Check 'step5-open-drawer-stays-unready-when-only-menu-shows' ($script:clicks.Count -eq 1 -and $null -eq $openedMenu.Tab) "clicks=$($script:clicks -join '|') tab=$($openedMenu.Tab)"
 
+# 48. 抽屉页签行被 OCR 无空格合并成「提问批注」时，同排「讲解」+「提问批注」在预期区域仍可就绪（步骤 6 不误判未开），反序「批注提问」与含「批注」菜单说明仍不通过。
+$wideMergedAskNotes = @(
+    (New-Line '书架' 60 46 56 20),
+    (New-Line '目录' 130 46 44 20),
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '伴读：逐节精读，' 1750 46 128 22),
+    (New-Line '提问批注' 1664 78 96 22),
+    (New-Line '收起伴读' 1900 46 80 22)
+)
+$wideMergedHit = Find-CompanionTabLabel $wideMergedAskNotes '讲解' 18 2160 1350
+Check 'step6-wide-drawer-accepts-explain-plus-merged-ask-notes' ([bool]$wideMergedHit -and $wideMergedHit.X -eq 1624 -and $wideMergedHit.Y -eq 89) "x=$($wideMergedHit.X) y=$($wideMergedHit.Y)"
+
+$bottomMergedAskNotes = @(
+    (New-Line '书架' 40 46 56 20),
+    (New-Line '讲解' 24 280 48 22),
+    (New-Line '提问批注' 88 280 96 22)
+)
+$bottomMergedHit = Find-CompanionTabLabel $bottomMergedAskNotes '讲解' 18 752 552
+Check 'step6-bottom-drawer-accepts-explain-plus-merged-ask-notes' ([bool]$bottomMergedHit -and $bottomMergedHit.X -eq 48 -and $bottomMergedHit.Y -eq 291) "x=$($bottomMergedHit.X) y=$($bottomMergedHit.Y)"
+
+$wrongOrderMerged = @(
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '批注提问' 1664 78 96 22)
+)
+Check 'step6-drawer-rejects-swapped-notes-ask-token' ($null -eq (Find-CompanionTabLabel $wrongOrderMerged '讲解' 18 2160 1350)) 'swapped 批注提问 was accepted'
+
+$script:screen = $wideMergedAskNotes; $script:Last = $wideMergedAskNotes; $script:queue = $null; $script:clicks.Clear(); $script:onClick = $null
+$openedWideMerged = Ensure-CompanionDrawerOpen 6 2160 1350 -tries 1 -missTag 'top0' -openTagPrefix 'drawer'
+Check 'step6-open-drawer-ready-without-click-on-merged-ask-notes' ($script:clicks.Count -eq 0 -and [bool]$openedWideMerged.Tab -and $openedWideMerged.Tab.X -eq 1624 -and $openedWideMerged.Tab.Y -eq 89) "clicks=$($script:clicks.Count)"
+
+# 49. 无空格匹配仅放行纯「提问批注」，拒绝「提问和批注」「提问批注说明」；步骤 6 滚动后模块条上移时按当前帧模块条与提交按钮定位选项。
+foreach ($badToken in @('提问和批注', '提问批注说明', '提问 和 批注')) {
+    $badRow = @(
+        (New-Line '讲解' 1630 136 80 20),
+        (New-Line $badToken 1715 136 80 20)
+    )
+    Check "step6-drawer-rejects-nonpure-$($badToken -replace '\s', '')" ($null -eq (Find-CompanionTabLabel $badRow '讲解' 18 2160 1350)) "accepted $badToken"
+}
+
+$staleStrip = [pscustomobject]@{ X = 1750; Y = 1160 }
+$pretestScrolledFrame = @(
+    (New-Line '要点' 1650 556 48 20),
+    (New-Line '自测' 1710 556 48 20),
+    (New-Line '推导' 1770 556 48 20),
+    (New-Line '第 1 / 2 题' 1620 610 120 22),
+    (New-Line 'A. 第一项' 1620 820 140 24),
+    (New-Line 'B. 最后一项' 1620 886 150 24),
+    (New-Line '这题是猜的' 1620 960 120 24),
+    (New-Line '提交' 2020 960 64 24)
+)
+$state6Scrolled = Find-Step6PretestState $pretestScrolledFrame 2160 1350 $staleStrip
+Check 'step6-pretest-uses-current-strip-after-scroll' ([bool]$state6Scrolled.Strip -and $state6Scrolled.Strip.Y -eq 566 -and [bool]$state6Scrolled.Submit -and $state6Scrolled.Submit.Y -eq 972 -and [bool]$state6Scrolled.Option -and $state6Scrolled.Option.Text -eq 'B. 最后一项') "stripY=$($state6Scrolled.Strip.Y) subY=$($state6Scrolled.Submit.Y) opt=$($state6Scrolled.Option.Text)"
+
+$pretestNoStripFrame = @($pretestScrolledFrame | Where-Object { $_.Text -notin @('要点', '自测', '推导') })
+$state6NoStrip = Find-Step6PretestState $pretestNoStripFrame 2160 1350 $staleStrip
+Check 'step6-pretest-ignores-stale-strip-below-submit' ([bool]$state6NoStrip.Submit -and [bool]$state6NoStrip.Option -and $state6NoStrip.Option.Text -eq 'B. 最后一项') "opt=$($state6NoStrip.Option.Text)"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

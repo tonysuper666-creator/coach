@@ -179,6 +179,8 @@ internal fun WindowsTextbookHost(
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     var sawEmptyShelf by remember { mutableStateOf(false) }
     var tasteActive by remember { mutableStateOf(false) }
+    // Outlives the panel, so the question on screen survives the panel leaving and re-entering composition.
+    val tasteMemory = remember(controller.library.directory) { com.coach.desktop.books.FirstTasteMemory() }
     var tasteDone by remember(controller.library.directory) {
         mutableStateOf(com.coach.desktop.books.FirstOpenStore.isDone(controller.library.directory))
     }
@@ -402,6 +404,7 @@ internal fun WindowsTextbookHost(
                         onReadBook = ::finishFirstTaste,
                         onDone = ::finishFirstTaste,
                         modifier = Modifier.fillMaxSize(),
+                        memory = tasteMemory,
                     )
                 }
             }

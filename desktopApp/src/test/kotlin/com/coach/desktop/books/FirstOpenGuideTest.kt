@@ -1,5 +1,9 @@
 package com.coach.desktop.books
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
@@ -14,6 +18,7 @@ import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.WindowsTextbookHost
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -201,6 +206,69 @@ class FirstOpenGuideTest {
                 }
             }
             assertTrue(FirstOpenStore.isDone(library.directory))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    /** TON-1937: the question on screen and the reader's pick must survive until the explanation. */
+    @Test fun shownQuestionAndPickSurviveConnectivityFlipsAndRemount() {
+        val root = Files.createTempDirectory("coach-first-open-keep-")
+        try {
+            val md = root.resolve("econ.md")
+            Files.writeString(md, "# Chapter 1\n\nPrices adjust when scarcity rises.\n")
+            val library = TextbookLibrary(root.resolve("library"))
+            val book = library.importBook(md)
+            val calls = AtomicInteger()
+            val explainer = object : BookExplainer(library = library) {
+                override suspend fun fetchChapterCompanion(requestJson: JsonObject, blocks: List<SourceBlock>): ChapterCompanionFetchResult {
+                    calls.incrementAndGet()
+                    return ChapterCompanionFetchResult.Ready(samplePack())
+                }
+            }
+            runSkikoComposeUiTest(size = Size(1100f, 760f), density = Density(1f)) {
+                var connectivity by mutableStateOf(CoachConnectivityStatus.ONLINE)
+                var mounted by mutableStateOf(true)
+                setContent {
+                    val memory = remember { FirstTasteMemory() }
+                    if (mounted) {
+                        FirstTastePanel(
+                            book = book,
+                            explainer = explainer,
+                            connectivity = connectivity,
+                            onReadBook = {},
+                            onDone = {},
+                            memory = memory,
+                        )
+                    }
+                }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("first-taste-stem").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("first-taste-option-0").performClick()
+                connectivity = CoachConnectivityStatus.UNKNOWN
+                waitForIdle()
+                connectivity = CoachConnectivityStatus.ONLINE
+                waitForIdle()
+                connectivity = CoachConnectivityStatus.OFFLINE
+                waitForIdle()
+                connectivity = CoachConnectivityStatus.ONLINE
+                waitForIdle()
+                mounted = false
+                waitForIdle()
+                mounted = true
+                waitForIdle()
+                onNodeWithTag("first-taste-stem").assertTextEquals("What happens when scarcity rises?")
+                onNodeWithTag("first-taste-primary").assertIsEnabled().performClick()
+                onNodeWithTag("first-taste-explanation").assertIsDisplayed()
+                connectivity = CoachConnectivityStatus.UNKNOWN
+                waitForIdle()
+                connectivity = CoachConnectivityStatus.ONLINE
+                waitForIdle()
+                onNodeWithTag("first-taste-explanation").assertIsDisplayed()
+                onNodeWithTag("first-taste-verdict").assertTextEquals("对了。")
+            }
+            assertEquals(1, calls.get(), "the first question was asked again")
         } finally {
             root.toFile().deleteRecursively()
         }

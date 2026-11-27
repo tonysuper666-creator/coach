@@ -23,7 +23,7 @@ class FirstOpenFrontMatterTest {
     @Test fun openingSkipsFrontMatterThatRunsIntoChapterOne() {
         val root = Files.createTempDirectory("coach-first-open-front-")
         try {
-            val pdf = frontMatterPdf(root.resolve("health.pdf"))
+            val pdf = frontMatterPdf(root.resolve("ledger.pdf"))
             val library = TextbookLibrary(root.resolve("library"))
             val book = library.stageBookImportTier0(pdf).book
             val bodyPage = book.bodyStart.importPage
@@ -43,7 +43,7 @@ class FirstOpenFrontMatterTest {
 
     private fun frontMatterPdf(target: Path): Path {
         PDDocument().use { pdf ->
-            pdf.documentInformation.title = "Health Economics"
+            pdf.documentInformation.title = "Clinic Ledger Notes"
             val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
             val bold = PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD)
             val outline = PDDocumentOutline()
@@ -55,10 +55,10 @@ class FirstOpenFrontMatterTest {
                 pdf.addPage(page)
                 val dest = PDPageFitDestination().apply { this.page = page }
                 when (p) {
-                    chapterPage -> PDOutlineItem().apply { title = "1 Why health economics?"; destination = dest }
+                    chapterPage -> PDOutlineItem().apply { title = "1 Counting the cost of care"; destination = dest }
                         .also { outline.addLast(it); chapterItem = it }
-                    chapterPage + 1 -> chapterItem?.addLast(PDOutlineItem().apply { title = "1.1 The health care economy is massive"; destination = dest })
-                    10 -> PDOutlineItem().apply { title = "2 Demand for health care"; destination = dest }.also { outline.addLast(it) }
+                    chapterPage + 1 -> chapterItem?.addLast(PDOutlineItem().apply { title = "1.1 Where the money goes"; destination = dest })
+                    10 -> PDOutlineItem().apply { title = "2 Patients and prices"; destination = dest }.also { outline.addLast(it) }
                 }
                 PDPageContentStream(pdf, page).use { out ->
                     out.beginText()
@@ -66,9 +66,9 @@ class FirstOpenFrontMatterTest {
                     val lines: List<Pair<Boolean, String>> = when {
                         p < chapterPage -> List(8) { false to "PREFACE_MARKER page $p thanks the many readers who helped shape this edition line $it." }
                         p == chapterPage -> List(8) { false to "Health spending is a large share of national income in every rich country line $it." }
-                        p == chapterPage + 1 -> listOf(true to "1.1 The health care economy is massive") +
+                        p == chapterPage + 1 -> listOf(true to "1.1 Where the money goes") +
                             List(8) { false to "Hospitals and clinics employ millions of workers and use scarce resources line $it." }
-                        p == 10 -> listOf(true to "2 Demand for health care") +
+                        p == 10 -> listOf(true to "2 Patients and prices") +
                             List(8) { false to "Demand for care falls when the price a patient pays rises line $it." }
                         else -> List(8) { false to "Insurance changes what patients pay at the point of care on page $p line $it." }
                     }

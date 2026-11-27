@@ -3420,6 +3420,20 @@ internal class TextbookLibrary(
         }
     }
 
+    /** One transaction: FSRS for the concept or note, the edited note, and concept mastery on this connection. */
+    @Synchronized fun rateMemoryReview(item: MemoryReviewItem, remembered: Boolean, editedNote: String?) {
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                reviewStore.rateMemory(db, item, remembered, editedNote)
+                db.commit()
+            } catch (failure: Exception) {
+                db.rollback()
+                throw failure
+            }
+        }
+    }
+
     @Synchronized fun activeReview(): LocalBookReview? = database().use { db ->
         reviewStore.active(db)
     }

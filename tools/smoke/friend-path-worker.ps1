@@ -812,28 +812,23 @@ function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18, [int]$wi
     $order = @('讲解', '提问', '批注')
     if ($label -notin $order) { return $null }
     $cands = New-Object System.Collections.ArrayList
+    $lineIdx = 0
     foreach ($l in @($lines)) {
-        $trimmed = ([string]$l.Text).Trim()
-        $compact = $trimmed -replace '\s', ''
+        $lineIdx++
+        $compact = ([string]$l.Text) -replace '\s', ''
         if (-not $compact) { continue }
-        $present = @()
-        if ($compact -match '^(?:讲解|提问|批注)$') {
-            $present = @($compact)
-        } else {
-            $tokens = @($trimmed -split '\s+' | Where-Object { $_ })
-            if ($tokens.Count -ge 2) {
-                $matched = @($order | Where-Object { $_ -in $tokens })
-                $extra = (($tokens | Where-Object { $_ -notin @('讲解', '提问', '批注', '浮层', '并排', '×', 'x', 'X') }) -join '')
-                if ($matched.Count -ge 1 -and $extra.Length -le 2) {
-                    $present = $matched
-                }
-            }
-        }
+        $present = @($order | Where-Object { $compact.Contains($_) })
         if (-not $present.Count) { continue }
+        $stripped = $compact -replace '讲解|提问|批注|浮层|并排|[×xX·•|｜]', ''
+        $maxResidual = if ($present.Count -ge 2) { 2 } else { 0 }
+        if ($stripped.Length -gt $maxResidual) { continue }
         foreach ($name in $present) {
             $hit = Find-Text @($l) $name
             if (-not $hit) { continue }
-            [void]$cands.Add([pscustomobject]@{ Label = $name; X = $hit.X; Y = $hit.Y; X1 = $hit.X1; X2 = $hit.X2; Y1 = $hit.Y1; Y2 = $hit.Y2 })
+            [void]$cands.Add([pscustomobject]@{
+                Label = $name; LineId = $lineIdx; TextIdx = $compact.IndexOf($name)
+                X = $hit.X; Y = $hit.Y; X1 = $hit.X1; X2 = $hit.X2; Y1 = $hit.Y1; Y2 = $hit.Y2
+            })
             if ($present.Count -eq 1) { break }
         }
     }
@@ -846,7 +841,10 @@ function Find-CompanionTabLabel($lines, [string]$label, [int]$tol = 18, [int]$wi
         if (-not $notes.Count) { continue }
         $asks = @($row | Where-Object { $_.Label -eq '提问' })
         if ($asks.Count) {
-            $between = @($asks | Where-Object { $_.X -gt $explain[0].X -and $_.X -lt $notes[0].X })
+            $between = @($asks | Where-Object {
+                ($_.X -gt $explain[0].X -or ($_.LineId -eq $explain[0].LineId -and $_.TextIdx -gt $explain[0].TextIdx)) -and
+                ($_.X -lt $notes[0].X -or ($_.LineId -eq $notes[0].LineId -and $_.TextIdx -lt $notes[0].TextIdx))
+            })
             if (-not $between.Count) { continue }
         }
         if ($winW -gt 0 -and $winH -gt 0) {

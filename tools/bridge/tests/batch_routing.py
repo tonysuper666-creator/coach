@@ -313,6 +313,18 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("a" * 64, denied.await_args.kwargs["friend"])
         self.assertEqual("pc", denied.await_args.kwargs["device"])
 
+    async def test_chapter_open_question_is_accepted_as_haiku_batch(self):
+        headers = {"X-Coach-Task": "chapter_open_question", "X-Coach-Background": "1",
+                   "X-Coach-Batch-Key": self.key("chapter-open")}
+        body = {"model": "claude-haiku-5-5", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "synthetic"}]}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=bridge.app), base_url="http://test") as client:
+            with patch.object(bridge, "API_BATCH", self.router), patch.object(bridge, "USER_ONLY", False), patch.object(bridge, "write_log"):
+                response = await client.post("/v1/chat/completions", headers=headers, json=body)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("/v1/messages/batches", self.calls[0].url.path)
+        self.assertEqual("claude-haiku-5-5", json.loads(self.calls[0].content)["requests"][0]["params"]["model"])
+
     async def test_key_removed_while_pending_caches_subscription_and_preserves_reserve(self):
         await self.submit()
         self.now += 61

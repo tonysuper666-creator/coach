@@ -546,6 +546,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                    for p in (root / d).rglob("*.kt")]
         tasks = {t for s in sources for t in re.findall(r'\btask\s*=\s*"([A-Za-z_]+)"', s)}
         tasks |= {t for s in sources for t in re.findall(r'"(BOOK_[A-Z_]+)"', s)}
+        tasks |= {t for s in sources for t in re.findall(
+            r'const val TASK_[A-Z0-9_]+\s*(?::\s*String)?\s*=\s*"([A-Za-z0-9_]+)"', s)}
         # Token-ledger / section labels only; these calls never reach the bridge.
         tasks -= {
             "course_align",
@@ -553,6 +555,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertTrue({"booklist_concept_align", "course_topic_map", "BOOK_SECTION_BATCH", "course_vision_ocr"} <= tasks)
         self.assertEqual(set(), tasks - set(CONFIG["tasks"]))
+        self.assertIn("chapter_open_question", tasks)
+        self.assertIn("chapter_open_question", bridge.BATCH_TASKS)
+        self.assertEqual("claude-haiku-5-5", route("chapter_open_question", "claude-haiku-5-5"))
         constants = {m for s in sources for m in re.findall(r'const val [A-Z0-9_]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
         self.assertIn("claude-haiku-5-5", constants)
         self.assertEqual(set(), constants - set(bridge.MODELS))

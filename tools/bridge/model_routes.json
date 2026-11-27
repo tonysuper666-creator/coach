@@ -13,6 +13,7 @@
     "vision_ocr": "claude-opus-5-5",
     "math_verify": "claude-opus-5-5",
     "draft": "claude-haiku-5-5",
+    "chapter_open": "claude-haiku-5-5",
     "friend": "claude-sonnet-5-5",
     "friend_batch": "claude-haiku-5-5",
     "concept_sayings": "claude-haiku-5-5",
@@ -33,6 +34,7 @@
     "vision_ocr": "gpt-6.2-astra",
     "math_verify": "gpt-6.2-astra",
     "draft": "gpt-6.2-sol",
+    "chapter_open": "gpt-6.2-sol",
     "friend": "claude-haiku-5-5"
   },
   "tasks": {
@@ -65,6 +67,7 @@
     "practice_grade": "practice_grade",
     "practice_diagnose": "practice_grade",
     "practice_variant": "practice_grade",
+    "chapter_open_question": "chapter_open",
     "literature_guide": "friend_batch",
     "concept_sayings": "concept_sayings",
     "course_topic_map": "course_synthesis",

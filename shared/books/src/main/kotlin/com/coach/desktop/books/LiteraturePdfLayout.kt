@@ -881,8 +881,8 @@ internal object LiteraturePdfLayout {
                 }
             }.trimEnd()
             if (text.isBlank()) return@mapNotNull null
-            val columnMinX = column.minOf { it.x }
-            val columnMaxX = column.maxOf { it.right }
+            val columnMinX = slice.words.minOf { it.x }
+            val columnMaxX = slice.words.maxOf { it.right }
             val separatorYs = drawnRules
                 .filter { it.maxX >= columnMinX && it.minX <= columnMaxX }
                 .map { it.displayY }

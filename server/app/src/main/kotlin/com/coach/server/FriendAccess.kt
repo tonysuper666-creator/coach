@@ -1,5 +1,6 @@
 package com.coach.server
 
+import com.coach.ai.BridgeResult
 import com.coach.domain.*
 import com.coach.store.sha256
 import io.ktor.http.*
@@ -17,12 +18,49 @@ internal val observedFriend = AttributeKey<String>("coach.friend")
 internal fun friendId(name: String) = sha256(name.toByteArray(Charsets.UTF_8))
 // Which endpoints a signed-in friend may call lives in PublicApiTable.kt (friendPath/publicApiGate).
 
+/** The one spend refusal (TON-740): Coach's share of this month's free API grant is used up.
+ * Usage inside the grant is only recorded; per-person and per-task limits no longer refuse. */
+internal const val FREE_GRANT_EXHAUSTED = "free_grant_exhausted"
+internal const val FREE_GRANT_EXHAUSTED_MESSAGE = "这个月的免费额度用完了"
+
+/** Bridge terminal reasons meaning the free grant ran out (`credit_limit_95_percent` is the pre-TON-740 name). */
+internal fun freeGrantExhausted(reason: String?): Boolean = reason == FREE_GRANT_EXHAUSTED || reason == "credit_limit_95_percent"
+
+/** What a friend is told for a failed model call: only the exhausted free grant is named. */
+internal fun friendFailureCode(reason: String?): String = if (freeGrantExhausted(reason)) FREE_GRANT_EXHAUSTED else "unavailable"
+
+/** Every model call site runs this on a failed bridge result, owner or friend, so the exhausted free grant
+ * always reaches the reader as the same 429 sentence instead of a generic 502 or a degraded result. */
+internal fun BridgeResult.Failure.rejectIfFreeGrantExhausted() {
+    if (freeGrantExhausted(terminal?.reason)) throw FriendServiceError(FREE_GRANT_EXHAUSTED)
+}
+
+/** A failed call the bridge marked "retry shortly" (Coach's share briefly held by other calls, or an upstream
+ * rate limit) becomes the same 503 with `retryAfterSec` that every entry point answers with, so clients wait and
+ * retry instead of showing a generic failure. */
+internal fun BridgeResult.Failure.rejectIfBusy() {
+    terminal?.retryAfterSec?.takeIf { it > 0 }?.let { throw FriendServiceError("unavailable", it) }
+}
+
+/** `runCatching` for optional model calls (repairs, extra batches): other failures still degrade quietly,
+ * the exhausted free grant never does. */
+internal inline fun <T> modelCatching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (e: FriendServiceError) {
+    if (e.code == FREE_GRANT_EXHAUSTED) throw e
+    Result.failure(e)
+} catch (e: kotlinx.coroutines.CancellationException) {
+    throw e
+} catch (e: Throwable) {
+    Result.failure(e)
+}
+
 /** Fixed, human-readable errors; upstream bodies and diagnostics never cross this boundary. */
 internal class FriendServiceError(val code: String = "unavailable", private val retryAfterSec: Int? = null) : RuntimeException(code) {
-    val status get() = if (code in setOf("daily_quota", "monthly_quota")) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
+    val status get() = if (code == FREE_GRANT_EXHAUSTED) HttpStatusCode.TooManyRequests else HttpStatusCode.ServiceUnavailable
     val body get() = buildJsonObject {
         put("code", code)
-        put("error", "讲解服务暂时连不上，读书照常。")
+        put("error", if (code == FREE_GRANT_EXHAUSTED) FREE_GRANT_EXHAUSTED_MESSAGE else "讲解服务暂时连不上，读书照常。")
         retryAfterSec?.takeIf { it > 0 }?.let { put("retryAfterSec", it) }
     }
 }

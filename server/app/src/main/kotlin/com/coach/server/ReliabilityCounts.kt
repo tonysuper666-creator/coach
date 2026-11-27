@@ -236,7 +236,7 @@ internal fun classifyReaderText(text: String): String? {
 }
 
 internal fun reliabilityCodeForFriend(code: String): String =
-    if (code == "daily_quota" || code == "monthly_quota") "quota" else "other"
+    if (code == FREE_GRANT_EXHAUSTED) "quota" else "other"
 
 /** Format and size errors stay out of the rate. A checked source failure still counts. */
 internal fun reliabilityCodeForMock(status: HttpStatusCode, message: String?): String? {

@@ -103,10 +103,8 @@ class SonnetBridgeAlignTransport(
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         when (result) {
             is BridgeResult.Failure -> {
-                if (friend != null) {
-                    val quota = result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") }
-                    throw FriendServiceError(quota ?: "unavailable")
-                }
+                result.rejectIfFreeGrantExhausted()
+                if (friend != null) throw FriendServiceError(friendFailureCode(result.terminal?.reason))
                 throw IllegalStateException("课程自动对齐失败：${result.reason}")
             }
             is BridgeResult.Success -> CourseAlignReply(

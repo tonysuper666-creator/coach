@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_budget import CreditLedger, Denied, INTERRUPTED_USAGE_GRACE_SECONDS, atomic_json, micros
 from api_route import ApiFailure, ApiRouter, CONFIG, cost
 from api_routing import frames, KEY, NOW, make_png_b64
-from grant_fixture import fund
+from grant_fixture import fund, use_up
 from friend_spend_watch import publish
 import httpx
 import subscription_bridge as bridge
@@ -59,49 +59,42 @@ class FriendBudgetTests(unittest.TestCase):
                          tuple(daily[key] for key in ("calls", "input_tokens", "output_tokens", "spent_microusd")))
         self.assertEqual({"pc": 100, "second-pc": 1}, {key: value["calls"] for key, value in daily["devices"].items()})
 
-    def test_concurrent_requests_for_last_slot_admit_exactly_one_and_no_partial_month_write(self):
+    def test_configured_daily_limits_are_recorded_not_enforced(self):
+        # TON-740: per-person daily figures in the config no longer refuse; every call is recorded.
         self.limit()
-        def reserve(_):
-            try:
-                return self.reserve()
-            except Denied as e:
-                self.assertEqual("daily_quota", str(e))
-                return None
         with ThreadPoolExecutor(max_workers=12) as pool:
-            admitted = [r for r in pool.map(reserve, range(24)) if r]
-        self.assertEqual(1, len(admitted))
+            admitted = list(pool.map(lambda _: self.reserve(), range(24)))
+        self.assertEqual(24, len(admitted))
         data = self.ledger.read()
-        self.assertEqual(1, len(data["cycles"]["anthropic:2026-11"]["reserved"]))
-        self.ledger.settle("anthropic", admitted[0], 20, usage={"input_tokens": 100, "output_tokens": 20})
+        self.assertEqual(24, len(data["cycles"]["anthropic:2026-11"]["reserved"]))
+        for reservation in admitted:
+            self.ledger.settle("anthropic", reservation, 20, usage={"input_tokens": 100, "output_tokens": 20})
         day = data["friends"][B].keys().__iter__().__next__()
         daily = self.ledger.read()["friends"][B][day]
-        self.assertEqual((1, 100, 20, 20), tuple(daily[k] for k in ("calls", "input_tokens", "output_tokens", "spent_microusd")))
-        self.assertEqual(1, daily["devices"]["pc"]["calls"])
-        with self.assertRaisesRegex(Denied, "daily_quota"):
-            self.reserve(device="second-pc")
-        # A different friend and the next UTC day get independent allowances.
+        self.assertEqual((24, 2400, 480, 480), tuple(daily[k] for k in ("calls", "input_tokens", "output_tokens", "spent_microusd")))
+        self.assertEqual(24, daily["devices"]["pc"]["calls"])
+        self.reserve(device="second-pc")
         self.reserve(A)
         self.now += 86400
         self.reserve()
 
-    def test_token_pending_restart_and_friend_override(self):
+    def test_token_limits_are_recorded_not_enforced_across_restart(self):
         self.limit(calls=100, tokens=300)
         self.reserve(tokens=200)
         restarted = CreditLedger(self.root, lambda: NOW)
-        with self.assertRaisesRegex(Denied, "daily_quota"):
-            restarted.reserve("anthropic", KEY, 100, friend=B, device="pc", tokens=101)
-        atomic_json(self.config, {"defaults": {"daily_tokens": 300}, "friends": {B: {"daily_tokens": 400}}})
-        self.reserve(tokens=200)
+        restarted.reserve("anthropic", KEY, 100, friend=B, device="pc", tokens=101)
+        pending = next(iter(restarted.read()["friends"][B].values()))["reserved"]
+        self.assertEqual([200, 101], sorted((p["tokens"] for p in pending.values()), reverse=True))
 
     def test_month_limit_is_shared_with_owner_and_no_daily_reservation_is_created_on_denial(self):
-        self.ledger.reserve("anthropic", KEY, micros(190))
-        with self.assertRaisesRegex(Denied, "credit_limit_95_percent"):
+        use_up(self.ledger, "anthropic", micros(200))
+        with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
             self.reserve()
         self.assertNotIn("friends", self.ledger.read())
 
     def test_invalid_config_and_global_pause_fail_closed(self):
-        for config, reason in (({"defaults": {"daily_calls": -1}}, "friend_config_unreadable"),
-                               ({"paused": True}, "monthly_quota")):
+        for config, reason in (({"defaults": ["not", "a", "mapping"]}, "friend_config_unreadable"),
+                               ({"paused": True}, "friends_paused")):
             atomic_json(self.config, config)
             with self.assertRaisesRegex(Denied, reason):
                 self.reserve()
@@ -110,7 +103,7 @@ class FriendBudgetTests(unittest.TestCase):
             self.reserve()
 
     def test_spend_warning_publishes_once_and_contains_no_private_text(self):
-        self.ledger.reserve("anthropic", KEY, micros(185))
+        use_up(self.ledger, "anthropic", micros(195))
         calls = []
         def run(args, **kw):
             calls.append(args)
@@ -118,18 +111,18 @@ class FriendBudgetTests(unittest.TestCase):
         with patch.dict(os.environ, {"MULTICA_CLI_PATH": "/synthetic/multica"}):
             quiet = publish(self.root, run=run, now=datetime.fromtimestamp(NOW, timezone.utc))
             self.assertEqual("ok", quiet["status"])
-            with self.assertRaisesRegex(Denied, "95_percent"):
+            with self.assertRaisesRegex(Denied, "free_grant_exhausted"):
                 self.ledger.reserve("anthropic", KEY, micros(6))
             first = publish(self.root, run=run, now=datetime.fromtimestamp(NOW, timezone.utc))
             publish(self.root, run=run, now=datetime.fromtimestamp(NOW + 60, timezone.utc))
         self.assertEqual("warn", first["status"])
         asks = [c for c in calls if "--key" in c and c[c.index("--key") + 1] == "ask"]
         self.assertEqual(1, len(asks))
-        self.assertIn("赠额 95% 保护线", json.loads(asks[0][-1])["q"])
+        self.assertIn("这个月的免费额度用完了", json.loads(asks[0][-1])["q"])
         self.assertTrue(all(KEY not in str(c) for c in calls))
 
     def test_warning_does_not_replace_an_existing_question_or_fail_on_a_broken_marker(self):
-        self.ledger.reserve("anthropic", KEY, micros(190))
+        use_up(self.ledger, "anthropic", micros(200))
         (self.root / "friend-spend-watch.json").write_text("broken")
         calls = []
         def run(args, **kw):
@@ -171,12 +164,22 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("complete", result.status)
                 self.assertEqual(CONFIG["models"]["friend"], json.loads(seen[0].content)["model"])
                 self.assertEqual(1, request.physical_calls)
+                # A configured daily figure no longer refuses (TON-740): the call goes out and is recorded.
                 atomic_json(Path(temp) / "friends.json", {"defaults": {"daily_calls": 1}})
                 request = req()
                 with patch.object(bridge, "API_ROUTER", router({"anthropic": KEY})):
                     result = await bridge.dispatch(request, request.model, None)
-                self.assertEqual("daily_quota", result.reason)
-                self.assertEqual(1, len(seen))
+                self.assertEqual("complete", result.status)
+                self.assertEqual(2, len(seen))
+                self.assertEqual(2, next(iter(ledger.read()["friends"][B].values()))["calls"])
+                # Only the exhausted free grant refuses, under its own code, with zero upstream calls.
+                data = ledger.read()
+                use_up(ledger, "anthropic", micros(200) - data["cycles"]["anthropic:2026-11"]["spent"])
+                request = req()
+                with patch.object(bridge, "API_ROUTER", router({"anthropic": KEY})):
+                    result = await bridge.dispatch(request, request.model, None)
+                self.assertEqual(("failed", "free_grant_exhausted"), (result.status, result.reason))
+                self.assertEqual(2, len(seen))
                 cli.assert_not_called()
 
     async def test_friend_batch_uses_haiku_while_interactive_uses_sonnet_with_haiku_fallback(self):
@@ -225,16 +228,36 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(3, day["devices"]["pc"]["calls"])
                 self.assertEqual({}, day["reserved"])
 
-                # 3) Friend quota denial must NOT fall back to Haiku.
+                # 3) A configured daily figure is recorded, not enforced; the exhausted free grant
+                # refuses and must NOT fall back to Haiku.
                 atomic_json(Path(temp) / "friends.json", {"defaults": {"daily_calls": 2}})
+                spent = ledger.read()["cycles"]["anthropic:2026-11"]["spent"]
+                use_up(ledger, "anthropic", micros(200) - spent)
                 denied_req = bridge.build_req(
-                    {"model": "claude-sonnet-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "over quota"}]},
+                    {"model": "claude-sonnet-5-5", "max_tokens": 200, "messages": [{"role": "user", "content": "grant used up"}]},
                     {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"},
                 )
                 denied_res = await bridge.dispatch(denied_req, denied_req.model, None)
-                self.assertEqual("daily_quota", denied_res.reason)
+                self.assertEqual("free_grant_exhausted", denied_res.reason)
                 self.assertEqual(3, len(seen))
                 cli.assert_not_called()
+
+    async def test_friend_waiting_on_holds_hears_busy_not_used_up(self):
+        # Settled 0, the share fully held by in-flight calls: retry shortly, never "这个月的免费额度用完了".
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
+            fund(Path(temp))
+            ledger = CreditLedger(Path(temp), lambda: NOW)
+            ledger.reserve("anthropic", KEY, micros(200))
+            router = ApiRouter(ledger, lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, content=frames("anthropic")))), keys={"anthropic": KEY}, reservation_wait=0)
+            request = bridge.build_req({"model": "claude-sonnet-5-5", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "synthetic passage"}]},
+                {"x-coach-task": "READER_SELECTION", "x-coach-friend": B, "x-coach-friend-device": "pc"})
+            with patch.object(bridge, "API_ROUTER", router), patch.object(bridge, "write_log"):
+                result = await bridge.dispatch(request, request.model, None)
+            self.assertEqual(("failed", "unavailable"), (result.status, result.reason))
+            self.assertEqual(5, result.retry_after_sec)
+            self.assertFalse((Path(temp) / "credit-guard-2026-11-anthropic.json").exists())
 
     async def disconnect_after_text(self, ledger, receipts):
         """Cancel the production SSE body while it is yielding text to the downstream client."""
@@ -327,7 +350,7 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
                 daily = next(iter(data["friends"][A].values()))
                 self.assertEqual(({}, 0, 0), (daily["reserved"], daily["calls"], daily["spent_microusd"]))
 
-    async def test_rate_limit_does_not_consume_last_friend_slot(self):
+    async def test_rate_limit_releases_the_friend_reservation(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/friends.json"}):
             root = Path(temp)
             fund(root)
@@ -349,8 +372,6 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
             daily = next(iter(ledger.read()["friends"][A].values()))
             self.assertEqual({}, daily["reserved"])
             self.assertEqual(1, daily["calls"])
-            with self.assertRaisesRegex(Denied, "daily_quota"):
-                [event async for event in request()]
 
     async def test_ambiguous_http_failure_debits_bound_and_unsent_cancel_releases(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"COACH_FRIEND_CONFIG": temp + "/missing"}):
@@ -414,11 +435,11 @@ class FriendApiTests(unittest.IsolatedAsyncioTestCase):
 
                 # Exhaust remaining Anthropic share; friend vision must be denied with zero network calls and no OpenAI fallback.
                 spent = ledger.read()["cycles"]["anthropic:2026-11"]["spent"]
-                ledger.reserve("anthropic", KEY, micros(190) - spent)
+                use_up(ledger, "anthropic", micros(200) - spent)
                 denied_req = bridge.build_req(req_body, headers)
                 denied_res = await bridge.dispatch(denied_req, denied_req.model, None)
                 self.assertEqual("failed", denied_res.status)
-                self.assertEqual("monthly_quota", denied_res.reason)
+                self.assertEqual("free_grant_exhausted", denied_res.reason)
                 self.assertEqual(["api.anthropic.com"], seen)
                 cli.assert_not_called()
 

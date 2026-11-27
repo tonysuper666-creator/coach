@@ -269,12 +269,10 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                         }
                     }
                     if (request.cancelled.get()) { outcome = "cancelled"; return cancelledReply() }
+                    if (result is BridgeResult.Failure) result.rejectIfFreeGrantExhausted()
                     if (friend != null && result is BridgeResult.Failure) {
                         diagnostics?.bridgeFailureStage = result.stage
-                        throw FriendServiceError(
-                            result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") } ?: "unavailable",
-                            result.terminal?.retryAfterSec,
-                        )
+                        throw FriendServiceError(friendFailureCode(result.terminal?.reason), result.terminal?.retryAfterSec)
                     }
                     if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")

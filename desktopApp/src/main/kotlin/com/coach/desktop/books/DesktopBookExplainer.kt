@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.coach.client.withReaderRetry
+import com.coach.client.withBusyRetry
 import com.coach.client.CourseHttp
 import com.coach.client.MockReply
 import com.coach.client.ServerReachability
@@ -277,19 +278,23 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         bookId: String,
         mode: String,
         input: JsonObject,
+        /** Shown while the server is briefly full and the request waits to retry by itself (TON-740). */
+        onBusy: (String) -> Unit = {},
         onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit = { _, _, _ -> },
     ): CourseServerCallResult {
         var streamedAny = false
         return callCourseEndpoint(canRetry = { !streamedAny }) { http ->
-            http.streamStudyModePack(bookId, mode, input) { chars, firstTokenMs, delta ->
-                if (chars > 0 || delta.isNotEmpty()) streamedAny = true
-                onProgress(chars, firstTokenMs, delta)
+            withBusyRetry(stillCurrent = { !streamedAny }, onBusy = onBusy) {
+                http.streamStudyModePack(bookId, mode, input) { chars, firstTokenMs, delta ->
+                    if (chars > 0 || delta.isNotEmpty()) streamedAny = true
+                    onProgress(chars, firstTokenMs, delta)
+                }
             }
         }
     }
 
-    open suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
-        callCourseEndpoint { http -> http.fetchBookMapBatch(bookId, input) }
+    open suspend fun fetchBookMapBatch(bookId: String, input: JsonObject, onBusy: (String) -> Unit = {}): CourseServerCallResult =
+        callCourseEndpoint { http -> withBusyRetry(onBusy = onBusy) { http.fetchBookMapBatch(bookId, input) } }
 
     private suspend fun callCourseEndpoint(
         canRetry: () -> Boolean = { true },

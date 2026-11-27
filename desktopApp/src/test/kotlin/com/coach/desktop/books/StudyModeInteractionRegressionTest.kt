@@ -64,6 +64,7 @@ class StudyModeInteractionRegressionTest {
             bookId: String,
             mode: String,
             input: JsonObject,
+            onBusy: (String) -> Unit,
             onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit,
         ): CourseServerCallResult = onModeFetch(bookId, mode, input, onProgress)
     }

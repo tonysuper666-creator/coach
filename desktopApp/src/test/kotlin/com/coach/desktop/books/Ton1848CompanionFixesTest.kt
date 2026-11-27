@@ -107,6 +107,7 @@ class Ton1848CompanionFixesTest {
             bookId: String,
             mode: String,
             input: JsonObject,
+            onBusy: (String) -> Unit,
             onProgress: (chars: Int, firstTokenMs: Long?, delta: String) -> Unit,
         ): CourseServerCallResult {
             modeCalls += mode

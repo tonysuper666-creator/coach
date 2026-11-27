@@ -43,6 +43,8 @@ internal enum class ExplainTrouble(val retry: Boolean) {
         fun of(status: Int?, code: String?): ExplainTrouble = when {
             status == null -> Unreachable
             status == 401 -> Revoked
+            // TON-740: the free grant ran out — show the server's sentence as is, never the generic "busy" copy.
+            code == "free_grant_exhausted" -> Other
             code == "unavailable" || status == 408 || status == 429 || status >= 500 -> Busy
             else -> Other
         }

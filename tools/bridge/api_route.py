@@ -16,7 +16,7 @@ import time
 
 import httpx
 
-from api_budget import CreditLedger, Denied
+from api_budget import CreditLedger, Denied, FREE_GRANT_EXHAUSTED, RESERVATIONS_BUSY
 
 CONFIG = json.loads(Path(__file__).with_name("model_routes.json").read_text())
 ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages", "openai": "https://api.openai.com/v1/responses"}
@@ -38,11 +38,11 @@ NON_FALLBACK_DENIALS = frozenset({
     "unsupported_image", "unsupported_context_price", "unsupported_output_limit", "invalid_reservation",
 })
 OCR_GUARD_DENIALS = frozenset({
-    "credit_limit_95_percent",
+    FREE_GRANT_EXHAUSTED,
+    RESERVATIONS_BUSY,
     "grant_allocation_unavailable",
     "ledger_unreadable",
-    "monthly_quota",
-    "daily_quota",
+    "friends_paused",
     "friend_config_unreadable",
 })
 
@@ -422,6 +422,7 @@ class ApiRouter:
         bulk_concurrency: int | None = None,
         retry_429_delays: tuple[float, ...] | None = None,
         retry_429_budget: float | None = None,
+        reservation_wait: float | None = None,
         sleep=None,
         clock=time.monotonic,
         wall_clock=time.time,
@@ -450,6 +451,27 @@ class ApiRouter:
             else _env_float("BRIDGE_API_429_BUDGET_SEC", DEFAULT_429_BUDGET_SEC, minimum=0.0)
         )
         self._sleep = sleep or asyncio.sleep
+        # How long a request waits while other calls' holds fill Coach's share (they settle in seconds).
+        # None reads BRIDGE_RESERVATION_WAIT_SEC (default 30) at each wait.
+        self.reservation_wait = max(0.0, float(reservation_wait)) if reservation_wait is not None else None
+
+    async def reserve_waiting(self, provider: str, key: str, maximum: int, **kw):
+        """Reserve, queueing briefly behind other calls' temporary holds.
+
+        Only the exhausted free grant (settled spend + this bound > Coach's share) refuses
+        outright; held-but-unsettled reservations make the request wait and retry.
+        """
+        wait = self.reservation_wait if self.reservation_wait is not None else _env_float("BRIDGE_RESERVATION_WAIT_SEC", 30.0, minimum=0.0)
+        deadline = self._clock() + wait
+        delay = 0.25
+        while True:
+            try:
+                return self.ledger.reserve(provider, key, maximum, **kw)
+            except Denied as err:
+                if str(err) != RESERVATIONS_BUSY or self._clock() + delay > deadline:
+                    raise
+            await self._sleep(delay)
+            delay = min(delay * 2, 2.0)
 
     def _gate(self, provider: str) -> ApiGate:
         gate = self._gates.get(provider)
@@ -532,7 +554,7 @@ class ApiRouter:
         bulk = friend is None and task not in INTERACTIVE_TASKS
         gate = self._gate(provider)
         async with gate.slot(bulk=bulk):
-            reservation = self.ledger.reserve(provider, key, maximum, friend=friend, device=device, tokens=input_bound + output_limit)
+            reservation = await self.reserve_waiting(provider, key, maximum, friend=friend, device=device, tokens=input_bound + output_limit)
             possibly_billed = False
             interrupted = False
             stream_opened = False

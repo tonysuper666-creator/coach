@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,12 +12,25 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
+import kotlinx.coroutines.flow.first
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,6 +40,14 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.CoachCardMeta
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperCard
+
+/** The companion column's viewport. The sayings pane scrolls this, not the window. */
+internal class CompanionScrollAnchor {
+    var scroll: ScrollState? = null
+    var viewport by mutableStateOf<LayoutCoordinates?>(null)
+}
+
+internal val LocalCompanionScrollAnchor = staticCompositionLocalOf<CompanionScrollAnchor?> { null }
 
 /**
  * 右侧伴读抽屉底部的安静跨书联动微卡区（最多展示 2 张，正文区域 0px 行内标注/弹窗）。
@@ -177,7 +199,11 @@ private fun ConceptSayingsBoardPane(
 ) {
     val colors = CoachTheme.colors
     if (board == null && !checking && notice.isNullOrBlank()) return
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+    val revealKey = listOf(board?.conceptId, board?.inputHash, board?.pending, checking, notice)
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().revealSayingsInCompanion(revealKey),
+    ) {
         HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.7f))
         Text(
             "别的书怎么说",
@@ -224,6 +250,47 @@ private fun ConceptSayingsBoardPane(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun Modifier.revealSayingsInCompanion(revealKey: Any?): Modifier {
+    val anchor = LocalCompanionScrollAnchor.current
+    var self by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    LaunchedEffect(revealKey, anchor) {
+        if (revealKey == null || anchor == null) return@LaunchedEffect
+        val placed = snapshotFlow {
+            val coords = self
+            val view = anchor.viewport
+            val max = anchor.scroll?.maxValue
+            Triple(coords, view, max)
+        }.first { (coords, view, max) ->
+            coords != null && view != null && coords.isAttached && view.isAttached &&
+                coords.size.height > 0 && view.size.height > 0 && max != null &&
+                (max > 0 || runCatching {
+                    view.localPositionOf(coords, Offset.Zero).y + coords.size.height <= view.size.height + 1f
+                }.getOrDefault(false))
+        }
+        val coords = placed.first ?: return@LaunchedEffect
+        val view = placed.second ?: return@LaunchedEffect
+        val scrollState = anchor.scroll ?: return@LaunchedEffect
+        if (!coords.isAttached || !view.isAttached) return@LaunchedEffect
+        val top = runCatching { view.localPositionOf(coords, Offset.Zero).y }.getOrNull() ?: return@LaunchedEffect
+        val delta = sayingsScrollDelta(top, coords.size.height.toFloat(), view.size.height.toFloat())
+        if (abs(delta) < 1f) return@LaunchedEffect
+        val target = (scrollState.value + delta).roundToInt().coerceIn(0, scrollState.maxValue)
+        if (target != scrollState.value) scrollState.scrollTo(target)
+    }
+    return this.onGloballyPositioned { self = it }
+}
+
+private fun sayingsScrollDelta(topInViewport: Float, paneHeight: Float, viewHeight: Float): Float {
+    val bottom = topInViewport + paneHeight
+    if (topInViewport >= -0.5f && bottom <= viewHeight + 0.5f) return 0f
+    return if (paneHeight <= viewHeight) {
+        if (topInViewport < 0f) topInViewport else bottom - viewHeight
+    } else {
+        topInViewport
     }
 }
 

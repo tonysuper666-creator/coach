@@ -20,6 +20,8 @@ internal data class ExamDailyHomeView(
 
 /** Local daily budget and the points pinned into the next few days. Syncs as kind exam_daily. */
 internal object ExamDailyStateStore {
+    /** One cap shared by every course. Not a course id. */
+    const val SHARED_BUDGET_ID = "daily-budget"
     private val json = Json { ignoreUnknownKeys = true }
 
     fun ensure(db: Connection) {
@@ -109,8 +111,17 @@ internal object ExamDailyStateStore {
     }
 }
 
+internal data class ExamDayBoard(
+    val budgetMinutes: Int,
+    val days: List<MultiCourseDay>,
+) {
+    val today: MultiCourseDay get() = days.first()
+}
+
 /** Home countdown for the nearest course exam, sized from what is still unmastered. */
 internal object ExamDailyHome {
+    private val json = Json { ignoreUnknownKeys = true }
+
     fun load(library: TextbookLibrary, today: LocalDate = LocalDate.now()): ExamDailyHomeView? =
         library.withCourseDatabase { db ->
             val course = pickCourse(db, today) ?: return@withCourseDatabase null
@@ -135,6 +146,25 @@ internal object ExamDailyHome {
         library.withCourseDatabase { db -> ExamDailyStateStore.writeMinutes(db, courseId, minutes) }
     }
 
+    /** Several courses share one daily cap. The next five days assume unfinished work is spread, not piled. */
+    fun loadDay(library: TextbookLibrary, today: LocalDate = LocalDate.now()): ExamDayBoard? =
+        library.withCourseDatabase { db ->
+            val courses = listCourses(db)
+            if (courses.isEmpty()) return@withCourseDatabase null
+            val inputs = courses.map { course ->
+                val (_, pins) = ExamDailyStateStore.read(db, course.id)
+                CourseDayInput(course.id, course.title, course.exam, loadPoints(db, course.id), pins)
+            }
+            val budget = ExamDailyStateStore.read(db, ExamDailyStateStore.SHARED_BUDGET_ID).first ?: 90
+            ExamDayBoard(budget, MultiCourseDailyPlanner.preview(today, inputs, budget, days = 5))
+        }
+
+    fun setSharedBudget(library: TextbookLibrary, minutes: Int) {
+        library.withCourseDatabase { db ->
+            ExamDailyStateStore.writeMinutes(db, ExamDailyStateStore.SHARED_BUDGET_ID, minutes)
+        }
+    }
+
     fun schedulePins(
         library: TextbookLibrary,
         courseId: String,
@@ -149,10 +179,17 @@ internal object ExamDailyHome {
     private data class DatedCourse(val id: String, val title: String, val exam: LocalDate)
 
     private fun pickCourse(db: Connection, today: LocalDate): DatedCourse? {
-        val courses = db.prepareStatement(
+        val courses = listCourses(db)
+        return courses.filter { !it.exam.isBefore(today) }.minByOrNull { it.exam }
+            ?: courses.maxByOrNull { it.exam }
+    }
+
+    private fun listCourses(db: Connection): List<DatedCourse> =
+        db.prepareStatement(
             """SELECT id, title, exam_date FROM collections
                WHERE kind='COURSE' AND IFNULL(archived,0)=0
-                 AND exam_date IS NOT NULL AND exam_date<>''""",
+                 AND exam_date IS NOT NULL AND exam_date<>''
+               ORDER BY exam_date, id""",
         ).use { sql ->
             sql.executeQuery().use { rows ->
                 buildList {
@@ -163,9 +200,6 @@ internal object ExamDailyHome {
                 }
             }
         }
-        return courses.filter { !it.exam.isBefore(today) }.minByOrNull { it.exam }
-            ?: courses.maxByOrNull { it.exam }
-    }
 
     private fun loadPoints(db: Connection, courseId: String): List<ExamPointWork> {
         val mastery = loadMastery(db, courseId)
@@ -185,13 +219,16 @@ internal object ExamDailyHome {
                         val average = if (records.isEmpty()) 0.0 else records.map { it.pMastery }.average()
                         val tagged = records.count { it.error }
                         val reviews = wrongLessons.count { lessonMatches(it, id) }
+                        val pack = rows.getString(3)
+                        val bank = ExamBankMock.bankCount(id, title, pack)
                         add(
                             ExamPointWork(
                                 id = id,
                                 title = title,
                                 mastered = ExamDailyTaskPlanner.mastered(average, records.isNotEmpty()),
                                 wrongQuestions = maxOf(reviews, tagged),
-                                bankQuestions = ExamBankMock.bankCount(id, title, rows.getString(3)),
+                                bankQuestions = bank,
+                                questionGap = questionGap(pack, bank),
                             ),
                         )
                     }
@@ -244,6 +281,17 @@ internal object ExamDailyHome {
         if (topicId.isBlank() || lesson.isBlank()) return false
         if (lesson == topicId || lesson.substringBefore('#') == topicId) return true
         return topicId in lesson
+    }
+
+    private fun questionGap(packJson: String?, bankQuestions: Int): QuestionGap {
+        if (bankQuestions > 0) return QuestionGap.NONE
+        if (packJson.isNullOrBlank()) return QuestionGap.NEVER_GENERATED
+        val root = runCatching { json.parseToJsonElement(packJson) as? JsonObject }.getOrNull()
+            ?: return QuestionGap.NEVER_GENERATED
+        val drill = (root["drill"] as? JsonObject)?.let { ExamPointDrillLocal.decode(it) }
+            ?: return QuestionGap.NEVER_GENERATED
+        val attempted = drill.checked > 0 || drill.discards.isNotEmpty() || !drill.emptyReason.isNullOrBlank()
+        return if (attempted) QuestionGap.DROPPED else QuestionGap.NEVER_GENERATED
     }
 
     private fun preferenceMinutes(db: Connection, courseId: String): Int? {

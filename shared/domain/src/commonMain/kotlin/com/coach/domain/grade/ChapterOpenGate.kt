@@ -274,13 +274,21 @@ object ChapterOpenGate {
 
     /**
      * A credited answer is obviously off-topic only when it shares no content
-     * with the claim or the hanging sentence and is too short to be a rewording.
-     * A longer paraphrase is left to the model.
+     * word with the claim or the hanging sentence and is too short to be a rewording.
+     * One shared word is enough to leave the verdict to the model. A short answer
+     * that shares nothing is still forced to 没答到, so a zero-overlap dinner sentence
+     * cannot stay 答到. A longer paraphrase is left to the model.
      */
     fun obviouslyOffTopic(claim: String, sourceSentence: String, answer: String): Boolean {
         if (answer.isBlank()) return true
         if (!isOffTopic(claim, answer)) return false
         if (sourceSentence.isNotBlank() && !isOffTopic(sourceSentence, answer)) return false
+        if (contentTokens(claim).intersect(contentTokens(answer)).isNotEmpty()) return false
+        if (sourceSentence.isNotBlank() &&
+            contentTokens(sourceSentence).intersect(contentTokens(answer)).isNotEmpty()
+        ) {
+            return false
+        }
         return !longAttempt(answer)
     }
 

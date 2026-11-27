@@ -446,14 +446,18 @@ private val obsidianDirectoryDialogOpen = java.util.concurrent.atomic.AtomicBool
 internal enum class ObsidianPick { Scheduled, Busy, Unsupported }
 
 /** 选一个 Obsidian 库或其中的文件夹。对话框放到下一个 AWT 事件里开，避免同一次点击开两个。 */
-internal fun bookPickObsidianDirectory(onResult: (java.nio.file.Path?) -> Unit): ObsidianPick {
+internal fun bookPickObsidianDirectory(
+    dialogTitle: String = "导出到 Obsidian",
+    approveButtonText: String = "导出到这里",
+    onResult: (java.nio.file.Path?) -> Unit,
+): ObsidianPick {
     if (!obsidianDirectoryDialogOpen.compareAndSet(false, true)) return ObsidianPick.Busy
     java.awt.EventQueue.invokeLater {
         val picked = try {
             val chooser = javax.swing.JFileChooser().apply {
                 fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
-                dialogTitle = "导出到 Obsidian"
-                approveButtonText = "导出到这里"
+                this.dialogTitle = dialogTitle
+                this.approveButtonText = approveButtonText
             }
             if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) chooser.selectedFile?.toPath() else null
         } catch (_: Exception) {

@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -409,6 +410,38 @@ internal fun SingleBookCompanionPanel(
         onDraftChange(updated)
     }
 
+    fun rememberQuizConcepts(
+        quiz: BookCompanionQuiz,
+        chapterId: String,
+        correct: Boolean,
+        guessed: Boolean,
+        pretest: Boolean,
+        chapterEnd: Boolean,
+    ) {
+        val points = (packState as? CompanionPackState.Ready)?.pack?.keyPoints.orEmpty()
+        val score = if (correct && !guessed) 1.0 else 0.0
+        val candidates = ConceptMasteryMap.candidatesForQuiz(quiz, points, score)
+        if (candidates.isEmpty()) return
+        library.recordConceptAnswers(
+            book = book,
+            expectedChapterId = chapterId,
+            candidates = candidates,
+            kind = if (chapterEnd) ConceptAnswerKind.CHAPTER_END else ConceptAnswerKind.MCQ,
+            signal = if (pretest) LearnerSignalType.PRETEST_T0 else LearnerSignalType.POST_QUIZ_T1,
+            guessed = guessed,
+            questionId = quiz.id,
+            prompt = quiz.stem,
+        )
+    }
+
+    var showMastery by remember(book.id) { mutableStateOf(false) }
+    val masteryButton: @Composable () -> Unit = {
+        V7TextButton(
+            onClick = { showMastery = !showMastery },
+            modifier = Modifier.testTag("companion-mod-mastery"),
+        ) { Text(if (showMastery) "返回" else "掌握") }
+    }
+
     Column(modifier.fillMaxSize().testTag("single-book-companion")) {
         // In-place Study Mode bar + 5-module selector strip.
         // On wide bottom-sheet drawers (>= 520dp, e.g. 752x552 half-screen window), merge both into a single
@@ -444,6 +477,7 @@ internal fun SingleBookCompanionPanel(
                                     pillShape,
                                 )
                                 .clickable(role = Role.Tab) {
+                                    showMastery = false
                                     updateDraft { it.copy(activeModule = mod.name) }
                                 }
                                 .pointerHoverIcon(PointerIcon.Hand)
@@ -471,6 +505,7 @@ internal fun SingleBookCompanionPanel(
                             tag = "companion-mode-trigger",
                             noun = "伴读",
                         )
+                        masteryButton()
                         modulePills(Modifier.weight(1f))
                         if (showKnobsInMerged) {
                             CoachCardMeta(
@@ -498,6 +533,7 @@ internal fun SingleBookCompanionPanel(
                             tag = "companion-mode-trigger",
                             noun = "伴读",
                         )
+                        masteryButton()
                         CoachCardMeta(
                             "${studyPreference.detailLevel.labelZh} · ${studyPreference.explainLang.shortZh}",
                             Modifier.testTag("companion-mode-knobs-summary"),
@@ -514,7 +550,12 @@ internal fun SingleBookCompanionPanel(
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        val sayingsScroll = remember { CompanionScrollAnchor() }
+        sayingsScroll.scroll = scroll
+        Box(
+            Modifier.weight(1f).fillMaxWidth().onGloballyPositioned { sayingsScroll.viewport = it },
+        ) {
+            CompositionLocalProvider(LocalCompanionScrollAnchor provides sayingsScroll) {
             Column(
                 Modifier
                     .fillMaxSize()
@@ -598,6 +639,17 @@ internal fun SingleBookCompanionPanel(
                                     )
                                 }
                                 onCommitQuizAnswer(summarySection, 100 + packIndex, practice, answer.copy(understood = answer.text == q.correctOption))
+                                val masteredChapter = chapterGroup?.chapterId
+                                if (answer.revealed && masteredChapter != null) {
+                                    rememberQuizConcepts(
+                                        quiz = q,
+                                        chapterId = masteredChapter,
+                                        correct = answer.text == q.correctOption,
+                                        guessed = answer.guessed,
+                                        pretest = false,
+                                        chapterEnd = true,
+                                    )
+                                }
                             },
                             onOpenMainline = onOpenSectionMainline?.let { open -> { open(currentSectionIndex) } },
                             onDismiss = { dismissed = true },
@@ -790,6 +842,14 @@ internal fun SingleBookCompanionPanel(
                                             Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options, quiz.anchor?.pdfPage),
                                             PracticeAnswer(text = chosen, revealed = true, guessed = guessed),
                                         )
+                                        rememberQuizConcepts(
+                                            quiz = quiz,
+                                            chapterId = pack.chapterId,
+                                            correct = chosen == quiz.correctOption,
+                                            guessed = guessed,
+                                            pretest = true,
+                                            chapterEnd = false,
+                                        )
                                     }
                                 },
                                 onOpenAnchor = onOpenAnchor,
@@ -855,6 +915,16 @@ internal fun SingleBookCompanionPanel(
                                             Practice(quiz.stem, quiz.anchor?.quoteAnchor.orEmpty(), quiz.correctOption, quiz.options, quiz.anchor?.pdfPage),
                                             PracticeAnswer(text = chosen, revealed = true, understood = chosen == quiz.correctOption, guessed = guessed),
                                         )
+                                        if (quiz.options.size >= 2) {
+                                            rememberQuizConcepts(
+                                                quiz = quiz,
+                                                chapterId = pack.chapterId,
+                                                correct = chosen == quiz.correctOption,
+                                                guessed = guessed,
+                                                pretest = false,
+                                                chapterEnd = true,
+                                            )
+                                        }
                                     }
                                 },
                                 onOpenAnchor = onOpenAnchor,
@@ -898,12 +968,33 @@ internal fun SingleBookCompanionPanel(
                         },
                         onOpenAnchor = onOpenAnchor,
                         onOpenLogin = onOpenLogin,
+                        onPointsGraded = { question, attempt ->
+                            library.recordConceptAnswers(
+                                book = book,
+                                expectedChapterId = chapterGroup.chapterId,
+                                candidates = ConceptMasteryMap.candidatesForChapterOpen(question, attempt),
+                                kind = ConceptAnswerKind.RUBRIC,
+                                signal = LearnerSignalType.RUBRIC_GRADE,
+                                guessed = false,
+                                questionId = "${chapterGroup.chapterId}#open#${attempt.n}",
+                                prompt = question.stem,
+                            )
+                        },
                     )
                 }
                 bottomContent?.invoke()
             }
+            }
             if (scroll.maxValue > 0) {
                 BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 6.dp))
+            }
+            if (showMastery) {
+                ConceptMasteryMapPanel(
+                    book = book,
+                    library = library,
+                    onOpenAnchor = onOpenAnchor,
+                    modifier = Modifier.matchParentSize(),
+                )
             }
         }
     }
@@ -1220,6 +1311,18 @@ private fun OptionalPracticeModuleView(
                                     guessed = draft.practiceGuessed[quiz.id] == true,
                                     errorClass = errCls,
                                 )
+                                if (mode != "DIAGNOSE_ONLY") {
+                                    library.recordConceptAnswers(
+                                        book = book,
+                                        expectedChapterId = pack.chapterId,
+                                        candidates = ConceptMasteryMap.candidatesForRubric(resp.rubricItems, quiz, pack.keyPoints),
+                                        kind = ConceptAnswerKind.RUBRIC,
+                                        signal = LearnerSignalType.RUBRIC_GRADE,
+                                        guessed = draft.practiceGuessed[quiz.id] == true,
+                                        questionId = quiz.id,
+                                        prompt = quiz.stem,
+                                    )
+                                }
                             } else if (errCls != null) {
                                 library.recordMasteryEvidence(
                                     bookId = book.id,

@@ -148,8 +148,11 @@ internal fun bookClipboardText(text: String) = ClipEntry(ClipData.newPlainText("
 
 internal enum class ObsidianPick { Scheduled, Busy, Unsupported }
 
-internal fun bookPickObsidianDirectory(@Suppress("UNUSED_PARAMETER") onResult: (java.nio.file.Path?) -> Unit): ObsidianPick =
-    ObsidianPick.Unsupported
+internal fun bookPickObsidianDirectory(
+    @Suppress("UNUSED_PARAMETER") dialogTitle: String = "导出到 Obsidian",
+    @Suppress("UNUSED_PARAMETER") approveButtonText: String = "导出到这里",
+    @Suppress("UNUSED_PARAMETER") onResult: (java.nio.file.Path?) -> Unit,
+): ObsidianPick = ObsidianPick.Unsupported
 
 internal fun bookSaveNotesMarkdown(
     suggestedFileName: String,

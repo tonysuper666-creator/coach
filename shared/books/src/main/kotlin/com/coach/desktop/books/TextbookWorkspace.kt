@@ -77,7 +77,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     onPickBooklistFiles: (suspend () -> List<Path>)? = null,
     chooseReviewedBlocks: (suspend () -> List<Path>)? = null,
     explainProvider: BookExplainer? = null,
-    chooseBook: suspend () -> Path?) {
+    firstOpenGuide: Boolean = false,
+    chooseBook: suspend () -> Path?,
+) {
     val explainer = remember(controller.library, explainProvider) { explainProvider ?: BookExplainer(library = controller.library) }
     val collectionQaSessions = remember { mutableStateMapOf<String, CollectionQaSessionState>() }
     var guideCourse by remember { mutableStateOf<String?>(null) }
@@ -441,6 +443,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onDismissMultiDrop = controller::dismissMultiDrop,
                             onRetryUpload = { bookId -> controller.retryBookUpload(bookId) },
                             library = controller.library,
+                            firstOpenGuide = firstOpenGuide,
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)

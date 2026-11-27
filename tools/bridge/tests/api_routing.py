@@ -558,6 +558,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("chapter_open_question", tasks)
         self.assertIn("chapter_open_question", bridge.BATCH_TASKS)
         self.assertEqual("claude-haiku-5-5", route("chapter_open_question", "claude-haiku-5-5"))
+        self.assertIn("course_essay_note", tasks)
+        self.assertIn("course_essay_check", tasks)
+        self.assertNotIn("course_essay_note", bridge.BATCH_TASKS)
+        self.assertNotIn("course_essay_check", bridge.BATCH_TASKS)
+        self.assertEqual("claude-haiku-5-5", route("course_essay_note", "claude-haiku-5-5"))
+        self.assertEqual("gpt-6.2-astra", route("course_essay_check", "gpt-6.2-astra"))
         constants = {m for s in sources for m in re.findall(r'const val [A-Z0-9_]+ = "((?:claude|gpt)-[a-z0-9.-]+)"', s)}
         self.assertIn("claude-haiku-5-5", constants)
         self.assertEqual(set(), constants - set(bridge.MODELS))

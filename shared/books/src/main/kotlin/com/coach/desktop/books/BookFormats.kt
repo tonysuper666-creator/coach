@@ -98,9 +98,24 @@ internal object BookText {
 
     private val heading = Regex("(?im)^(?:#{1,6}\\s+[^\\r\\n]+|第\\s*[零〇一二三四五六七八九十百千万两0-9]+\\s*[章节篇][^\\r\\n]*|(?:Chapter|Section)\\s+(?:[0-9]+|[IVXLC]+)\\b[^\\r\\n]*)$")
 
+    // A line-start chapter already splits the book. Only a wall of text with several
+    // sentence-bound 第N章 markers (GBK dumps) needs those markers lifted onto their own lines.
+    private val lineStartNumberedChapter = Regex(
+        """(?m)^第\s*[零〇一二三四五六七八九十百千万两兩0-9]{1,4}\s*[章节篇]""",
+    )
+    private val inlineNumberedChapter = Regex(
+        """(?<=[。！？”」』》])(第\s*[零〇一二三四五六七八九十百千万两兩0-9]{1,4}\s*[章节篇])""",
+    )
+
+    internal fun exposeInlineNumberedChapters(text: String): String {
+        if (lineStartNumberedChapter.containsMatchIn(text)) return text
+        if (inlineNumberedChapter.findAll(text).count() < 3) return text
+        return inlineNumberedChapter.replace(text) { "\n\n${it.groupValues[1]}\n" }
+    }
+
     /** Optional section provenance uses offsets in clean(text), before its outer trim. */
     fun chapters(text: String, section: ((Int, List<BookPage>) -> Unit)? = null): List<BookPage> {
-        val normalized = TextbookExtraction.clean(text)
+        val normalized = exposeInlineNumberedChapters(TextbookExtraction.clean(text))
         val leading = normalized.length - normalized.trimStart().length
         val cleaned = normalized.trim()
         require(cleaned.isNotBlank()) { "教材中没有可读取的文字。" }

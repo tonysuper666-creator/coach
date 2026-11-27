@@ -29,41 +29,24 @@ internal fun TodayCard(
     }
     val scope = rememberCoroutineScope()
     var budgetRevision by remember { mutableIntStateOf(0) }
-    val exam by produceState<ExamDailyHomeView?>(null, library, budgetRevision) {
-        value = withContext(Dispatchers.IO) { library?.let { ExamDailyHome.load(it) } }
+    val exam by produceState<ExamDayBoard?>(null, library, budgetRevision) {
+        value = withContext(Dispatchers.IO) { library?.let { ExamDailyHome.loadDay(it) } }
     }
     val count = ui.todayQueue.cards.size
     val colors = CoachTheme.colors
     PaperCard(Modifier.testTag("home-focus-card"), color = colors.surface1) {
         Text("今天", modifier = Modifier.testTag("home-focus-title"), style = MaterialTheme.typography.titleLarge, fontFamily = LocalV7Fonts.current.display)
-        exam?.let { view ->
-            Text(
-                "${view.courseTitle} · ${view.tasks.header}",
-                modifier = Modifier.testTag("home-exam-countdown"),
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(view.tasks.taskLine(), modifier = Modifier.testTag("home-exam-tasks"), style = MaterialTheme.typography.bodyMedium)
-            if (view.tasks.pointsWithoutQuestions.isNotEmpty()) {
-                val names = view.tasks.pointsWithoutQuestions.joinToString("、") { view.titles[it] ?: it }
-                Text("这些考点还没有题：$names", modifier = Modifier.testTag("home-exam-gap"), style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-            }
-            if (library != null) {
-                Text("每天最多 ${view.tasks.budgetMinutes} 分钟", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(30, 60, 90, 120).forEach { minutes ->
-                        PaperButton(
-                            onClick = {
-                                scope.launch {
-                                    withContext(Dispatchers.IO) { ExamDailyHome.setBudget(library, view.courseId, minutes) }
-                                    budgetRevision++
-                                }
-                            },
-                            enabled = !ui.busy,
-                            modifier = Modifier.testTag("home-exam-minutes-$minutes"),
-                        ) { Text("$minutes 分钟") }
+        exam?.let { board ->
+            ExamDayBlock(
+                board = board,
+                busy = ui.busy,
+                onBudget = if (library == null) null else { minutes ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { ExamDailyHome.setSharedBudget(library, minutes) }
+                        budgetRevision++
                     }
-                }
-            }
+                },
+            )
         }
         if (focus != null) {
             val chapter = ui.book?.takeIf { it.id == focus.id }?.lessons?.firstOrNull {
@@ -104,6 +87,79 @@ internal fun TodayCard(
         }
         if (focus == null && count == 0 && question == null && exam == null) {
             CoachCardMeta(HOME_REVIEW_EMPTY_MESSAGE, Modifier.testTag("home-review-done"))
+        }
+    }
+}
+
+@Composable
+private fun ExamDayBlock(board: ExamDayBoard, busy: Boolean, onBudget: ((Int) -> Unit)?) {
+    val colors = CoachTheme.colors
+    val today = board.today
+    Column(Modifier.testTag("home-exam-board"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            "几门课一起排 · 今天 ${today.totalMinutes}/${board.budgetMinutes} 分钟",
+            modifier = Modifier.testTag("home-exam-countdown"),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        today.courses.forEach { course ->
+            Text(
+                "${course.title} · ${course.reason}",
+                modifier = Modifier.testTag("home-exam-course"),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            course.lines.forEach { line ->
+                Text(
+                    line,
+                    modifier = Modifier.testTag("home-exam-task"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        val reads = today.courses.flatMap { it.readFirstTitles }
+        if (reads.isNotEmpty()) {
+            Text(
+                "先读这一节：${reads.joinToString("、")}",
+                modifier = Modifier.testTag("home-exam-gap"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+            )
+        }
+        if (onBudget != null) {
+            Text(
+                "每天最多 ${board.budgetMinutes} 分钟，几门课加起来不超过它",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(30, 60, 90, 120).forEach { minutes ->
+                    PaperButton(
+                        onClick = { onBudget(minutes) },
+                        enabled = !busy,
+                        modifier = Modifier.testTag("home-exam-minutes-$minutes"),
+                    ) { Text("$minutes 分钟") }
+                }
+            }
+        }
+        Text(
+            "连续 5 天。漏做一天不会堆到下一天，按剩下的天数摊开。",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.fgSecondary,
+        )
+        board.days.forEach { day ->
+            val cells = day.courses.joinToString(" · ") { "${it.title} ${it.minutes} 分钟" }
+            Text(
+                "${day.date} · $cells · 合计 ${day.totalMinutes} 分钟",
+                modifier = Modifier.testTag("home-exam-day"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

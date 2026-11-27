@@ -225,7 +225,8 @@ internal fun listLibraryBooks(db: Connection): List<LibraryBookHead> {
             buildList {
                 while (rows.next()) {
                     val author = if (authorCol == null) "" else rows.getString(3).orEmpty()
-                    add(LibraryBookHead(rows.getString(1), rows.getString(2).orEmpty().ifBlank { "未命名的书" }, author.trim()))
+                    val title = visibleBookTitle(rows.getString(2).orEmpty()).ifBlank { "未命名的书" }
+                    add(LibraryBookHead(rows.getString(1), title, author.trim()))
                 }
             }
         }
@@ -604,7 +605,7 @@ private fun readRecord(rows: ResultSet): LibraryRecord {
         scheme = rows.getString("id_scheme"),
         kind = kind,
         bookId = rows.getString("book_id"),
-        bookTitle = rows.getString("book_title"),
+        bookTitle = visibleBookTitle(rows.getString("book_title").orEmpty()),
         author = rows.getString("author").orEmpty(),
         page = rows.intOrNull("page"),
         startUtf16 = rows.intOrNull("start_utf16"),

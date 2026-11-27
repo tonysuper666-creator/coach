@@ -5,6 +5,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -110,6 +113,197 @@ class ChapterOpenMeaningGradeTest {
         val response = svc.process(request(chapter, chapter.points.joinToString("") { it.sentence }, answer))
         assertTrue(response.rubricItems.all { it.verdict == PracticeRubricVerdict.FULL })
         assertTrue(response.rubricItems.none { it.verdict == PracticeRubricVerdict.PARTIAL })
+    }
+
+    @Test
+    fun oneSharedWordShortParaphraseStaysFullWhenTheModelSaysFull() = runBlocking {
+        val chapter = chapters.first()
+        val answer = "天黑航道北移"
+        val point = chapter.points.first()
+        assertTrue(answer.count { it.code in 0x4E00..0x9FFF } < 12)
+        assertEquals(1, ChapterOpenGate.contentTokens(point.claim).intersect(ChapterOpenGate.contentTokens(answer)).size)
+        assertFalse(ChapterOpenGate.obviouslyOffTopic(point.claim, point.sentence, answer))
+        val svc = PracticeGradeAndDiagnoseService(script { _, _ -> "FULL" })
+        val response = svc.process(request(chapter, chapter.points.joinToString("") { it.sentence }, answer))
+        assertEquals(PracticeRubricVerdict.FULL, response.rubricItems.first().verdict)
+        assertTrue(response.rubricItems.drop(1).all { it.verdict == PracticeRubricVerdict.ZERO })
+    }
+
+    @Test
+    fun shortParaphraseWithNoSharedWordsStaysZeroWhenTheModelSaysFull() = runBlocking {
+        val chapter = chapters.first()
+        val answer = "夜里改走北边"
+        val point = chapter.points.first()
+        assertTrue(answer.count { it.code in 0x4E00..0x9FFF } < 12)
+        assertTrue(ChapterOpenGate.contentTokens(point.claim).intersect(ChapterOpenGate.contentTokens(answer)).isEmpty())
+        assertTrue(ChapterOpenGate.contentTokens(point.sentence).intersect(ChapterOpenGate.contentTokens(answer)).isEmpty())
+        assertTrue(ChapterOpenGate.obviouslyOffTopic(point.claim, point.sentence, answer))
+        val svc = PracticeGradeAndDiagnoseService(script { _, _ -> "FULL" })
+        val response = svc.process(request(chapter, chapter.points.joinToString("") { it.sentence }, answer))
+        assertTrue(response.rubricItems.all { it.verdict == PracticeRubricVerdict.ZERO })
+    }
+
+    /**
+     * Opt-in. Set COACH_CHAPTER_OPEN_LIVE=1 to grade the 144 samples on the pinned
+     * model through Codex, the same model the production bridge serves as gpt-6.2-astra.
+     * Skipped in the normal test run. Does not call ports 8790 or 8791.
+     */
+    @Test
+    fun pinnedModelAgreesWithHumanLabels() = runBlocking {
+        org.junit.Assume.assumeTrue(System.getenv("COACH_CHAPTER_OPEN_LIVE") == "1")
+        val chapter = chapters.first()
+        val shortOne = "天黑航道北移"
+        val shortNone = "夜里改走北边"
+        val longOff = "晚饭是番茄炒蛋和米饭，另外还有一碗紫菜汤和两只苹果。吃完就把碗洗干净，再把桌子擦一遍。今天只谈这顿饭。"
+        val point = chapter.points.first()
+        assertTrue(shortOne.count { it.code in 0x4E00..0x9FFF } < 12)
+        assertEquals(1, ChapterOpenGate.contentTokens(point.claim).intersect(ChapterOpenGate.contentTokens(shortOne)).size)
+        assertFalse(ChapterOpenGate.obviouslyOffTopic(point.claim, point.sentence, shortOne))
+        assertTrue(shortNone.count { it.code in 0x4E00..0x9FFF } < 12)
+        assertTrue(ChapterOpenGate.contentTokens(point.claim).intersect(ChapterOpenGate.contentTokens(shortNone)).isEmpty())
+        assertTrue(ChapterOpenGate.contentTokens(point.sentence).intersect(ChapterOpenGate.contentTokens(shortNone)).isEmpty())
+        assertTrue(longOff.count { it.code in 0x4E00..0x9FFF } >= 12)
+        assertTrue(chapter.points.all { ChapterOpenGate.isOffTopic(it.claim, longOff) && ChapterOpenGate.isOffTopic(it.sentence, longOff) })
+        assertTrue(chapter.points.none { ChapterOpenGate.obviouslyOffTopic(it.claim, it.sentence, longOff) })
+
+        val transport = CodexExecTransport()
+        val svc = PracticeGradeAndDiagnoseService(transport)
+        var compared = 0
+        var matched = 0
+        var rawMatched = 0
+        var paraphraseFull = 0
+        var paraphrasePartial = 0
+        var offAnswered = 0
+        var quoteZeroed = 0
+        val misses = mutableListOf<String>()
+        val byKind = linkedMapOf("good" to 0, "average" to 0, "paraphrase" to 0, "off" to 0)
+        val byKindMatched = linkedMapOf("good" to 0, "average" to 0, "paraphrase" to 0, "off" to 0)
+        chapters.forEach { sample ->
+            val page = sample.points.joinToString("") { it.sentence }
+            listOf("good", "average", "paraphrase", "off").forEach { kind ->
+                val answer = sample.answer(kind)
+                val response = svc.process(request(sample, page, answer))
+                response.rubricItems.forEachIndexed { index, item ->
+                    val expected = labelOf(answer, index)
+                    compared++
+                    byKind[kind] = byKind.getValue(kind) + 1
+                    if (item.verdict.name == expected) {
+                        matched++
+                        byKindMatched[kind] = byKindMatched.getValue(kind) + 1
+                    }
+                    if (item.rawModelVerdict.name == expected) rawMatched++
+                    if (kind == "paraphrase" && item.verdict == PracticeRubricVerdict.FULL) paraphraseFull++
+                    if (kind == "paraphrase" && item.verdict == PracticeRubricVerdict.PARTIAL) paraphrasePartial++
+                    if (kind == "off" && item.verdict == PracticeRubricVerdict.FULL) offAnswered++
+                    if (item.quoteGateZeroed) quoteZeroed++
+                    if (item.verdict.name != expected) {
+                        misses += "$kind ${sample.book}-${sample.name} ${item.cid} want=$expected raw=${item.rawModelVerdict.name}"
+                    }
+                }
+            }
+        }
+        val page = chapter.points.joinToString("") { it.sentence }
+        val shortOneItems = svc.process(request(chapter, page, shortOne)).rubricItems
+        val shortNoneItems = svc.process(request(chapter, page, shortNone)).rubricItems
+        val longOffItems = svc.process(request(chapter, page, longOff)).rubricItems
+        fun brief(items: List<GradedRubricItemResult>) =
+            items.joinToString(",") { "${it.cid}:${it.rawModelVerdict.name}->${it.verdict.name}${if (it.quoteGateZeroed) ":q0" else ""}" }
+        println(
+            "CHAPTER_OPEN_LIVE compared=$compared matched=$matched rawMatched=$rawMatched " +
+                "paraphraseFull=$paraphraseFull paraphrasePartial=$paraphrasePartial " +
+                "offAnswered=$offAnswered quoteZeroed=$quoteZeroed calls=${transport.calls} " +
+                "good=${byKindMatched.getValue("good")}/${byKind.getValue("good")} " +
+                "average=${byKindMatched.getValue("average")}/${byKind.getValue("average")} " +
+                "paraphrase=${byKindMatched.getValue("paraphrase")}/${byKind.getValue("paraphrase")} " +
+                "off=${byKindMatched.getValue("off")}/${byKind.getValue("off")} " +
+                "shortOne=${brief(shortOneItems)} shortNone=${brief(shortNoneItems)} longOff=${brief(longOffItems)} " +
+                "misses=${misses.joinToString(";")}",
+        )
+        val summary = "CHAPTER_OPEN_LIVE compared=$compared matched=$matched rawMatched=$rawMatched " +
+            "paraphraseFull=$paraphraseFull paraphrasePartial=$paraphrasePartial " +
+            "offAnswered=$offAnswered quoteZeroed=$quoteZeroed calls=${transport.calls} " +
+            "good=${byKindMatched.getValue("good")}/${byKind.getValue("good")} " +
+            "average=${byKindMatched.getValue("average")}/${byKind.getValue("average")} " +
+            "paraphrase=${byKindMatched.getValue("paraphrase")}/${byKind.getValue("paraphrase")} " +
+            "off=${byKindMatched.getValue("off")}/${byKind.getValue("off")} " +
+            "shortOne=${brief(shortOneItems)} shortNone=${brief(shortNoneItems)} longOff=${brief(longOffItems)} " +
+            "misses=${misses.joinToString(";")}\n"
+        Files.writeString(
+            java.nio.file.Path.of("build", "chapter-open-live.log"),
+            summary,
+            StandardCharsets.UTF_8,
+            java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.APPEND,
+        )
+        assertEquals(144, compared)
+        assertEquals(PracticeRubricVerdict.FULL, shortOneItems.first().verdict)
+        assertTrue(longOffItems.all { it.verdict == PracticeRubricVerdict.ZERO })
+        assertTrue(shortNoneItems.all { it.verdict == PracticeRubricVerdict.ZERO })
+    }
+
+    private class CodexExecTransport : BatchAiTransport {
+        var calls: Int = 0
+
+        override suspend fun generateSection(
+            systemPrompt: String,
+            userPrompt: String,
+            task: String,
+            batchKey: String,
+            maxTokens: Int,
+        ): BatchTransportReply {
+            calls++
+            Files.writeString(
+                progressLog(),
+                "call=$calls task=$task\n",
+                StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND,
+            )
+            val started = System.nanoTime()
+            val out = Files.createTempFile("coach-grade-", ".txt")
+            val err = Files.createTempFile("coach-grade-err-", ".txt")
+            val work = Files.createTempDirectory("coach-grade-work-")
+            val codex = System.getenv("COACH_CODEX") ?: "C:\\Users\\TONYS\\AppData\\Roaming\\npm\\codex.cmd"
+            val prompt = "$systemPrompt\n\n$NO_TOOLS\n\n$userPrompt"
+            val command = "\"$codex\" exec -m gpt-6.2-astra -c model_reasoning_effort=high --ephemeral --skip-git-repo-check -s read-only -o \"${out.toAbsolutePath()}\" -"
+            val process = ProcessBuilder("cmd.exe", "/d", "/s", "/c", command)
+                .directory(work.toFile())
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(err.toFile())
+                .start()
+            process.outputStream.bufferedWriter(StandardCharsets.UTF_8).use { it.write(prompt) }
+            val finished = process.waitFor(180, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                error("codex_timeout call=$calls")
+            }
+            val text = Files.readString(out).trim()
+            if (process.exitValue() != 0 || text.isBlank()) {
+                val detail = Files.readString(err)
+                    .lineSequence()
+                    .filter { '@' !in it && "logged" !in it.lowercase() }
+                    .joinToString(" ")
+                    .take(180)
+                error("codex_exit=${process.exitValue()} textLen=${text.length} call=$calls detail=$detail")
+            }
+            val elapsed = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
+            return BatchTransportReply(
+                text = text,
+                routeChannel = CompanionRouteChannel.HAIKU_REALTIME,
+                model = PracticeGradeLimits.PINNED_GRADE_MODEL,
+                inputTokens = 0,
+                outputTokens = 0,
+                ttftMs = elapsed,
+                elapsedMs = elapsed,
+            )
+        }
+
+        private companion object {
+            const val NO_TOOLS =
+                "Answer directly in plain text. Do not use any built-in tools (shell, files, browser, web search); you have no access to the user's machine."
+
+            fun progressLog() = java.nio.file.Path.of("build", "chapter-open-live.log")
+        }
     }
 
     private fun labelOf(answer: String, index: Int): String {

@@ -585,6 +585,81 @@ $rejected = $false
 try { Format-PairedCredentials 'http://127.0.0.1:9' 'device' ('c' * 43) '' } catch { $rejected = $true }
 Check 'paired-credentials-reject-blank-role' $rejected 'blank role was written'
 
+# 47. 顶栏右半区同时有「伴读：逐节精读，」与独立「伴读」时，只点右侧开关；菜单说明含「批注」不得判抽屉就绪，真出现页签行才算就绪。
+$topBothEntries = @(
+    (New-Line '书架' 40 46 56 20),
+    (New-Line '目录' 110 46 44 20),
+    (New-Line '伴读' 120 320 44 20),
+    (New-Line '伴读' 200 46 44 20),
+    (New-Line '伴读：逐节精读，' 500 46 128 22),
+    (New-Line '伴读' 646 46 44 22)
+)
+$toggleHit = Find-ReaderCompanionToggle $topBothEntries 752 552
+Check 'step5-top-toggle-picks-standalone-right-button' ([bool]$toggleHit -and $toggleHit.X -eq 668 -and $toggleHit.Y -eq 57) "x=$($toggleHit.X) y=$($toggleHit.Y)"
+
+$topModeOnly = @(
+    (New-Line '书架' 40 46 56 20),
+    (New-Line '目录' 110 46 44 20),
+    (New-Line '伴读: 逐节精读' 500 46 128 22)
+)
+Check 'step5-top-toggle-ignores-study-mode-dropdown' ($null -eq (Find-ReaderCompanionToggle $topModeOnly 752 552)) 'study mode dropdown matched as toggle'
+
+$studyMenuOnly = @(
+    (New-Line '书架' 40 46 56 20),
+    (New-Line '目录' 110 46 44 20),
+    (New-Line '详略' 480 280 48 22),
+    (New-Line '语言' 480 315 48 22),
+    (New-Line '含批注的说明' 500 350 110 22),
+    (New-Line '切换学法时，当前页码、高亮与批注全部保留。' 440 410 290 22)
+)
+Check 'step5-menu-note-copy-never-ready' ($null -eq (Find-CompanionTabLabel $studyMenuOnly '讲解' 18 752 552)) 'menu copy with 批注 was treated as drawer ready'
+
+$wrongRegionTabs = @(
+    (New-Line '讲解' 90 46 48 22),
+    (New-Line '提问' 154 46 48 22),
+    (New-Line '批注' 218 46 48 22)
+)
+Check 'step5-drawer-tabs-require-expected-region' ($null -eq (Find-CompanionTabLabel $wrongRegionTabs '讲解' 18 752 552)) 'top-left false match was accepted'
+
+$bottomSheetReady = @(
+    (New-Line '书架' 40 46 56 20),
+    (New-Line '讲解' 24 280 48 22),
+    (New-Line '提问' 88 280 48 22),
+    (New-Line '批注' 152 280 48 22)
+)
+$bottomTabHit = Find-CompanionTabLabel $bottomSheetReady '讲解' 18 752 552
+Check 'step5-bottom-drawer-tabs-ready-in-expected-region' ([bool]$bottomTabHit -and $bottomTabHit.X -eq 48 -and $bottomTabHit.Y -eq 291) "x=$($bottomTabHit.X) y=$($bottomTabHit.Y)"
+
+$wideRightReady = @(
+    (New-Line '书架' 60 46 56 20),
+    (New-Line '讲解' 1600 78 48 22),
+    (New-Line '提问' 1664 78 48 22),
+    (New-Line '批注' 1728 78 48 22)
+)
+$wideTabHit = Find-CompanionTabLabel $wideRightReady '讲解' 18 2160 1350
+Check 'step5-wide-drawer-tabs-ready-in-top-right' ([bool]$wideTabHit -and $wideTabHit.X -eq 1624 -and $wideTabHit.Y -eq 89) "x=$($wideTabHit.X) y=$($wideTabHit.Y)"
+Check 'step5-wide-drawer-rejects-top-left-tabs' ($null -eq (Find-CompanionTabLabel $wrongRegionTabs '讲解' 18 2160 1350)) 'top-left tabs accepted on wide window'
+
+function Show-ReaderTop([int]$n, [string]$tag, [int]$Tries = 6) {
+    $script:Last = $script:screen
+    return , $script:screen
+}
+function Hover([int]$x, [int]$y) { }
+function Start-Sleep([int]$Seconds = 0, [int]$Milliseconds = 0) { }
+
+$script:screen = $topBothEntries; $script:Last = $topBothEntries; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = {
+    if ($script:clicks[0] -eq '668,57') { $script:screen = $bottomSheetReady }
+    else { $script:screen = $studyMenuOnly }
+}
+$openedOk = Ensure-CompanionDrawerOpen 5 752 552 -tries 3 -missTag 'explain-tab0' -openTagPrefix 'explain-tab'
+Check 'step5-open-drawer-clicks-right-toggle-and-detects-tab-row' ($script:clicks.Count -eq 1 -and $script:clicks[0] -eq '668,57' -and [bool]$openedOk.Tab -and $openedOk.Tab.X -eq 48 -and $openedOk.Tab.Y -eq 291) "clicks=$($script:clicks -join '|')"
+
+$script:screen = $topBothEntries; $script:Last = $topBothEntries; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $studyMenuOnly }
+$openedMenu = Ensure-CompanionDrawerOpen 5 752 552 -tries 2 -missTag 'explain-tab0' -openTagPrefix 'explain-tab'
+Check 'step5-open-drawer-stays-unready-when-only-menu-shows' ($script:clicks.Count -eq 1 -and $null -eq $openedMenu.Tab) "clicks=$($script:clicks -join '|') tab=$($openedMenu.Tab)"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

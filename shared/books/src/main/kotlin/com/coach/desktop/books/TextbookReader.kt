@@ -1770,6 +1770,9 @@ internal fun TextbookReader(
                             marks.map { it.startUtf16 until it.endUtf16 }
                         result
                     }
+                    val epubLinks by produceState(EpubLinks.NONE, book.id, book.format) {
+                        value = if (book.format == "epub") withContext(Dispatchers.IO) { library.epubLinks(book) } else EpubLinks.NONE
+                    }
                     BookPageView(
                         book, paging, ranges, turnLayout, libraryDirectory = library.directory,
                         modifier = if (companionOpen) Modifier.align(Alignment.Center).widthIn(max = 720.dp) else Modifier.fillMaxSize(),
@@ -1778,6 +1781,11 @@ internal fun TextbookReader(
                         onOpenOriginalBlock = if (originalPdf) { item ->
                             switchView(false, BookPageAnchor(item.page, item.anchorOffset))
                         } else null,
+                        links = epubLinks,
+                        onFollowLink = { target ->
+                            textSelection = null
+                            paging.anchor = target
+                        },
                         onSelectText = { textSelection = it },
                         hardPoints = sectionHardPoints,
                         onHardPointClick = { hp, blk ->

@@ -310,7 +310,7 @@ class CourseEssayFrameworkTest {
             backgroundBatch = false,
             defaultModel = PracticeGradeLimits.PINNED_GRADE_MODEL,
         )
-        assertTrue(chapter.useBatch)
+        assertFalse(chapter.useBatch)
         assertEquals(BridgeClient.HAIKU, chapter.model)
         assertEquals(PracticeGradeLimits.TASK_CHAPTER_OPEN, chapter.task)
 

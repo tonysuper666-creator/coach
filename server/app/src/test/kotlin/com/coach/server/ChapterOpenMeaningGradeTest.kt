@@ -23,6 +23,18 @@ class ChapterOpenMeaningGradeTest {
         val page = "前一句放在这里。起雾的时候，灯塔每隔一阵加响一声长鸣。后一句不该带上。"
         assertEquals("起雾的时候，灯塔每隔一阵加响一声长鸣。", ChapterOpenGate.sentenceAround(page, "一声长鸣"))
         assertEquals("", ChapterOpenGate.sentenceAround(page, "不存在的锚"))
+        val english = "The fog bell stays on the old pier. A long blast marks the channel at night. Ships keep to the north side."
+        val cut = ChapterOpenGate.sentenceAround(english, "long blast")
+        assertEquals("A long blast marks the channel at night.", cut)
+        assertTrue("long blast" in cut)
+        val tide = "The tide reads 3.14 metres on the outer pile. Ships wait for the next mark."
+        assertEquals("The tide reads 3.14 metres on the outer pile.", ChapterOpenGate.sentenceAround(tide, "3.14 metres"))
+        val filler = "word ".repeat(50)
+        val longPage = "Earlier sentence ends here. ${filler}channel mark stays visible. Later sentence."
+        val longCut = ChapterOpenGate.sentenceAround(longPage, "channel mark")
+        assertTrue("channel mark" in longCut)
+        assertFalse(longCut.contains("Earlier sentence"))
+        assertTrue(longCut.length <= 180)
     }
 
     @Test

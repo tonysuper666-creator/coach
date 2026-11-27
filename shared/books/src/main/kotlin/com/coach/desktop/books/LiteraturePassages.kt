@@ -338,14 +338,20 @@ internal object LiteraturePassages {
                 coursepackCoverHeader.findAll(page.text).count() >= 2
             )
 
-    private fun lastProseLine(page: BookPage): String? =
-        page.guideRegions.asSequence()
-            .flatMap { it.text.lineSequence() }
-            .map(String::trim)
-            .lastOrNull { line ->
-                line.isNotEmpty() && !folio.matches(line) && !isDownloadBanner(line) &&
-                    !isBackMatterHeading(line) && !isFootnoteSentence(line)
+    private fun lastProseLine(page: BookPage): String? {
+        for (region in page.guideRegions.asReversed()) {
+            var end = region.text.length
+            while (end > 0) {
+                val start = region.text.lastIndexOf('\n', end - 1) + 1
+                val line = region.text.substring(start, end).trim()
+                if (line.isNotEmpty() && !region.overlapsFootnote(start, end) &&
+                    !folio.matches(line) && !isDownloadBanner(line) &&
+                    !isBackMatterHeading(line) && !isFootnoteSentence(line)) return line
+                end = start - 1
             }
+        }
+        return null
+    }
 
     fun bodySentence(excerpt: GuideExcerpt): Boolean {
         val region = excerpt.region

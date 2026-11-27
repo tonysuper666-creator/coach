@@ -534,9 +534,15 @@ internal data class GuideRegion(
     /** Local exclusive word ends where the scan resolves ambiguous OCR punctuation. */
     val scannedStops: Set<Int> = emptySet(),
     val raisedCallouts: Set<Int> = emptySet(),
+    /** PDF content-stream order can retain inline insertions that baseline sorting moves. */
+    val streamOrder: String? = null,
 ) {
     private val continuous by lazy { LiteratureTextNorm.normalize(sourceOrder) }
-    fun containsSentence(quote: String) = LiteratureTextNorm.normalize(quote) in continuous
+    private val continuousStream by lazy { streamOrder?.let(LiteratureTextNorm::normalize) }
+    fun containsSentence(quote: String): Boolean {
+        val needle = LiteratureTextNorm.normalize(quote)
+        return needle in continuous || continuousStream?.contains(needle) == true
+    }
     fun overlapsWideGap(start: Int, end: Int): Boolean = wideGapRanges.any { r -> r.first < end && start <= r.last }
     fun overlapsFootnote(start: Int, end: Int): Boolean =
         footnoteRanges.any { start < it.last + 1 && end > it.first }
@@ -666,7 +672,8 @@ internal object LiteraturePdfLayout {
             val size = words.map { it.pointSize }.sorted()[words.size / 2]
             val start = offset
             offset += words.sumOf { it.text.length } + 1
-            FootnoteLine(words.first().y, size, start, offset - 1,
+            val baseline = words.map { it.y }.sorted()[words.size / 2]
+            FootnoteLine(baseline, size, start, offset - 1,
                 rule = words.all { textRule.matches(it.text) })
         }
         val median = lines.map { it.size }.sorted()[lines.size / 2]
@@ -675,11 +682,27 @@ internal object LiteraturePdfLayout {
         val right = rows.maxOf { it.last().right }
         val separators = rules.filter { it.maxX >= left && it.minX <= right }.map { it.displayY }
         val ruled = layoutFootnoteRanges(lines, median, separators).mapTo(HashSet()) { it.first }
+        val steps = lines.zipWithNext { a, b -> b.y - a.y }
+        val bodySteps = steps.indices.filter { i ->
+            lines[i].size >= body * 0.94f && lines[i + 1].size >= body * 0.94f &&
+                steps[i] in body * 0.7f..body * 2.5f
+        }.map(steps::get).sorted()
+        val pitch = bodySteps.takeIf { it.size >= 3 }?.get(bodySteps.size / 2)
+        // One loose inter-paragraph gap also occurs inside notes. Require the next
+        // baseline to corroborate a return to body spacing before ending the run.
+        fun bodyRhythmAt(i: Int, bodyPitch: Float): Boolean =
+            steps[i - 1] >= bodyPitch * 0.94f &&
+                (steps.getOrNull(i) ?: 0f) >= bodyPitch * 0.94f &&
+                lines[i].size >= body * 0.85f
         val marked = mutableSetOf<Word>()
         var noteSize = 0f
         for ((i, words) in rows.withIndex()) {
             val line = lines[i]
-            if (i > 0 && (line.size > noteSize * 1.06f || line.y - lines[i - 1].y > body * 2.7f)) noteSize = 0f
+            if (noteSize > 0f && i > 0) {
+                val bodySpacing = scanLayer && pitch != null && bodyRhythmAt(i, pitch)
+                if (bodySpacing || line.size >= body * 0.95f || line.size > noteSize * 1.06f ||
+                    steps[i - 1] > body * 2.7f) noteSize = 0f
+            }
             val first = words.first()
             val previous = rows.getOrNull(i - 1)
             // A superscript may occupy its own PDFBox baseline. Only a marker just
@@ -703,23 +726,106 @@ internal object LiteraturePdfLayout {
         if (scanLayer && lines.size >= 8) {
             // OCR often gives an entire line one font size, including superscripts. Dense
             // apparatus has both smaller type and a sustained change in baseline pitch.
-            val steps = lines.zipWithNext { a, b -> b.y - a.y }
             val upperSteps = steps.take(lines.size / 2).filter { it > body * 0.65f }.sorted()
             if (upperSteps.size >= 3) {
-                val pitch = upperSteps[upperSteps.size / 2]
+                val bodyPitch = pitch ?: upperSteps[upperSteps.size / 2]
                 for (i in 1 until lines.size - 2) {
-                    if (steps[i - 1] < pitch * 1.35f || lines[i - 1].size < body * 0.9f) continue
-                    if ((i..i + 1).any { steps[it] !in (pitch * 0.45f)..(pitch * 0.90f) }) continue
+                    if (steps[i - 1] < bodyPitch * 1.35f || lines[i - 1].size < body * 0.9f) continue
+                    if ((i..i + 1).any { steps[it] !in (bodyPitch * 0.45f)..(bodyPitch * 0.90f) }) continue
                     if ((i..i + 2).count { lines[it].size < body * 0.9f } < 2) continue
                     marked += rows[i]
                     var j = i + 1
-                    while (j < lines.size && steps[j - 1] <= pitch * 1.10f && lines[j].size < body * 0.96f) {
+                    while (j < lines.size && steps[j - 1] <= bodyPitch * 1.10f &&
+                        !bodyRhythmAt(j, bodyPitch) && lines[j].size < body * 0.96f) {
                         marked += rows[j++]
                     }
                 }
             }
         }
         return marked
+    }
+
+    /** A superscript word between two ordinary words occupies their line in reading
+     * order. A detached note label, translation above the line, or margin word does not
+     * occupy a gap bounded on both sides by adjacent body words.
+     */
+    private fun rejoinInlineWords(rows: MutableList<Row>): Set<Word> {
+        val joined = mutableSetOf<Word>()
+        for (i in 0 until rows.lastIndex) {
+            val upper = rows[i]
+            val lower = rows[i + 1]
+            val moved = mutableSetOf<Word>()
+            for ((left, right) in lower.words.zipWithNext()) {
+                val size = minOf(left.pointSize, right.pointSize)
+                if (lower.y - upper.y !in size * 0.15f..size * 0.68f || right.x <= left.right) continue
+                val between = upper.words.filter { it.x >= left.right - 0.5f && it.right <= right.x + 0.5f }
+                if (between.isEmpty() || between.any { it.pointSize >= size * 0.92f } ||
+                    between.none { it.text.any(Char::isLetter) }) continue
+                if (between.first().x - left.right > size || right.x - between.last().right > size ||
+                    between.zipWithNext().any { (a, b) -> b.x - a.right > size }) continue
+                moved += between
+            }
+            // A callout belongs after the sentence it annotates, even when another
+            // sentence starts farther right on that baseline. A leading note label
+            // has no immediately preceding sentence end at the same horizontal position.
+            for (w in upper.words) {
+                if (w.text.length !in 1..3 || !w.text.all(Char::isDigit)) continue
+                val prior = lower.words.lastOrNull { it.right <= w.x + 0.5f } ?: continue
+                val size = prior.pointSize
+                if (w.x - prior.right <= size * 0.55f && w.pointSize < size * 0.92f &&
+                    lower.y - w.y in size * 0.15f..size * 0.68f &&
+                    LiteraturePassages.endsSentence(prior.text)) moved += w
+            }
+            if (moved.isEmpty()) continue
+            upper.words.removeAll(moved)
+            lower.words.addAll(moved)
+            lower.words.sortBy(Word::x)
+            joined += moved
+        }
+        rows.removeAll { it.words.isEmpty() }
+        return joined
+    }
+
+    /** OCR occasionally puts a short marginal note on the same baseline as prose.
+     * Follow its marker and its own left edge across closely spaced continuations.
+     * Keep the separate strip addressable without interrupting a body sentence.
+     */
+    private fun scanSideNotes(rows: List<Row>): Set<Word> {
+        val notes = mutableSetOf<Word>()
+        for ((i, row) in rows.withIndex()) {
+            val words = row.words
+            for (k in 1 until words.size) {
+                val gap = words[k].x - words[k - 1].right
+                if (gap < maxOf(words[k].pointSize, words[k - 1].pointSize) * 1.5f) continue
+                val left = words.subList(0, k)
+                val right = words.subList(k, words.size)
+                val onLeft = noteLabel.matches(left.first().text)
+                val strip = if (onLeft) left else right
+                val prose = if (onLeft) right else left
+                if (strip.size < 2 || prose.size < 2 || !noteLabel.matches(strip.first().text)) continue
+                val marker = strip.first()
+                val first = strip[1]
+                val proseSize = prose.map { it.pointSize }.sorted()[prose.size / 2]
+                val noteSize = first.pointSize
+                if (first.x - marker.right > noteSize || marker.pointSize > noteSize ||
+                    noteSize >= proseSize * 0.92f || strip.drop(1).any { it.pointSize >= proseSize * 0.96f }) continue
+                notes += strip
+                val cut = (left.last().right + right.first().x) / 2
+                var previousBaseline = first.y
+                for (j in i + 1 until rows.size) {
+                    val line = rows[j].words
+                    if (line.any { it.x < cut && it.right > cut }) break
+                    val next = line.filter { if (onLeft) it.right <= cut else it.x >= cut }
+                    if (next.isEmpty() || abs(next.first().x - first.x) > noteSize ||
+                        next.any { it.pointSize >= proseSize * 0.96f }) break
+                    val baseline = next.map { it.y }.sorted()[next.size / 2]
+                    if (baseline - previousBaseline > noteSize * 1.55f) break
+                    notes += next
+                    previousBaseline = baseline
+                }
+            }
+        }
+        return notes
     }
 
     /** On a justified scan most full lines end at the same two margins. OCR can assign
@@ -910,7 +1016,10 @@ internal object LiteraturePdfLayout {
 
         val rows = mutableListOf<Row>()
         for (w in words.sortedBy { it.y }) {
-            val row = rows.lastOrNull()?.takeIf { abs(it.y - w.y) <= maxOf(1.5f, w.height * 0.35f) }
+            // Hidden OCR fonts can report a glyph height of half the point size.
+            // Use the OCR line size so one raised marker cannot split a common baseline.
+            val tolerance = if (scanLayer) w.pointSize * 0.32f else w.height * 0.35f
+            val row = rows.lastOrNull()?.takeIf { abs(it.y - w.y) <= maxOf(1.5f, tolerance) }
                 ?: Row(w.y).also(rows::add)
             row.words += w
         }
@@ -918,14 +1027,20 @@ internal object LiteraturePdfLayout {
         val positiveHeights = words.map { it.height }.filter { it > 0f }.sorted()
         val bodyHeight = if (positiveHeights.isNotEmpty()) positiveHeights[positiveHeights.size / 2] else 10f
 
+        val inlineWords = if (scanLayer) emptySet() else rejoinInlineWords(rows)
+        val sideNotes = if (scanLayer) scanSideNotes(rows) else emptySet()
         val marginWords = if (scanLayer) scanMarginWords(rows, crop.width) else emptySet()
-        if (marginWords.isNotEmpty()) {
-            words.removeAll(marginWords)
-            rows.forEach { it.words.removeAll(marginWords) }
+        val excluded = marginWords + sideNotes
+        val noteText = if (sideNotes.isEmpty()) "" else rows.mapNotNull { row ->
+            row.words.filter { it in sideNotes }.takeIf { it.isNotEmpty() }?.joinToString(" ") { it.text }
+        }.joinToString("\n")
+        if (excluded.isNotEmpty()) {
+            words.removeAll(excluded)
+            rows.forEach { it.words.removeAll(excluded) }
             rows.removeAll { it.words.isEmpty() }
         }
         // Match the independent PDFBox reference to the same retained horizontal extent.
-        val marginsByBaseline = marginWords.groupBy { it.y.toInt() }
+        val marginsByBaseline = excluded.groupBy { it.y.toInt() }
 
         val visibleMinX = words.minOf { it.x }
         val visibleMaxRight = words.maxOf { it.right }
@@ -1087,13 +1202,23 @@ internal object LiteraturePdfLayout {
                     val lineStart = length
                     line.forEachIndexed { i, w ->
                         val beforeSpace = length
-                        if (i > 0 && (scanLayer || w.x - line[i - 1].right > size * 0.10f ||
+                        val noteWord = w in noteWords
+                        val roleBreak = i > 0 && noteWord != (line[i - 1] in noteWords)
+                        if (roleBreak) append('\n')
+                        else if (i > 0 && (scanLayer || w.x - line[i - 1].right > size * 0.10f ||
                                 w.text.first().isLetterOrDigit() && line[i - 1].text.last().isLetterOrDigit() &&
                                 w.x > line[i - 1].right + 0.5f)) append(' ')
                         if (scanLayer && i > 0 && w.x - line[i - 1].right > gapLimit) {
                             wideGapRanges += beforeSpace until length
                         }
+                        val wordStart = length
                         append(if (w.text.any { it in '\uFB00'..'\uFB06' }) Normalizer.normalize(w.text, Normalizer.Form.NFKC) else w.text)
+                        if (noteWord) {
+                            val last = footnoteRanges.lastOrNull()
+                            if (i > 0 && !roleBreak && last != null) {
+                                footnoteRanges[footnoteRanges.lastIndex] = last.first until length
+                            } else footnoteRanges += wordStart until length
+                        }
                         when (punctuation[w]) {
                             ScanMark.STOP -> stops += length
                             ScanMark.RAISED_CALLOUT -> callouts += length
@@ -1103,13 +1228,12 @@ internal object LiteraturePdfLayout {
                     val lineEnd = length
                     val wideLine = !scanLayer && line.zipWithNext().any { (a, b) -> b.x - a.right > gapLimit }
                     if ((disjointLine[li] || wideLine) && lineEnd > lineStart) wideGapRanges += lineStart until lineEnd
-                    if (line.any { it in noteWords }) footnoteRanges += lineStart until lineEnd
                     append('\n')
                     previousY = y
                 }
             }.trimEnd()
             if (text.isBlank()) return@mapNotNull null
-            val reference = object : BookPdfStripper() {
+            fun reference(sorted: Boolean) = object : BookPdfStripper() {
                 override fun processTextPosition(position: BookPdfTextPosition) {
                     if (!insideCropBox(position, crop)) return
                     val y = position.yDirAdj
@@ -1123,9 +1247,13 @@ internal object LiteraturePdfLayout {
                         super.processTextPosition(position)
                     }
                 }
-            }.apply { startPage = page; endPage = page; sortByPosition = !scanLayer }.getText(pdf)
-            GuideRegion(text, label, reference, wideGapRanges, footnoteRanges, measured = true, scannedStops = stops, raisedCallouts = callouts)
-        }
+            }.apply { startPage = page; endPage = page; sortByPosition = sorted }.getText(pdf)
+            val streamOrder = if (inlineWords.isNotEmpty() && slice.words.any { it in inlineWords }) reference(false) else null
+            GuideRegion(text, label, reference(!scanLayer), wideGapRanges, footnoteRanges, measured = true,
+                scannedStops = stops, raisedCallouts = callouts, streamOrder = streamOrder)
+        } + if (noteText.isEmpty()) emptyList() else listOf(
+            GuideRegion(noteText, measured = true, footnoteRanges = listOf(noteText.indices))
+        )
     }
 
     /**

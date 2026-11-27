@@ -1,0 +1,153 @@
+{
+  "commit": "4aa2f43c6675",
+  "version": "2.0.1928",
+  "personas": [
+    {
+      "crash": 1,
+      "id": "P1",
+      "steps_done": 0,
+      "steps_total": 5,
+      "ask": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "stuck": "进程退出",
+      "name": "备考",
+      "explain": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "opened": true
+    },
+    {
+      "crash": 0,
+      "id": "P2",
+      "steps_done": 4,
+      "steps_total": 4,
+      "ask": {
+        "source": 0,
+        "ok": 1,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "stuck": "—",
+      "name": "朋友",
+      "explain": {
+        "source": 0,
+        "ok": 1,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "opened": true
+    },
+    {
+      "crash": 0,
+      "id": "P3",
+      "steps_done": 2,
+      "steps_total": 3,
+      "ask": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 1
+      },
+      "stuck": "提问",
+      "name": "睡前",
+      "explain": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "opened": true
+    },
+    {
+      "crash": 0,
+      "id": "P4",
+      "steps_done": 3,
+      "steps_total": 3,
+      "ask": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "stuck": "—",
+      "name": "综述",
+      "explain": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "opened": true
+    },
+    {
+      "crash": 0,
+      "id": "P5",
+      "steps_done": 1,
+      "steps_total": 2,
+      "ask": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "stuck": "重开",
+      "name": "挑刺",
+      "explain": {
+        "source": 0,
+        "ok": 0,
+        "other": 0,
+        "quota": 0,
+        "refusal": 0,
+        "timeout": 0
+      },
+      "opened": true
+    }
+  ],
+  "checks": {
+    "cite": {
+      "status": "进了书，高亮见截图",
+      "stuck": "—"
+    },
+    "mock": {
+      "status": "未测",
+      "stuck": "—"
+    },
+    "dateshift": {
+      "status": "未测",
+      "stuck": "—"
+    },
+    "countdown": {
+      "status": "未测",
+      "stuck": "—"
+    },
+    "offtopic": {
+      "status": "未测",
+      "stuck": "—"
+    }
+  }
+}

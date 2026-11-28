@@ -460,10 +460,10 @@ internal fun buildStanceSystemPrompt(
         1. Root JSON object MUST contain ONLY the keys "paragraphs" and "boundary" (never add "stance" or other root keys).
         2. Output 0 to 5 items in "paragraphs". Allowed layer values: $allowedLayersDesc.
         3. Every "book" paragraph MUST use ONLY keys "layer" and "sentences". Each item in "sentences" is STRICTLY ONE Chinese sentence (only ONE sentence-ending mark 。！？ at the end; NEVER put two sentences in one item).
-        4. Each "book" sentence MUST state ONLY facts or claims genuinely supported by its cited anchor block(s) — NEVER put meta-disclaimers (like "本书不能预测现实") into a "book" sentence (put meta-disclaimers in "outside"). Each "book" sentence MUST have:
-           - "text": one plain Chinese sentence (no newlines, no 【】, no page numbers, NEVER write ASCII double quotes " inside strings — use 「」 or bare words).
+        4. Each "book" sentence MUST state ONLY facts or claims explicitly written in its cited original sentence(s) — NEVER state anything not written in the cited original sentence(s), and NEVER put meta-disclaimers (like "本书不能预测现实") into a "book" sentence (put meta-disclaimers in "outside"). Each "book" sentence MUST have:
+           - "text": one plain Chinese sentence (no newlines, no 【】, no page numbers, NEVER write ASCII double quotes " inside strings — use 「」 or bare words), stating ONLY what is written in its cited original sentence(s).
            - "anchors": non-empty array of supplied anchor IDs (like ["S1"]) with no duplicates, citing ONLY blocks that directly support THIS specific sentence.
-           - "quote": a short verbatim contiguous substring (5 to 80 characters, copied character-for-character with no "..." and no edits) from the first cited anchor block that directly supports THIS sentence. (If citing multiple anchors, you may use "quotes":{"S1":"...","S2":"..."}.)
+           - "quote" / "quotes": copy the FULL original sentence verbatim (character-for-character with no "..." and no edits) from the cited anchor block. When one Chinese sentence merges facts from multiple original sentences, cite each supporting original sentence separately using multiple anchors or "quotes" (e.g. "quotes":{"S1":"full sentence 1","S2":"full sentence 2"} or "quotes":["full sentence 1","full sentence 2"] when in the same block).
         5. Every "outside" paragraph MUST use ONLY keys "layer", "kind" (one of "通行讲法", "注家读法", "今人解读", "史学"), and "text" (plain text, NO anchors, NO page numbers like 第X页 / page X, NO 【】, NEVER write unescaped ASCII double quotes ").
         6. Every "guess" paragraph (ONLY allowed in "life" stance) MUST use ONLY keys "layer" and "text" (third-person ONLY, NO 我/我们/I/my, NO anchors, NO page numbers, NO 【】, NEVER write unescaped ASCII double quotes ").
         7. NEVER invent facts as "book" sentences. If the supplied blocks do not directly answer the question, omit "book" paragraphs (leave only valid "outside"/"guess" if allowed by stance, or {"paragraphs":[],"boundary":null}).
@@ -493,6 +493,169 @@ internal object ServerQuoteLocator {
     private val whitespaceRegex = Regex("""\s+""")
     private val tokenRegex = Regex("""[A-Za-z0-9]+|[\u4e00-\u9fff]""")
     private val wordSpanRegex = Regex("""\S+""")
+    private val abbrevBeforeDotRegex = Regex(
+        """(?:^|[\s(（"'“‘])(?:mr|mrs|ms|dr|prof|st|vs|etc|fig|eq|no|ch|vol|ed|pp|p|e\.g|i\.e|u\.s|u\.k|a\.m|p\.m|sr|jr|rev|hon|gen|col|capt|lt|sgt|jan|feb|mar|apr|aug|sept|oct|nov|dec)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val closingPunct = setOf('”', '’', '」', '』', '"', '\'', '）', ')', ']', '】', '〉')
+    private val openerForCloser = mapOf(
+        '”' to '“',
+        '’' to '‘',
+        '」' to '「',
+        '』' to '『',
+        '）' to '（',
+        ')' to '(',
+        ']' to '[',
+        '】' to '【',
+        '〉' to '〈',
+    )
+    private val bulletChars = setOf('•', '·', '▪', '◦', '●', '○')
+
+    private const val MAX_EXPANDED_SENTENCE_UTF16 = 400
+
+    private fun isSentenceEndDot(text: String, idx: Int): Boolean {
+        if (text[idx] != '.') return false
+        val prev = if (idx > 0) text[idx - 1] else '\u0000'
+        val next = if (idx + 1 < text.length) text[idx + 1] else '\u0000'
+        if (prev == '.' || next == '.') return false
+        if (prev.isDigit() && next.isDigit()) return false
+        if (next != '\u0000' && !next.isWhitespace() && next !in closingPunct) return false
+        val prefix = text.substring((idx - 10).coerceAtLeast(0), idx)
+        if (abbrevBeforeDotRegex.containsMatchIn(prefix)) return false
+        // 单字母姓名缩写（如 B. Franklin、S. M. T.），但保留句尾第一人称 "I."
+        if (prev.isUpperCase() && (idx < 2 || text[idx - 2].isWhitespace() || text[idx - 2] in "(\"“'")) {
+            val followedByCap = idx + 2 < text.length && text[idx + 1] == ' ' && text[idx + 2].isUpperCase()
+            if (followedByCap && prev != 'I') return false
+        }
+        return true
+    }
+
+    private fun isSentenceTerminator(text: String, idx: Int): Boolean = when (text[idx]) {
+        '。', '！', '？', '!', '?' -> true
+        '.' -> isSentenceEndDot(text, idx)
+        else -> false
+    }
+
+    /**
+     * 判断块内换行是否为真实句/段界（而非 EPUB/PDF 英文正文约 70 字符硬折行）：
+     * - 空行（`\n\n`）、冒号行尾、项目符号/列表行、中文非逗号折行均作为边界；
+     * - 英文正文段落内的单次硬折行（未遇句末标点且非空行/列表）允许跨行扩完该整句。
+     */
+    private fun isHardLineBreak(text: String, nlIdx: Int): Boolean {
+        var prevIdx = nlIdx - 1
+        while (prevIdx >= 0 && (text[prevIdx] == ' ' || text[prevIdx] == '\t' || text[prevIdx] == '\r')) prevIdx--
+        if (prevIdx < 0 || text[prevIdx] == '\n') return true
+
+        var nextIdx = nlIdx + 1
+        while (nextIdx < text.length && (text[nextIdx] == ' ' || text[nextIdx] == '\t' || text[nextIdx] == '\r')) nextIdx++
+        if (nextIdx >= text.length || text[nextIdx] == '\n') return true
+
+        val prevCh = text[prevIdx]
+        val nextCh = text[nextIdx]
+        if (prevCh == ':' || prevCh == '：') return true
+        if (nextCh in bulletChars) return true
+        if ((nextCh == '-' || nextCh == '*') && nextIdx + 1 < text.length && text[nextIdx + 1] == ' ') return true
+        if (isCjkChar(prevCh) || isCjkChar(nextCh)) {
+            if (prevCh !in "，、；") return true
+        }
+        return false
+    }
+
+    private fun hasUnmatchedOpener(text: String, start: Int, end: Int, closer: Char): Boolean {
+        if (closer == '"' || closer == '\'') {
+            var count = 0
+            for (k in start until end) if (text[k] == closer) count++
+            return count % 2 == 1
+        }
+        val opener = openerForCloser[closer] ?: return false
+        var depth = 0
+        for (k in start until end) {
+            when (text[k]) {
+                opener -> depth++
+                closer -> if (depth > 0) depth--
+            }
+        }
+        return depth > 0
+    }
+
+    /**
+     * 将本块内已定位的引文区间 `[startUtf16, endUtf16)` 向两侧扩至所在整句原句，
+     * 以本块内的 `。！？.!?` 或真实换行为界；绝不越出本块，扩后超过 [maxLenUtf16] 时保留原区间。
+     */
+    fun expandToSentenceBounds(
+        rawBlockText: String,
+        startUtf16: Int,
+        endUtf16: Int,
+        maxLenUtf16: Int = MAX_EXPANDED_SENTENCE_UTF16,
+    ): Pair<Int, Int> {
+        if (startUtf16 !in 0 until endUtf16 || endUtf16 > rawBlockText.length) return startUtf16 to endUtf16
+
+        // 向左扩到本句起点
+        var left = 0
+        var i = startUtf16 - 1
+        while (i >= 0) {
+            val ch = rawBlockText[i]
+            if (ch == '\n' || ch == '\r') {
+                if (ch == '\n' && isHardLineBreak(rawBlockText, i)) {
+                    left = i + 1
+                    break
+                }
+            } else if (isSentenceTerminator(rawBlockText, i)) {
+                left = i + 1
+                while (left < startUtf16 && rawBlockText[left] in closingPunct) left++
+                break
+            }
+            i--
+        }
+        while (left < startUtf16 && rawBlockText[left].isWhitespace()) left++
+
+        // 判断原区间末尾是否已落在句末标点上，若是则不再吞入下一句
+        var probe = endUtf16 - 1
+        while (probe >= startUtf16 && (rawBlockText[probe].isWhitespace() || rawBlockText[probe] in closingPunct)) {
+            probe--
+        }
+        val alreadyEnded = probe >= startUtf16 && isSentenceTerminator(rawBlockText, probe)
+
+        var right = endUtf16
+        if (alreadyEnded) {
+            while (right < rawBlockText.length && rawBlockText[right] in closingPunct &&
+                hasUnmatchedOpener(rawBlockText, left, right, rawBlockText[right])
+            ) {
+                right++
+            }
+        } else {
+            var j = endUtf16
+            var foundEnd = false
+            while (j < rawBlockText.length) {
+                val ch = rawBlockText[j]
+                if (ch == '\n' || ch == '\r') {
+                    if (ch == '\n' && isHardLineBreak(rawBlockText, j)) {
+                        right = j
+                        foundEnd = true
+                        break
+                    }
+                } else if (isSentenceTerminator(rawBlockText, j)) {
+                    right = j + 1
+                    while (right < rawBlockText.length && rawBlockText[right] in "。！？!?") right++
+                    while (right < rawBlockText.length && rawBlockText[right] in closingPunct &&
+                        hasUnmatchedOpener(rawBlockText, left, right, rawBlockText[right])
+                    ) {
+                        right++
+                    }
+                    foundEnd = true
+                    break
+                }
+                j++
+            }
+            if (!foundEnd) right = rawBlockText.length
+        }
+        while (right > endUtf16 && rawBlockText[right - 1].isWhitespace()) right--
+
+        if (right <= left || (right - left) > maxLenUtf16) {
+            return startUtf16 to endUtf16
+        }
+        return left to right
+    }
 
     private fun isCjkChar(ch: Char): Boolean =
         ch in '\u4e00'..'\u9fff' || ch in '\u3400'..'\u4dbf' || ch in '\u3000'..'\u303f' || ch in '\uff00'..'\uffef'
@@ -948,52 +1111,81 @@ internal fun checkedStancePayload(
                         continue
                     }
 
-                    // 解析可选的 quote / quotes，若提供则逐句用 ServerQuoteLocator 核验并精确对齐 UTF-16 区间
+                    // 解析可选的 quote / quotes（支持单条字符串、按 anchor 映射的单条或多条数组、或单 anchor 对应的多条数组），
+                    // 逐句用 ServerQuoteLocator 核验定位并向两侧扩到本块内的整句原句（超 400 UTF-16 时保留原区间）。
                     val singleQuote = (sentObj["quote"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
                         ?.takeIf { it.isNotEmpty() }
-                    val quotesMap: Map<String, String> = when (val qEl = sentObj["quotes"]) {
+                    val quotesByAnchor: Map<String, List<String>> = when (val qEl = sentObj["quotes"]) {
                         is JsonObject -> qEl.entries.mapNotNull { (k, v) ->
-                            val s = (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
-                            if (s != null) k to s else null
+                            val list = when (v) {
+                                is JsonPrimitive -> listOfNotNull(v.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() })
+                                is JsonArray -> v.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                                else -> emptyList()
+                            }
+                            if (list.isNotEmpty()) k to list else null
                         }.toMap()
-                        is JsonArray -> anchorIds.zip(qEl.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim() }).toMap()
+                        is JsonArray -> {
+                            val list = qEl.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                            when {
+                                list.isEmpty() -> emptyMap()
+                                anchorIds.size == 1 -> mapOf(anchorIds.single() to list)
+                                else -> anchorIds.zip(list).associate { (a, q) -> a to listOf(q) }
+                            }
+                        }
                         else -> emptyMap()
                     }
-                    val hasExplicitQuote = singleQuote != null || quotesMap.isNotEmpty()
+                    val hasExplicitQuote = singleQuote != null || quotesByAnchor.isNotEmpty()
                     if (!hasExplicitQuote && !passesSameScriptSupport(text, blocks)) {
                         droppedSentences++
                         continue
                     }
 
                     val citations = mutableListOf<CheckedStanceCitation>()
+                    val seenCitationSpans = HashSet<Triple<String, Int, Int>>()
                     var quoteFailed = false
                     for ((idx, block) in blocks.withIndex()) {
-                        val requestedQuote = quotesMap[block.anchor] ?: if (idx == 0) singleQuote else null
-                        if (requestedQuote != null) {
-                            val located = ServerQuoteLocator.verifyAndLocate(requestedQuote, block.text)
-                            if (!located.verified || located.endUtf16 <= located.startUtf16) {
-                                quoteFailed = true
-                                break
+                        val requestedQuotes: List<String> = quotesByAnchor[block.anchor]
+                            ?: if (idx == 0 && singleQuote != null) listOf(singleQuote) else emptyList()
+                        if (requestedQuotes.isNotEmpty()) {
+                            for (requestedQuote in requestedQuotes) {
+                                val located = ServerQuoteLocator.verifyAndLocate(requestedQuote, block.text)
+                                if (!located.verified || located.endUtf16 <= located.startUtf16) {
+                                    quoteFailed = true
+                                    break
+                                }
+                                val (expStart, expEnd) = ServerQuoteLocator.expandToSentenceBounds(
+                                    block.text,
+                                    located.startUtf16,
+                                    located.endUtf16,
+                                )
+                                val absStart = block.blockStartUtf16 + expStart
+                                val absEnd = block.blockStartUtf16 + expEnd
+                                if (seenCitationSpans.add(Triple(block.docId, absStart, absEnd))) {
+                                    citations += CheckedStanceCitation(
+                                        docId = block.docId,
+                                        pdfPage = block.pdfPage,
+                                        startUtf16 = absStart,
+                                        endUtf16 = absEnd,
+                                        quote = block.text.substring(expStart, expEnd),
+                                    )
+                                }
                             }
-                            val slice = block.text.substring(located.startUtf16, located.endUtf16)
-                            citations += CheckedStanceCitation(
-                                docId = block.docId,
-                                pdfPage = block.pdfPage,
-                                startUtf16 = block.blockStartUtf16 + located.startUtf16,
-                                endUtf16 = block.blockStartUtf16 + located.endUtf16,
-                                quote = slice,
-                            )
+                            if (quoteFailed) break
                         } else {
                             val trimmed = block.text.trim()
                             val relStart = block.text.indexOf(trimmed).coerceAtLeast(0)
                             val relEnd = relStart + trimmed.length
-                            citations += CheckedStanceCitation(
-                                docId = block.docId,
-                                pdfPage = block.pdfPage,
-                                startUtf16 = block.blockStartUtf16 + relStart,
-                                endUtf16 = block.blockStartUtf16 + relEnd,
-                                quote = block.text.substring(relStart, relEnd),
-                            )
+                            val absStart = block.blockStartUtf16 + relStart
+                            val absEnd = block.blockStartUtf16 + relEnd
+                            if (seenCitationSpans.add(Triple(block.docId, absStart, absEnd))) {
+                                citations += CheckedStanceCitation(
+                                    docId = block.docId,
+                                    pdfPage = block.pdfPage,
+                                    startUtf16 = absStart,
+                                    endUtf16 = absEnd,
+                                    quote = block.text.substring(relStart, relEnd),
+                                )
+                            }
                         }
                     }
                     if (quoteFailed || citations.isEmpty()) {

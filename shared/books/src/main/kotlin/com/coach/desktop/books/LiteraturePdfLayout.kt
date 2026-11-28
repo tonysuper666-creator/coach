@@ -869,7 +869,7 @@ internal object LiteraturePdfLayout {
             val bound = long.map(::edge).sorted()[long.size / 2]
             if (long.count { abs(edge(it) - bound) <= tolerance } * 2 < long.size) return emptyList()
             if (long.count { line -> line.any { it.x < bound - tolerance && it.right > bound + tolerance } } * 8 > long.size) return emptyList()
-            val outer = rows.flatMap { row ->
+            val strips = rows.map { row ->
                 val line = row.words
                 // A marginal word can start immediately beside the justified edge.
                 val aligned = line.indices.minByOrNull { i ->
@@ -880,6 +880,21 @@ internal object LiteraturePdfLayout {
                 } else {
                     line.filter { if (left) it.right < bound - tolerance else it.x > bound + tolerance }
                 }
+            }
+            val outer = strips.flatMapIndexed { i, strip ->
+                if (strip.isEmpty()) return@flatMapIndexed emptyList()
+                val line = rows[i].words
+                if (strip.size == line.size) return@flatMapIndexed strip
+                val near = if (left) strip.last().right else strip.first().x
+                val gap = if (left) line[strip.size].x - near else near - line[line.size - strip.size - 1].right
+                // A single longer line of ragged prose can extend past the median
+                // edge. Require a gutter or a second baseline in the same side column.
+                if (gap > tolerance * 2) return@flatMapIndexed strip
+                val alignedStrip = strips.indices.any { j ->
+                    j != i && strips[j].isNotEmpty() && abs(rows[j].y - rows[i].y) <= tolerance * 6 &&
+                        abs((if (left) strips[j].last().right else strips[j].first().x) - near) <= tolerance * 2
+                }
+                if (alignedStrip) strip else emptyList()
             }
             // A detached punctuation glyph at the edge can still finish the body line.
             return outer.filterNot { word ->
@@ -965,8 +980,8 @@ internal object LiteraturePdfLayout {
         val ty = tm.translateY
         val tolX = 3f
         val tolY = maxOf(4f, position.heightDir * 0.6f)
-        return tx >= crop.lowerLeftX - tolX && tx <= crop.upperRightX + tolX &&
-            ty >= crop.lowerLeftY - tolY && ty <= crop.upperRightY + tolY
+        // PDFTextStripper has already subtracted the CropBox origin from the text matrix.
+        return tx in -tolX..(crop.width + tolX) && ty in -tolY..(crop.height + tolY)
     }
 
     fun extract(pdf: BookPdfDocument, page: Int): List<GuideRegion> {
@@ -974,11 +989,13 @@ internal object LiteraturePdfLayout {
         val crop = pdfPage.cropBox
         val graphics = pageGraphics(pdfPage)
         val words = mutableListOf<Word>()
+        val glyphDirections = IntArray(4)
         var hiddenGlyphs = 0
         var glyphs = 0
         var scanLayer = false
         val stripper = object : ReadingOrderStripper() {
             override fun processTextPosition(position: BookPdfTextPosition) {
+                if (!insideCropBox(position, crop)) return
                 glyphs++
                 val mode = graphicsState.textState.renderingMode
                 if (!mode.isFill && !mode.isStroke) hiddenGlyphs++
@@ -1005,16 +1022,13 @@ internal object LiteraturePdfLayout {
                     token.clear()
                 }
                 for (glyph in textPositions) {
-                    if (!insideCropBox(glyph, crop)) {
-                        flush()
-                        continue
-                    }
                     val u = glyph.unicode
                     if (u.isNullOrEmpty() || u.all { it == ' ' || it == '\t' || it == '\r' || it == '\n' }) {
                         flush()
                         continue
                     }
                     val x = glyph.xDirAdj
+                    glyphDirections[glyph.dir.toInt() / 90]++
                     val h = glyph.heightDir.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
                     val pt = glyph.yScale.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
                     if (token.isNotEmpty() && (x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f ||
@@ -1171,10 +1185,20 @@ internal object LiteraturePdfLayout {
             slices
         }
 
+        // Word baselines use PDFBox text direction. Graphics are in unrotated crop
+        // coordinates, even if the page and its OCR layer both turn through 180°.
+        val textDirection = glyphDirections.indices.maxBy { glyphDirections[it] } * 90
+        val readingRules = when (textDirection) {
+            0 -> graphics.rules
+            180 -> graphics.rules.map { rule ->
+                DrawnRule(crop.height - rule.displayY, crop.width - rule.maxX, crop.width - rule.minX)
+            }
+            else -> emptyList()
+        }
         val noteWords = rawSlices.groupBy { it.side }.values.flatMapTo(HashSet()) { slices ->
             val members = slices.flatMapTo(HashSet()) { it.words }
             val physical = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
-            columnNotes(physical, graphics.rules, scanLayer)
+            columnNotes(physical, readingRules, scanLayer)
         }
 
         val punctuation = if (scanLayer) scanPunctuation(pdf, page, rows) else emptyMap()
@@ -1290,12 +1314,12 @@ internal object LiteraturePdfLayout {
 
     /**
      * Thin wide strokes, including rules drawn inside a form.
-     * Display Y matches yDirAdj: crop height minus the crop-adjusted user Y, which is upperRightY minus raw user Y.
+     * Rule coordinates start at the top left of the unrotated crop. Extraction aligns them to the text direction.
      * Each subpath is judged on its own, so a rule that shares a path with a taller stroke is still found.
      * A page with unreadable graphics can still be classified by its note markers.
      */
     private fun pageGraphics(pdfPage: BookPdfPage): PageGraphics {
-        if (Math.floorMod(pdfPage.rotation, 360) != 0) return PageGraphics()
+        if (Math.floorMod(pdfPage.rotation, 180) != 0) return PageGraphics()
         val crop = pdfPage.cropBox
         if (crop.width <= 0f || crop.height <= 0f) return PageGraphics()
         return try {
@@ -1454,10 +1478,11 @@ internal object LiteraturePdfLayout {
             val nx0: Float, val ny0: Float, val nx1: Float, val ny1: Float,
         )
 
-        fun normPt(tx: Float, ty: Float): Pair<Float, Float> {
-            val u = ((tx - crop.lowerLeftX) / crop.width).coerceIn(0f, 1f)
-            val v = ((crop.upperRightY - ty) / crop.height).coerceIn(0f, 1f)
-            return when (rotation) {
+        fun displayPoint(x: Float, y: Float, direction: Int): Pair<Float, Float> {
+            val sideways = direction == 90 || direction == 270
+            val u = (x / if (sideways) crop.height else crop.width).coerceIn(0f, 1f)
+            val v = (y / if (sideways) crop.width else crop.height).coerceIn(0f, 1f)
+            return when (Math.floorMod(rotation - direction, 360)) {
                 90 -> (1f - v) to u
                 180 -> (1f - u) to (1f - v)
                 270 -> v to (1f - u)
@@ -1467,6 +1492,9 @@ internal object LiteraturePdfLayout {
 
         val words = mutableListOf<PlacedWord>()
         val stripper = object : BookPdfStripper() {
+            override fun processTextPosition(position: BookPdfTextPosition) {
+                if (insideCropBox(position, crop)) super.processTextPosition(position)
+            }
             override fun writeString(text: String, textPositions: List<BookPdfTextPosition>) {
                 var start = 0f; var end = 0f; var y = 0f; var height = 0f
                 var minNx = 1f; var minNy = 1f; var maxNx = 0f; var maxNy = 0f
@@ -1479,29 +1507,20 @@ internal object LiteraturePdfLayout {
                     minNx = 1f; minNy = 1f; maxNx = 0f; maxNy = 0f
                 }
                 for (glyph in textPositions) {
-                    if (!insideCropBox(glyph, crop)) { flush(); continue }
                     val u = glyph.unicode
                     if (u.isNullOrEmpty() || u.all { it == ' ' || it == '\t' || it == '\r' || it == '\n' }) { flush(); continue }
                     val x = glyph.xDirAdj
                     val h = glyph.heightDir.takeIf { it > 0f } ?: glyph.fontSizeInPt.coerceAtLeast(1f)
                     if (token.isNotEmpty() && x - end > glyph.widthOfSpace.coerceAtLeast(1f) * 0.6f) flush()
                     if (token.isEmpty()) { start = x; y = glyph.yDirAdj; height = h } else if (h > height) height = h
-                    val tm = glyph.textMatrix
-                    val gx = tm.translateX
-                    val gy = tm.translateY
-                    val gw = glyph.widthDirAdj.coerceAtLeast(1f)
-                    val pts = listOf(
-                        normPt(gx, gy),
-                        normPt(gx + gw, gy),
-                        normPt(gx, gy + h),
-                        normPt(gx + gw, gy + h),
-                    )
-                    for ((px, py) in pts) {
-                        if (px < minNx) minNx = px
-                        if (py < minNy) minNy = py
-                        if (px > maxNx) maxNx = px
-                        if (py > maxNy) maxNy = py
-                    }
+                    val direction = glyph.dir.toInt()
+                    val baseline = glyph.yDirAdj
+                    val (x0, y0) = displayPoint(x, baseline - h, direction)
+                    val (x1, y1) = displayPoint(x + glyph.widthDirAdj.coerceAtLeast(1f), baseline, direction)
+                    minNx = minOf(minNx, x0, x1)
+                    minNy = minOf(minNy, y0, y1)
+                    maxNx = maxOf(maxNx, x0, x1)
+                    maxNy = maxOf(maxNy, y0, y1)
                     token.append(u)
                     end = x + glyph.widthDirAdj
                 }
@@ -1525,7 +1544,7 @@ internal object LiteraturePdfLayout {
         val lastKey = needleTokens.last()
         var bestSpan: IntRange? = null
         var bestScore = 0.0
-        for (i in pageTokens.indices) {
+        search@ for (i in pageTokens.indices) {
             if (!pageTokens[i].contains(firstKey) && !firstKey.contains(pageTokens[i])) continue
             val maxEnd = minOf(words.size, i + needleTokens.size + 8)
             val minEnd = minOf(words.size, i + maxOf(1, needleTokens.size - 4))
@@ -1533,14 +1552,20 @@ internal object LiteraturePdfLayout {
                 val endTok = pageTokens[j - 1]
                 if (!endTok.contains(lastKey) && !lastKey.contains(endTok)) continue
                 val joined = words.subList(i, j).joinToString(" ") { it.text }
+                // Substring similarity can be perfect even if an earlier line starts
+                // with the same word. Prefer the span whose complete text is the quote.
+                if (LiteratureTextNorm.normalize(joined) == needle) {
+                    bestSpan = i until j
+                    bestScore = 1.0
+                    break@search
+                }
+                if (bestScore == 1.0) continue
                 val sim = LiteratureTextNorm.bestContiguousSimilarity(needle, joined)
                 if (sim > bestScore) {
                     bestScore = sim
                     bestSpan = i until j
-                    if (sim >= 0.995) break
                 }
             }
-            if (bestScore >= 0.995) break
         }
         val span = bestSpan ?: return null
         if (bestScore < 0.92) return null

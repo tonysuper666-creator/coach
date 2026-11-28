@@ -25,6 +25,8 @@ The Pollock labels follow the printed sentence boundaries, using the words actua
 
 With the two Pollock pages added, the classifier at `30cff15f` recovered 1/29 scan body sentences and returned four footnote candidates. The combined baseline was 80/108 body sentences and four footnote candidates.
 
+With the offset-crop pages added, `e4db45c6` recovered 5/16 body sentences on the new pages and admitted two notes. The combined baseline was 148/159 body sentences and two note leaks.
+
 ## Private PDF acceptance
 
 On the machine holding the originals, annotate all sentences and non-body fragments on each selected page. Store one UTF-8 TSV per input file named `<SHA-256 of original PDF bytes>.tsv` in a local directory. Columns are role, one-based PDF page, zero-based UTF-16 start, exclusive UTF-16 end, and lowercase SHA-256 of the exact UTF-8 encoded substring of `literatureBook` page text. Omit a header. This uses the same page text and offsets as the application's guide anchors.

@@ -147,32 +147,133 @@ function Find-FirstTasteTry($lines) {
     return (Find-Exact $lines '来一道')
 }
 
+function Get-WindowDpiScale {
+    $scale = 1.0
+    try { $dpi = [WD]::GetDpiForWindow($script:Win); if ($dpi -gt 0) { $scale = [Math]::Max(1.0, $dpi / 96.0) } } catch { }
+    return $scale
+}
+
+function Find-TasteCardAnchor($lines, [int]$minY = 0) {
+    $lineList = @($lines)
+    $topAnchor = $null
+    foreach ($needle in @('选一个答案', '还没开启讲解许可')) {
+        foreach ($l in $lineList) {
+            $m = Find-Text @($l) $needle
+            if ($m -and $m.Y -ge $minY) { $topAnchor = $m; break }
+        }
+        if ($topAnchor) { break }
+    }
+    if (-not $topAnchor) {
+        for ($i = $lineList.Count - 1; $i -ge 0; $i--) {
+            $l = $lineList[$i]
+            if (($l.Text -replace '\s', '') -match '^(对了|这题选的是另一项)[。.!！]?$') {
+                $b = Get-LineBox $l
+                if ($b.Y -ge $minY) {
+                    $topAnchor = [pscustomobject]@{
+                        X = [int](($b.X1 + $b.X2) / 2); Y = $b.Y
+                        X1 = $b.X1; X2 = $b.X2; Y1 = $b.Y1; Y2 = $b.Y2
+                    }
+                    break
+                }
+            }
+        }
+    }
+    $anchor = $topAnchor
+    $isStrip = $false
+    if (-not $anchor) {
+        foreach ($needle in @('允许这本书讲解', '看讲解', '开始读这本书')) {
+            foreach ($l in $lineList) {
+                $m = Find-Exact @($l) $needle
+                if (-not $m -and $needle -ne '看讲解') { $m = Find-Text @($l) $needle }
+                if ($m -and $m.Y -ge $minY) { $anchor = $m; break }
+            }
+            if ($anchor) { break }
+        }
+    }
+    if (-not $anchor) {
+        foreach ($needle in @('来一道', '不再提示')) {
+            foreach ($l in $lineList) {
+                $m = Find-Exact @($l) $needle
+                if ($m -and $m.Y -ge $minY) { $anchor = $m; $isStrip = $true; break }
+            }
+            if ($anchor) { break }
+        }
+        if (-not $anchor) {
+            foreach ($l in $lineList) {
+                $m = Find-Text @($l) '想先试一道开胃题吗'
+                if ($m -and $m.Y -ge $minY) { $anchor = $m; $isStrip = $true; break }
+            }
+        }
+    }
+    if (-not $anchor) {
+        foreach ($l in $lineList) {
+            $m = Find-Text @($l) '正在用开头几章'
+            if ($m -and $m.Y -ge $minY) { $anchor = $m; break }
+        }
+    }
+    [pscustomobject]@{ Anchor = $anchor; TopAnchor = $topAnchor; IsStrip = $isStrip }
+}
+
 function Get-TasteCardBox($lines, [bool]$isCompact = $false) {
     $r = Get-Rect
     $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
     if ($winW -le 0 -or $winH -le 0) { return $null }
-    $scale = 1.0
-    try { $dpi = [WD]::GetDpiForWindow($script:Win); if ($dpi -gt 0) { $scale = [Math]::Max(1.0, $dpi / 96.0) } } catch { }
+    $scale = Get-WindowDpiScale
     $padEnd = [int][Math]::Round(16 * $scale)
-    $padBottom = [int][Math]::Round(56 * $scale)
     $cardW = [Math]::Min($winW, [int][Math]::Round(460 * $scale))
-    $cardH = [Math]::Min([Math]::Max(1, $winH - $padBottom), [int][Math]::Round(460 * $scale))
     $margin = [int][Math]::Round(12 * $scale)
-    $x2 = [Math]::Min($winW, $winW - $padEnd + $margin)
-    $x1 = [Math]::Max(0, $winW - $padEnd - $cardW - $margin)
-    $y2 = [Math]::Min($winH, $winH - $padBottom + $margin)
-    $y1 = [Math]::Max(0, $winH - $padBottom - $cardH - $margin)
+
+    $centerX1 = [Math]::Max(0, [int](($winW - $cardW) / 2) - $margin)
+    $centerX2 = [Math]::Min($winW, [int](($winW + $cardW) / 2) + $margin)
+    $rightX1 = [Math]::Max(0, $winW - $padEnd - $cardW - $margin)
+    $rightX2 = [Math]::Min($winW, $winW - $padEnd + $margin)
+
+    $dockedMaxH = [int][Math]::Round(376 * $scale)
+    $dockedY1 = [Math]::Max(0, $winH - $dockedMaxH)
+    $legacyMaxH = [int][Math]::Round(516 * $scale)
+    $legacyY1 = [Math]::Max(0, $winH - $legacyMaxH - $margin)
+
+    $info = Find-TasteCardAnchor $lines $legacyY1
+    $anchor = $info.Anchor
+    $topAnchor = $info.TopAnchor
+    $isStrip = $info.IsStrip
+
     if (-not $isCompact) {
         if ($winW -lt [int](520 * $scale)) { return $null }
-        $compactHit = $false
-        foreach ($needle in @('想先试一道开胃题吗', '不再提示', '允许这本书讲解', '还没开启讲解许可', '选一个答案', '看讲解', '开始读这本书')) {
-            $m = Find-Text $lines $needle
-            if ($m -and $m.X -ge [Math]::Max($x1, [int]($winW * 0.52)) -and $m.X -le $x2 -and $m.Y -ge $y1 -and $m.Y -le $y2) {
-                $compactHit = $true; break
+        if (-not $anchor) { return $null }
+        if (-not $topAnchor) {
+            foreach ($fsNeedle in @('选一个答案', '还没开启讲解许可')) {
+                $fsHint = Find-Text $lines $fsNeedle
+                if ($fsHint -and $fsHint.Y -lt $legacyY1) { return $null }
             }
         }
-        if (-not $compactHit) { return $null }
+        $inRight = ($anchor.X -ge [Math]::Max($rightX1, [int]($winW * 0.52)) -and $anchor.X -le $rightX2 -and $anchor.Y -ge $legacyY1 -and $anchor.Y -le $winH)
+        $inCenter = ([Math]::Abs($anchor.X - $winW / 2.0) -le ($cardW * 0.35) -and $anchor.Y -ge $dockedY1 -and $anchor.Y -le $winH)
+        if (-not ($inRight -or $inCenter)) { return $null }
     }
+
+    $useRight = $false
+    if ($anchor) {
+        $centerMid = $winW / 2.0
+        $rightMid = $winW - $padEnd - ($cardW / 2.0)
+        if ([Math]::Abs($anchor.X - $rightMid) -lt [Math]::Abs($anchor.X - $centerMid)) {
+            $useRight = $true
+        }
+    }
+
+    if ($isStrip -and -not $useRight -and $anchor.X -lt $centerX1) {
+        $x1 = 0; $x2 = $winW
+        $y1 = [Math]::Max($dockedY1, $anchor.Y1 - $margin)
+    } elseif ($useRight) {
+        $x1 = $rightX1; $x2 = $rightX2
+        $validTop = ($topAnchor -and $topAnchor.X -ge $x1 -and $topAnchor.X -le $x2 -and $topAnchor.Y -ge $legacyY1)
+        $y1 = if ($validTop) { [Math]::Max($legacyY1, $topAnchor.Y1 - $margin) } else { $legacyY1 }
+    } else {
+        $x1 = $centerX1; $x2 = $centerX2
+        $validTop = ($topAnchor -and $topAnchor.X -ge $x1 -and $topAnchor.X -le $x2 -and $topAnchor.Y -ge $dockedY1)
+        $y1 = if ($validTop) { [Math]::Max($dockedY1, $topAnchor.Y1 - $margin) } else { $dockedY1 }
+    }
+    $y2 = $winH
     [pscustomobject]@{ X1 = $x1; X2 = $x2; Y1 = $y1; Y2 = $y2 }
 }
 

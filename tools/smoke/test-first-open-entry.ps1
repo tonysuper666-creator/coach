@@ -9,7 +9,7 @@ if ($errors) { throw $errors[0] }
 $helpers = 'Get-LineBox','Find-Exact','Has','Await-Text','Get-HomeImportLabel','Find-TasteOption',
     'Find-TasteVerdict','Test-TasteExplanation','Complete-FirstTaste','Click-Until-Dialog','Resolve-Step2HomeVerdict',
     'Find-Step2HomeBook','Normalize-Step2Title','Test-Step2Home','Find-OnRow','Get-LineClick','Show-ReaderTop',
-    'Find-FirstTasteTry','Get-TasteCardBox','Select-TasteCardLines','Find-FirstTasteAllow','Get-TasteCardScrollPoint','Find-Step2ReaderBack'
+    'Find-FirstTasteTry','Get-WindowDpiScale','Find-TasteCardAnchor','Get-TasteCardBox','Select-TasteCardLines','Find-FirstTasteAllow','Get-TasteCardScrollPoint','Find-Step2ReaderBack'
 foreach ($name in $helpers) {
     $fn = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
@@ -226,10 +226,11 @@ if ((Find-TasteOption @((Row '选一个答案' 60), (Row '○ 最先显示的选
 
 # Compact card bounds & scroll/OCR isolation on a 1600x1000 window
 $origGetRect = ${function:Get-Rect}
+$origGetScale = ${function:Get-WindowDpiScale}
 try {
     function Get-Rect { @{ L = 0; T = 0; R = 1600; B = 1000 } }
     $wideCard = Get-TasteCardBox @((Row '来一道' 900 1300)) $true
-    if (-not $wideCard -or $wideCard.X1 -lt 1100 -or $wideCard.X2 -gt 1600 -or $wideCard.Y1 -lt 460 -or $wideCard.Y2 -gt 960) {
+    if (-not $wideCard -or $wideCard.X1 -lt 1100 -or $wideCard.X2 -gt 1600 -or $wideCard.Y1 -lt 460 -or $wideCard.Y2 -ne 1000) {
         throw "Unexpected compact card bounds: $($wideCard | ConvertTo-Json -Compress)"
     }
     $scrollPt = Get-TasteCardScrollPoint @((Row '选一个答案' 540 1200), (Row '看讲解' 880 1200)) $wideCard
@@ -250,8 +251,98 @@ try {
     if (Test-TasteExplanation $readerNoiseExpl $verdictW $btnW $wideCard) { throw 'Reader prose outside compact card matched explanation' }
     $validExpl = @((Row '对了。' 560 1200), (Row '底层正文' 700 80), (Row '卡片内的真实讲解。' 700 1200), (Row '开始读这本书' 840 1200))
     if (-not (Test-TasteExplanation $validExpl $verdictW $btnW $wideCard)) { throw 'Valid compact card explanation rejected' }
+
+    # Docked bottom-center compact card at 100% DPI (buttons near bottom edge y=965..985)
+    $dockedAskLines = @(
+        (Row '阅读器上方正文：对了。不要被这行干扰。' 540 740),
+        (Row '阅读器上方正文选项干扰行' 610 740),
+        (Row '选一个答案。做完就能看到讲解。' 690 740),
+        (Row '卡片选项甲' 770 620),
+        (Row '看讲解' 965 740)
+    )
+    $dockedCard = Get-TasteCardBox $dockedAskLines $false
+    if (-not $dockedCard -or $dockedCard.X1 -lt 540 -or $dockedCard.X2 -gt 1060 -or $dockedCard.Y1 -le 630 -or $dockedCard.Y2 -ne 1000) {
+        throw "Unexpected docked center card bounds: $($dockedCard | ConvertTo-Json -Compress)"
+    }
+    $dockedSelected = Select-TasteCardLines $dockedAskLines $dockedCard
+    if ((($dockedSelected | ForEach-Object Text) -join '|') -match '阅读器上方正文') {
+        throw "Docked center card leaked reader prose above card: $(($dockedSelected | ForEach-Object Text) -join '|')"
+    }
+    $dockedSubmit = Find-Exact $dockedSelected '看讲解'
+    if (-not $dockedSubmit -or $dockedSubmit.Y -ne 975) { throw 'Docked center submit button clipped near bottom edge' }
+    $dockedOpt = Find-TasteOption $dockedSelected $dockedSubmit $dockedCard
+    if (-not $dockedOpt -or $dockedOpt.Y1 -ne 770) { throw 'Docked center option missed' }
+    $dockedScroll = Get-TasteCardScrollPoint $dockedSelected $dockedCard
+    if ($dockedScroll[0] -lt $dockedCard.X1 -or $dockedScroll[0] -gt $dockedCard.X2 -or $dockedScroll[1] -lt $dockedCard.Y1 -or $dockedScroll[1] -gt $dockedCard.Y2) {
+        throw "Docked center scroll point escaped card: $($dockedScroll -join ',')"
+    }
+
+    # Docked bottom-center compact card at 150% DPI on 1600x1000 wide window
+    function Get-WindowDpiScale { 1.5 }
+    $hidpiConsentLines = @(
+        (Row '阅读器上方正文：不要点进正文' 620 740),
+        (Row '这本书还没开启讲解许可。允许后只发送开头几小节用来出题。' 720 740),
+        (Row '允许这本书讲解' 860 740),
+        (Row '先翻开这本书' 955 740)
+    )
+    $hidpiConsentBox = Get-TasteCardBox $hidpiConsentLines $false
+    if (-not $hidpiConsentBox -or $hidpiConsentBox.X1 -lt 420 -or $hidpiConsentBox.X2 -gt 1180 -or $hidpiConsentBox.Y1 -le 640 -or $hidpiConsentBox.Y2 -ne 1000) {
+        throw "Unexpected 150% DPI consent box: $($hidpiConsentBox | ConvertTo-Json -Compress)"
+    }
+    $hidpiConsentCardLines = Select-TasteCardLines $hidpiConsentLines $hidpiConsentBox
+    if ((($hidpiConsentCardLines | ForEach-Object Text) -join '|') -match '阅读器上方正文') {
+        throw '150% DPI consent box leaked reader prose above card'
+    }
+    $hidpiAllow = Find-FirstTasteAllow $hidpiConsentCardLines
+    if (-not $hidpiAllow -or $hidpiAllow.Y -ne 870) { throw '150% DPI allow button missed' }
+
+    # Scrolled 150% DPI card where top hint scrolled off-screen (only bottom submit visible)
+    $hidpiScrolledLines = @(
+        (Row '阅读器正文：不要误判成选项' 340 740),
+        (Row '阅读器侧边正文' 700 120),
+        (Row '卡片滚动后选项' 760 520),
+        (Row '看讲解' 965 740)
+    )
+    $hidpiScrolledBox = Get-TasteCardBox $hidpiScrolledLines $false
+    if (-not $hidpiScrolledBox -or $hidpiScrolledBox.X1 -lt 420 -or $hidpiScrolledBox.X2 -gt 1180 -or $hidpiScrolledBox.Y1 -lt 430 -or $hidpiScrolledBox.Y2 -ne 1000) {
+        throw "Unexpected 150% DPI scrolled box: $($hidpiScrolledBox | ConvertTo-Json -Compress)"
+    }
+    $hidpiScrolledCardLines = Select-TasteCardLines $hidpiScrolledLines $hidpiScrolledBox
+    $hidpiScrolledSubmit = Find-Exact $hidpiScrolledCardLines '看讲解'
+    $hidpiScrolledOpt = Find-TasteOption $hidpiScrolledCardLines $hidpiScrolledSubmit $hidpiScrolledBox
+    if (-not $hidpiScrolledOpt -or $hidpiScrolledOpt.Y1 -ne 760) { throw '150% DPI scrolled card option missed' }
+    $hidpiScrolledPt = Get-TasteCardScrollPoint $hidpiScrolledCardLines $hidpiScrolledBox
+    if ($hidpiScrolledPt[0] -lt $hidpiScrolledBox.X1 -or $hidpiScrolledPt[0] -gt $hidpiScrolledBox.X2 -or $hidpiScrolledPt[1] -lt $hidpiScrolledBox.Y1 -or $hidpiScrolledPt[1] -gt $hidpiScrolledBox.Y2) {
+        throw "150% DPI scrolled scroll point escaped card: $($hidpiScrolledPt -join ',')"
+    }
+
+    # 150% DPI explanation verification with reader prose directly above and beside centered card
+    $hidpiExplLines = @(
+        (Row '上方阅读器正文不应被当成讲解' 580 740),
+        (Row '左侧阅读器正文不应被当成讲解' 760 120),
+        (Row '右侧阅读器正文不应被当成讲解' 760 1350),
+        (Row '这题选的是另一项。' 690 740),
+        (Row '开始读这本书' 965 740)
+    )
+    $hidpiExplBox = Get-TasteCardBox $hidpiExplLines $false
+    if (-not $hidpiExplBox -or $hidpiExplBox.Y1 -le 600 -or $hidpiExplBox.Y2 -ne 1000) {
+        throw "Unexpected 150% DPI explanation box: $($hidpiExplBox | ConvertTo-Json -Compress)"
+    }
+    $hidpiExplCardLines = Select-TasteCardLines $hidpiExplLines $hidpiExplBox
+    $hidpiVerdict = Find-TasteVerdict $hidpiExplCardLines
+    $hidpiDoneBtn = Find-Exact $hidpiExplCardLines '开始读这本书'
+    if (-not $hidpiDoneBtn -or $hidpiDoneBtn.Y -ne 975) { throw '150% DPI continue button missed near bottom' }
+    if (Test-TasteExplanation $hidpiExplCardLines $hidpiVerdict $hidpiDoneBtn $hidpiExplBox) {
+        throw '150% DPI explanation matched reader prose above/beside docked card'
+    }
+    $hidpiValidExplLines = $hidpiExplLines + @((Row '卡片内的讲解正文。' 790 740))
+    $hidpiValidCardLines = Select-TasteCardLines $hidpiValidExplLines $hidpiExplBox
+    if (-not (Test-TasteExplanation $hidpiValidCardLines $hidpiVerdict $hidpiDoneBtn $hidpiExplBox)) {
+        throw 'Valid 150% DPI docked explanation rejected'
+    }
 } finally {
     Set-Item Function:\Get-Rect $origGetRect
+    Set-Item Function:\Get-WindowDpiScale $origGetScale
 }
 
 # Step 2 reader back button under import progress banner

@@ -94,31 +94,6 @@ internal sealed interface CheckedCollectionLayer {
     }
 }
 
-internal object EsotericHighRiskFilter {
-    private val zhAdviceRegex = Regex(
-        """(?:你|您|读者)?(?:现在|当下|目前|此时|本月|本周|这周|今天|可以|应该|应当|需要|不妨|适合|适宜|最好|值得|建议|推荐|请|别|不要|切勿|切忌|务必|赶紧|赶快)[^，。！？\n]{0,18}(?:买入|卖出|买股|买基金|购买|抛售|做多|做空|加仓|减仓|清仓|建仓|满仓|空仓|抄底|逃顶|止损|止盈|定投|投资|入市|买房|卖房|停药|停掉|断药|减药|换药|用药|吃药|服药|不吃.{0,4}药|手术|化疗|放疗|住院|就医|起诉|诉讼|打官司|签合同|签约|违约|毁约|报案|炒币|炒股)"""
-    )
-    private val zhReverseAdviceRegex = Regex(
-        """(?:买入|卖出|买股|买基金|投资|加仓|减仓|清仓|建仓|停药|用药|吃药|服药|手术|起诉|签合同|违约)[^，。！？\n]{0,10}(?:是明智|很合适|很划算|不可取|有必要|有风险但可以|能赚钱|能盈利|会亏|能治好|可以停|不必吃)"""
-    )
-    private val zhDecisionOutcomeRegex = Regex(
-        """(?:适合|适宜|不宜|值得|可以|应该|不该|应当|不应)(?:现在|立即|马上|趁机)?(?:买|卖|投|入|停药|吃药|服药|起诉|签合同)|(?:建议|推荐)(?:您|你)?(?:买|卖|持有|停|换|选择|起诉|放弃|继续服用|停止服用)|(?:必然|肯定|一定会?|将会|有望)(?:涨|跌|大涨|大跌|升值|贬值|盈利|亏损|获利|翻倍|暴涨|暴跌|痊愈|胜诉|败诉)"""
-    )
-    private val enAdviceRegex = Regex(
-        """(?i)\b(?:you should|we recommend|i recommend|advise you to|consider (?:buying|selling|investing|stopping|suing)|best to (?:buy|sell|stop|sue)|do not (?:buy|sell|stop taking|sue))\b.*\b(?:stock|stocks|fund|etf|crypto|bitcoin|invest|medication|medicine|pill|pills|surgery|lawsuit|sue|contract)\b"""
-    )
-
-    fun givesConcreteAdvice(sentence: String): Boolean {
-        val clean = sentence.trim()
-        if (clean.isEmpty()) return false
-        if (zhAdviceRegex.containsMatchIn(clean)) return true
-        if (zhReverseAdviceRegex.containsMatchIn(clean)) return true
-        if (zhDecisionOutcomeRegex.containsMatchIn(clean)) return true
-        if (enAdviceRegex.containsMatchIn(clean)) return true
-        return false
-    }
-}
-
 internal object EsotericBookMatcher {
     private val tradToSimp: Map<Char, Char> = mapOf(
         '經' to '经', '論' to '论', '語' to '语', '學' to '学', '習' to '习',
@@ -216,16 +191,46 @@ internal object CollectionQaStanceEngine {
     )
 
     private enum class RejectReason(val hint: String) {
-        JSON("Response was not valid JSON. Output one JSON object only."),
-        ROOT_FIELDS("Root JSON must contain only 'paragraphs' and 'boundary'."),
+        JSON("Response was not valid JSON. Output one valid JSON object only with no prose or unescaped quotes."),
+        ROOT_FIELDS("Root JSON must contain 'paragraphs' and 'boundary'."),
         PARAGRAPH_COUNT("Output at most 5 paragraphs."),
         PARAGRAPH_FIELDS("Check allowed keys on each paragraph."),
-        STANCE_LAYER("Respect each book's allowed layers (no guess outside life; every guess MUST be immediately adjacent to a verified book paragraph of the same life-stance book — remove guess if no life book passage is cited in book; no outside/guess for original)."),
-        ANCHORS("Never include anchors or sentences on outside/guess paragraphs."),
-        PARAGRAPH_TEXT("Paragraph text must be non-empty, single-line, without 【】 or page numbers."),
+        STANCE_LAYER("Respect each book's allowed layers (no guess outside life; every guess MUST be immediately adjacent to a verified book paragraph of the same life-stance book — remove guess if no life book passage is cited in book; for original stance NEVER output outside/guess, return {\"paragraphs\":[],\"boundary\":null} if blocks do not answer the question)."),
+        ANCHORS("Never include non-empty anchors or sentences on outside/guess paragraphs."),
+        PARAGRAPH_TEXT("Paragraph text must be non-empty, without 【】 or page numbers."),
         ANSWER_LOCATOR("Never put page numbers (like 第X页 or page X) in outside/guess text."),
         FIRST_PERSON("In guess paragraphs, use third person ONLY (no 我/我们/I/my/we/our)."),
         PAYLOAD_SIZE("Keep response concise within 16,000 characters."),
+    }
+
+    private fun resolveCollectionNotices(
+        books: List<CollectionBookStanceSpec>,
+        responseStanceWire: String,
+        highRisk: Boolean,
+        citedEsotericInEsotericStance: Boolean = false,
+    ): Pair<String?, String> {
+        val systemNotice = when {
+            responseStanceWire == BookStance.ESOTERIC.wire -> BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
+            responseStanceWire == "mixed" && citedEsotericInEsotericStance -> BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
+            else -> null
+        }
+        val allRelevantFiction = books.isNotEmpty() && books.all { BookStanceGuard.FICTION in it.guards }
+        val noBookFallback = if (!highRisk && allRelevantFiction) {
+            BookStanceCopy.NO_BOOK_FICTION
+        } else {
+            BookStanceCopy.NO_BOOK_DIRECT
+        }
+        return systemNotice to noBookFallback
+    }
+
+    private fun parseRootJsonObject(payload: String): JsonObject? {
+        val unwrapped = unwrapJsonFence(payload)
+        runCatching { json.parseToJsonElement(unwrapped) as? JsonObject }.getOrNull()?.let { return it }
+        val trimmed = unwrapped.trim()
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return runCatching { json.parseToJsonElement(trimmed.substring(start, end + 1)) as? JsonObject }.getOrNull()
     }
 
     suspend fun ask(
@@ -367,16 +372,7 @@ internal object CollectionQaStanceEngine {
 
         // When no sendable blocks remain, NEVER call model; return high-risk/fallback directly with 0 citations.
         if (sendableBlocks.isEmpty()) {
-            val allRelevantFiction = parsedBooks.isNotEmpty() &&
-                parsedBooks.all { BookStanceGuard.FICTION in it.guards }
-            val fallbackNotice = if (!preHighRisk && allRelevantFiction) {
-                BookStanceCopy.NO_BOOK_FICTION
-            } else {
-                BookStanceCopy.NO_BOOK_DIRECT
-            }
-            val sysNotice = if (responseStanceWire == BookStance.ESOTERIC.wire) {
-                BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
-            } else null
+            val (sysNotice, fallbackNotice) = resolveCollectionNotices(parsedBooks, responseStanceWire, preHighRisk)
             val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
             return buildResponseJson(
                 responseStanceWire = responseStanceWire,
@@ -410,15 +406,8 @@ internal object CollectionQaStanceEngine {
         )
 
         var rejectReason: RejectReason? = null
-        val reply1 = transport.ask(
-            systemPrompt = sysPrompt,
-            userPrompt = userPrompt,
-            friend = friend,
-            device = device,
-            maxTokens = 6144,
-        )
-        var verified = checkedPayload(
-            payload = reply1.text,
+        fun checkAttempt(text: String): VerifiedCollectionResult? = checkedPayload(
+            payload = text,
             blocks = stanceBlocks,
             byAnchor = byAnchor,
             anchorTextMap = anchorTextMap,
@@ -429,9 +418,26 @@ internal object CollectionQaStanceEngine {
             responseStanceWire = responseStanceWire,
             onReject = { rejectReason = it },
         )
+
+        val reply1 = transport.ask(
+            systemPrompt = sysPrompt,
+            userPrompt = userPrompt,
+            friend = friend,
+            device = device,
+            maxTokens = 6144,
+        )
+        val verified1 = checkAttempt(reply1.text)
+        var verified = verified1
         var lastReply = reply1
-        if (verified == null) {
-            val repairNote = "\n\n[PREVIOUS ATTEMPT INVALID: ${rejectReason?.hint ?: "Fix JSON structure."} State ONLY ONE fact per sentence; split multiple examples, numbers, or 'A and B' into separate sentences, each with its own anchor and verbatim quote (up to 200 chars) covering every number in that sentence; drop unsupported facts. Output valid JSON only.]"
+        val needsCitationRetry = verified1 != null && verified1.totalBookSentences == 0 &&
+            verified1.droppedSentences > 0 && verified1.outOfRange == 0
+        if (verified1 == null || needsCitationRetry) {
+            val reasonHint = if (verified1 == null) {
+                rejectReason?.hint ?: "Fix JSON structure."
+            } else {
+                "All book sentences were dropped by the citation/single-sentence gate; emit clean single-fact sentences with valid non-mixed anchors and exact 5-200 char verbatim quotes, or keep only valid outside layers if the book does not cover the question."
+            }
+            val repairNote = "\n\n[PREVIOUS ATTEMPT INVALID: $reasonHint State ONLY ONE fact per sentence; split multiple examples, numbers, or 'A and B' into separate sentences, each with its own anchor and verbatim quote (up to 200 chars) covering every number in that sentence; drop unsupported facts. Output valid JSON only.]"
             val reply2 = transport.ask(
                 systemPrompt = sysPrompt,
                 userPrompt = userPrompt + repairNote,
@@ -440,18 +446,12 @@ internal object CollectionQaStanceEngine {
                 maxTokens = 6144,
             )
             lastReply = reply2
-            verified = checkedPayload(
-                payload = reply2.text,
-                blocks = stanceBlocks,
-                byAnchor = byAnchor,
-                anchorTextMap = anchorTextMap,
-                books = parsedBooks,
-                bookById = bookById,
-                esotericBookIds = esotericBookIds,
-                preHighRisk = preHighRisk,
-                responseStanceWire = responseStanceWire,
-                onReject = { rejectReason = it },
-            )
+            val verified2 = checkAttempt(reply2.text)
+            verified = when {
+                verified1 == null -> verified2
+                verified2 != null && (verified2.totalBookSentences > 0 || verified1.layers.isEmpty()) -> verified2
+                else -> verified1
+            }
         }
 
         if (friend == null) ledger?.let { bookLedger ->
@@ -475,42 +475,38 @@ internal object CollectionQaStanceEngine {
         }
 
         val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
-        if (verified == null) {
-            // Fail-closed refusal: ZERO citations attached (TON-1971 + TON-1978).
-            return buildJsonObject {
-                put("stance", responseStanceWire)
-                put("insufficientEvidence", true)
-                put("error", "材料里暂时没有整理出可核对的回答，请稍后重试。")
-                put("layers", JsonArray(emptyList()))
-                put("systemNotice", JsonNull)
-                put("noBookNotice", BookStanceCopy.NO_BOOK_DIRECT)
-                put("missingRecordNotices", buildJsonArray { missingRecordNotices.forEach { add(JsonPrimitive(it)) } })
-                put("boundary", if (preHighRisk) JsonPrimitive(BookStanceCopy.HIGH_RISK_BOUNDARY) else JsonNull)
-                if (preHighRisk) put("highRiskNotice", BookStanceCopy.HIGH_RISK_NOTICE) else put("highRiskNotice", JsonNull)
-                put("modelCalled", true)
-                put("gate", buildJsonObject {
-                    put("droppedSentences", 0)
-                    put("outOfRange", 0)
-                })
-                put("sentences", JsonArray(emptyList()))
-                put("sources", JsonArray(emptyList()))
-                put("conflicts", JsonArray(emptyList()))
-                put("hasMaterialConflict", false)
-                put("conflictSummaryZh", "")
-                put("elapsedMs", elapsedMs)
-            }
+        val finalVerified = verified
+        if (finalVerified == null) {
+            // Fail-closed refusal: ZERO citations attached (TON-1971 + TON-1978), preserving fiction & esoteric notices.
+            val (sysNotice, fallbackNotice) = resolveCollectionNotices(parsedBooks, responseStanceWire, preHighRisk)
+            return buildResponseJson(
+                responseStanceWire = responseStanceWire,
+                layers = emptyList(),
+                systemNotice = sysNotice,
+                noBookNotice = fallbackNotice,
+                missingRecordNotices = missingRecordNotices,
+                highRisk = preHighRisk,
+                modelCalled = true,
+                droppedSentences = 0,
+                outOfRange = 0,
+                elapsedMs = elapsedMs,
+                servedBy = lastReply.servedBy,
+                ttftMs = lastReply.ttftMs,
+                insufficientEvidence = true,
+                errorMessage = "材料里暂时没有整理出可核对的回答，请稍后重试。",
+            )
         }
 
         return buildResponseJson(
             responseStanceWire = responseStanceWire,
-            layers = verified.layers,
-            systemNotice = verified.systemNotice,
-            noBookNotice = verified.noBookNotice,
+            layers = finalVerified.layers,
+            systemNotice = finalVerified.systemNotice,
+            noBookNotice = finalVerified.noBookNotice,
             missingRecordNotices = missingRecordNotices,
-            highRisk = verified.highRisk,
+            highRisk = finalVerified.highRisk,
             modelCalled = true,
-            droppedSentences = verified.droppedSentences,
-            outOfRange = verified.outOfRange,
+            droppedSentences = finalVerified.droppedSentences,
+            outOfRange = finalVerified.outOfRange,
             elapsedMs = elapsedMs,
             servedBy = lastReply.servedBy,
             ttftMs = lastReply.ttftMs,
@@ -590,29 +586,36 @@ internal object CollectionQaStanceEngine {
             appendLine("PER-BOOK STANCE RULES:")
             appendLine("- knowledge (按专业角度答): Explain principles, derivations, boundaries. Allowed layers: \"book\" and \"outside\" (\"通行讲法\" or \"史学\"). NEVER \"guess\".")
             appendLine("- life (按作者和原文答): Respond from the author's recorded words/experiences in \"book\". NEVER invent unrecorded facts. Allowed layers: \"book\", \"outside\", and \"guess\". Any \"guess\" paragraph MUST belong to a life-stance book, MUST appear immediately adjacent to a verified \"book\" paragraph of that same life-stance book (NEVER emit \"guess\" if no life-stance book is cited in \"book\"), MUST use third person ONLY (e.g. \"按他书里的办法推想……\"), and MUST NEVER contain 我/我们/I/my/we/our even if asked.")
-            appendLine("- classic (按思想和注疏答): Allowed layers: \"book\" and \"outside\" (\"注家读法\" or \"今人解读\"). NEVER \"guess\". Blocks tagged [原文] are main text; [注]/[按语] are in-book commentary. NEVER mix [原文] and [注]/[按语] anchors in ONE \"book\" sentence! Absent commentators (e.g., 朱熹 on plain Lunyu) belong ONLY in \"outside\" and NEVER in \"book\" sentences.")
+            appendLine("- classic (按思想和注疏答): Allowed layers: \"book\" and \"outside\" (\"注家读法\" or \"今人解读\"). NEVER \"guess\". Blocks tagged [原文] are main text; [注]/[按语] are in-book commentary. NEVER mix [原文] and [注]/[按语] anchors in ONE \"book\" sentence! Absent commentators (e.g., 朱熹 on plain Lunyu) belong ONLY in \"outside\" and NEVER in \"book\" sentences. When the question asks ONLY what an absent commentator says, omit \"book\" paragraphs and put the explanation in an \"outside\" paragraph (kind \"注家读法\").")
             appendLine("- esoteric (按本书体系答): Reason strictly within the book's symbolic framework without predicting real-world outcomes. Allowed layers: \"book\" and \"outside\" (\"今人解读\" or \"史学\"). NEVER \"guess\".")
-            appendLine("- original (只按原文答): Allowed layer: \"book\" ONLY! NEVER output \"outside\" or \"guess\" for an original-stance book.")
+            appendLine("- original (只按原文答): Allowed layer: \"book\" ONLY! NEVER output \"outside\" or \"guess\" for an original-stance book. If the supplied blocks do not cover what the question asks, output {\"paragraphs\":[],\"boundary\":null}.")
             appendLine("- FICTION GUARD (overrides stance): For any book with guard \"fiction\", NEVER reveal or hint at plot events beyond its readThroughPage — NOT EVEN in \"outside\" or \"guess\"! If asked about later plot, omit \"book\" sentences for that book.")
             if (preHighRisk) {
                 appendLine()
                 appendLine("HIGH-RISK BOUNDARY ACTIVE (overrides stance): The question involves a real-world medical, legal, or investment decision touching an esoteric book.")
                 appendLine("- Set \"boundary\": \"${BookStanceCopy.HIGH_RISK_BOUNDARY}\".")
-                appendLine("- ONLY explain what the supplied book passages say in \"book\" sentences — DO NOT give concrete medical, legal, or investment advice or predictions to the reader.")
+                appendLine("- ONLY explain what the supplied book passages say in \"book\" sentences — start every \"book\" sentence with explicit book attribution (such as 原文写 / 书里讲 / 爻辞为 / 象传解释 / 本段指出 / 本书认为) and stay strictly close to the exact wording of the cited original sentence(s), without adding outside concepts or interpretations.")
+                appendLine("- DO NOT give concrete medical, legal, or investment advice, medication/stock mentions absent from the cited passage, or predictions to the reader.")
                 appendLine("- Output ZERO \"outside\" and ZERO \"guess\" paragraphs.")
             } else {
                 appendLine("- Set \"boundary\": null. ONLY set \"boundary\": \"${BookStanceCopy.HIGH_RISK_BOUNDARY}\" for concrete MEDICAL (stopping meds, diagnosis, surgery), LEGAL (suing, contracts, lawsuits), or INVESTMENT (buying/selling stocks, funds, crypto) decisions. NEVER set \"boundary\" for career, promotion, job-change, mood, or general fortune questions — answer those normally within the book's stance without predicting real outcomes.")
             }
+            val originalOnly = responseStanceWire == BookStance.ORIGINAL.wire ||
+                (books.isNotEmpty() && books.all { it.effectiveStance == BookStance.ORIGINAL })
             appendLine()
             appendLine("OUTPUT FORMAT (STRICT JSON ONLY — first char {, no markdown fences):")
-            appendLine("""{"paragraphs":[{"layer":"book","bookId":"<bookId>","sentences":[{"text":"一句完整的中文陈述。","anchors":["S1"],"quote":"exact verbatim substring from S1"}]},{"layer":"outside","bookId":"<bookId or cross>","kind":"通行讲法","text":"书外补充。"}],"boundary":null}""")
+            if (preHighRisk || originalOnly) {
+                appendLine("""{"paragraphs":[{"layer":"book","bookId":"<bookId>","sentences":[{"text":"一句完整的中文陈述。","anchors":["S1"],"quote":"exact verbatim substring from S1"}]}],"boundary":${if (preHighRisk) "\"${BookStanceCopy.HIGH_RISK_BOUNDARY}\"" else "null"}}""")
+            } else {
+                appendLine("""{"paragraphs":[{"layer":"book","bookId":"<bookId>","sentences":[{"text":"一句完整的中文陈述。","anchors":["S1"],"quote":"exact verbatim substring from S1"}]},{"layer":"outside","bookId":"<bookId or cross>","kind":"通行讲法","text":"书外补充。"}],"boundary":null}""")
+            }
             appendLine()
             appendLine("RULES:")
             appendLine("1. Root JSON object MUST contain ONLY keys \"paragraphs\" and \"boundary\". Output 0 to 5 paragraphs.")
             appendLine("2. Every \"book\" paragraph must contain ONLY keys \"layer\", \"sentences\", and optional \"bookId\". Every sentence item is STRICTLY ONE Chinese sentence (one 。！？ at end) stating ONLY ONE fact. If enumerating multiple examples, multiple numbers/percentages, or \"A并且B\", split them into separate sentences, each with its own \"anchors\" and \"quote\" (up to 200 chars, or \"quotes\":{\"S1\":\"...\"} if >1 anchor). Omit any item not directly backed by the block text.")
             appendLine("3. Each \"quote\" (5–200 chars verbatim substring from the cited block) MUST cover the full fact and EVERY number/percentage stated in that sentence. If citing 3 examples from the same block, emit 3 separate sentence items sharing that anchor, each with its own exact verbatim quote.")
             appendLine("4. Never mix citations from two different books inside one \"book\" sentence. Put each book's facts in separate \"book\" sentences/paragraphs.")
-            appendLine("5. Never put 【】, newlines, or page numbers (第X页 / page X) or unescaped \" inside text; only wrap text in 「」 when quoting an exact verbatim substring present in the cited block (use bare words for translated terms). Never fabricate citations.")
+            appendLine("5. Never put 【】, newlines, page numbers (第X页 / page X), or ANY ASCII double quotes \" inside \"text\" of book, outside, or guess paragraphs; write quoted terms with 「」 or bare words. Never fabricate citations.")
             appendLine("6. When multiple books in the library are asked about, address each relevant book according to its OWN stance; if synthesis/comparison across books is outside all books, put that connection in an \"outside\" paragraph (unless stance is original-only or high-risk).")
         }.trimIndent()
 
@@ -672,7 +675,17 @@ internal object CollectionQaStanceEngine {
         val highRisk: Boolean,
         val droppedSentences: Int,
         val outOfRange: Int,
-    )
+    ) {
+        val totalBookSentences: Int
+            get() = layers.filterIsInstance<CheckedCollectionLayer.Book>().sumOf { it.sentences.size }
+    }
+
+    private fun hasNonEmptyPayloadField(el: kotlinx.serialization.json.JsonElement?): Boolean = when (el) {
+        null, is JsonNull -> false
+        is JsonArray -> el.isNotEmpty()
+        is JsonPrimitive -> el.content.isNotBlank()
+        is JsonObject -> el.isNotEmpty()
+    }
 
     private fun checkedPayload(
         payload: String,
@@ -692,10 +705,8 @@ internal object CollectionQaStanceEngine {
         }
 
         if (payload.length > 16_000) return reject(RejectReason.PAYLOAD_SIZE)
-        val root = runCatching { json.parseToJsonElement(unwrapJsonFence(payload)) as? JsonObject }.getOrNull()
-            ?: return reject(RejectReason.JSON)
-        val allowedRootKeys = setOf("paragraphs", "boundary")
-        if (!root.keys.all { it in allowedRootKeys } || "paragraphs" !in root) {
+        val root = parseRootJsonObject(payload) ?: return reject(RejectReason.JSON)
+        if ("paragraphs" !in root) {
             return reject(RejectReason.ROOT_FIELDS)
         }
         val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(RejectReason.ROOT_FIELDS)
@@ -740,18 +751,24 @@ internal object CollectionQaStanceEngine {
 
             when (layerKind) {
                 AnswerLayerKind.OUTSIDE, AnswerLayerKind.GUESS -> {
-                    if ("anchors" in para || "sentences" in para) return reject(RejectReason.ANCHORS)
+                    if (hasNonEmptyPayloadField(para["anchors"]) ||
+                        hasNonEmptyPayloadField(para["sentences"]) ||
+                        hasNonEmptyPayloadField(para["citations"])
+                    ) {
+                        return reject(RejectReason.ANCHORS)
+                    }
                     val allowedKeys = if (layerKind == AnswerLayerKind.OUTSIDE) {
-                        setOf("layer", "kind", "text", "bookId", "book")
+                        setOf("layer", "kind", "text", "bookId", "book", "bookTitle", "anchors", "sentences", "citations")
                     } else {
-                        setOf("layer", "text", "bookId", "book")
+                        setOf("layer", "text", "bookId", "book", "bookTitle", "anchors", "sentences", "citations")
                     }
                     val nonNullKeys = para.entries.filter { it.value !is JsonNull }.map { it.key }.toSet()
                     if (!nonNullKeys.all { it in allowedKeys }) return reject(RejectReason.PARAGRAPH_FIELDS)
 
-                    val text = (para["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
+                    val rawText = (para["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                         ?: return reject(RejectReason.PARAGRAPH_TEXT)
-                    if (text.isEmpty() || '\n' in text || '\r' in text || '【' in text || '】' in text) {
+                    val text = rawText.replace(Regex("""[\r\n]+"""), " ").trim()
+                    if (text.isEmpty() || '【' in text || '】' in text) {
                         return reject(RejectReason.PARAGRAPH_TEXT)
                     }
                     if (locatorRegex.containsMatchIn(text)) {
@@ -797,7 +814,7 @@ internal object CollectionQaStanceEngine {
                 AnswerLayerKind.BOOK -> {
                     val rawSentences = para["sentences"] as? JsonArray ?: return reject(RejectReason.PARAGRAPH_FIELDS)
                     val nonNullKeys = para.entries.filter { it.value !is JsonNull }.map { it.key }.toSet()
-                    if (!nonNullKeys.all { it in setOf("layer", "sentences", "bookId", "book") }) {
+                    if (!nonNullKeys.all { it in setOf("layer", "sentences", "bookId", "book", "bookTitle") }) {
                         return reject(RejectReason.PARAGRAPH_FIELDS)
                     }
                     val paraClaimedBookId = resolveClaimedBookId(rawParaBook)
@@ -910,12 +927,17 @@ internal object CollectionQaStanceEngine {
                                     quoteFailed = true
                                     break
                                 }
-                                val slice = blk.text.substring(located.startUtf16, located.endUtf16)
+                                val (spanStart, spanEnd) = if (effectiveHighRisk) {
+                                    ServerQuoteLocator.expandToSentenceBounds(blk.text, located.startUtf16, located.endUtf16)
+                                } else {
+                                    located.startUtf16 to located.endUtf16
+                                }
+                                val slice = blk.text.substring(spanStart, spanEnd)
                                 citations += CheckedStanceCitation(
                                     docId = blk.docId,
                                     pdfPage = blk.pdfPage,
-                                    startUtf16 = blk.blockStartUtf16 + located.startUtf16,
-                                    endUtf16 = blk.blockStartUtf16 + located.endUtf16,
+                                    startUtf16 = blk.blockStartUtf16 + spanStart,
+                                    endUtf16 = blk.blockStartUtf16 + spanEnd,
                                     quote = slice,
                                 )
                             } else {
@@ -939,8 +961,8 @@ internal object CollectionQaStanceEngine {
                             droppedSentences++
                             continue
                         }
-                        // High-risk concrete advice filter
-                        if (effectiveHighRisk && EsotericHighRiskFilter.givesConcreteAdvice(text)) {
+                        // Reuse single-book high-risk sentence allow-list & attribution filter (TON-1982)
+                        if (effectiveHighRisk && !EsotericHighRiskSentenceFilter.isPureBookExplanation(text, citations)) {
                             droppedSentences++
                             continue
                         }
@@ -995,16 +1017,13 @@ internal object CollectionQaStanceEngine {
         val totalBookSentences = layersOut.filterIsInstance<CheckedCollectionLayer.Book>().sumOf { it.sentences.size }
         val citedEsotericInEsotericStance = layersOut.filterIsInstance<CheckedCollectionLayer.Book>()
             .any { it.systemNotice == BookStanceCopy.ESOTERIC_SYSTEM_NOTICE }
-        val systemNotice = when {
-            responseStanceWire == BookStance.ESOTERIC.wire -> BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
-            responseStanceWire == "mixed" && citedEsotericInEsotericStance -> BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
-            else -> null
-        }
-
-        val allRelevantFiction = books.isNotEmpty() && books.all { BookStanceGuard.FICTION in it.guards }
-        val noBookNotice = if (totalBookSentences == 0) {
-            if (!effectiveHighRisk && allRelevantFiction) BookStanceCopy.NO_BOOK_FICTION else BookStanceCopy.NO_BOOK_DIRECT
-        } else null
+        val (systemNotice, noBookFallback) = resolveCollectionNotices(
+            books = books,
+            responseStanceWire = responseStanceWire,
+            highRisk = effectiveHighRisk,
+            citedEsotericInEsotericStance = citedEsotericInEsotericStance,
+        )
+        val noBookNotice = if (totalBookSentences == 0) noBookFallback else null
 
         return VerifiedCollectionResult(
             layers = layersOut,
@@ -1029,6 +1048,8 @@ internal object CollectionQaStanceEngine {
         elapsedMs: Long,
         servedBy: String,
         ttftMs: Long,
+        insufficientEvidence: Boolean = false,
+        errorMessage: String? = null,
     ): JsonObject {
         val highRiskNotice = if (highRisk) BookStanceCopy.HIGH_RISK_NOTICE else null
         val summaryText = buildString {
@@ -1057,7 +1078,8 @@ internal object CollectionQaStanceEngine {
 
         return buildJsonObject {
             put("stance", responseStanceWire)
-            put("insufficientEvidence", false)
+            put("insufficientEvidence", insufficientEvidence)
+            if (errorMessage != null) put("error", errorMessage)
             put("layers", buildJsonArray {
                 for (layer in layers) {
                     add(buildJsonObject {

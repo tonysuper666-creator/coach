@@ -688,5 +688,47 @@ class CollectionQaStanceTest {
         assertEquals(2, c1aCalls)
         assertEquals(1, c1aRes.getValue("layers").jsonArray.single().jsonObject.getValue("sentences").jsonArray.size)
         assertTrue(c1aRes["noBookNotice"] is JsonNull)
+        assertTrue(c1aRes.getValue("gate").jsonObject.getValue("rejects").jsonArray.isEmpty())
+    }
+
+    @Test
+    fun gateRejectsRecordsEnumNamesAcrossBothAttemptsWithoutModelText() = runBlocking {
+        val lunyuPage = "學而時習之，不亦說乎？有朋自遠方來，不亦樂乎？"
+        val classicBooks = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-lunyu")
+                put("title", "论语")
+                put("defaultStance", "classic")
+                put("guards", JsonArray(emptyList()))
+            })
+        }
+        var call = 0
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                call++
+                val payload = if (call == 1) {
+                    """{"paragraphs":[{"layer":"outside","kind":"注家读法","commentator":"朱熹","text":"朱熹在论语集注中解释習。"}],"boundary":null}"""
+                } else {
+                    "not valid json at all"
+                }
+                return CollectionQaTransportReply(payload, "stub", 10, 10, 1, 2)
+            }
+        }
+        val req = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "classic")
+            put("question", "朱熹怎么解释「習」？")
+            put("bookStances", classicBooks)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-lunyu"); put("docLabel", "论语"); put("page", 1); put("text", lunyuPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(req)
+        assertTrue(res.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        val rejects = res.getValue("gate").jsonObject.getValue("rejects").jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(listOf("PARAGRAPH_FIELDS", "JSON"), rejects)
     }
 }

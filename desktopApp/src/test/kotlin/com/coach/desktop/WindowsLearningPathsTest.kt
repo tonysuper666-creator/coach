@@ -32,6 +32,7 @@ class WindowsLearningPathsTest {
         val bFile = learningPathTextbook(root, "Synthetic chemistry", chemistry = true)
         val directory = root.resolve("library")
         val library = TextbookLibrary(directory)
+        BookHudPreferenceStore(directory).setPinned(true)
         var nextFile = aFile
         var controller by mutableStateOf(TextbookController(library))
         // 出题通道给一个确定不联网的实现：这台机器的配对与 Mac 都不参与这条测试。

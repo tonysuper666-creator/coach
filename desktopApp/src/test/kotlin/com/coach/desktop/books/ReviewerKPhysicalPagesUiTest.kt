@@ -66,6 +66,7 @@ class ReviewerKPhysicalPagesUiTest {
         val input = root.resolve("book.md")
         Files.writeString(input, "<!-- PDF 第 5 页 · 书第 1 页 -->\n第五页独立正文\n<!-- PDF 第 6 页 · 书第 2 页 -->\n第六页独立正文\n")
         val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        BookHudPreferenceStore(controller.library.directory).setPinned(true)
         var bookId = ""
         runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
             setContent { WindowsTextbookHost(controller) { input } }
@@ -131,6 +132,7 @@ class ReviewerKPhysicalPagesUiTest {
         val library = TextbookLibrary(root.resolve("library"))
         val imported = library.importBook(input)
         library.save(imported.copy(promptSeen = true))
+        BookHudPreferenceStore(library.directory).setPinned(true)
         val controller = TextbookController(library)
         // TON-1854（#639）：≥1080dp 宽窗沉浸文字排两栏、按屏翻；这里要逐页翻，窗口取 1000dp 宽（单栏）。
         runSkikoComposeUiTest(size = Size(2000f, 1800f), density = Density(2f)) {

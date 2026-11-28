@@ -87,18 +87,30 @@ object BookStanceCorpusPrep {
                 val hasLock = q["lock"] != null && q["lock"] !is JsonNull
                 qEntry == "ask" && (if (includeLocked) hasLock else !hasLock)
             }
-            else -> throw IllegalArgumentException("Unsupported entry for stage 1 prep: $entry")
+            "collection" -> specRoot.getValue("questions").jsonArray.map { it.jsonObject }.filter { q ->
+                val qEntry = q["entry"]?.let { (it as? JsonPrimitive)?.contentOrNull } ?: "ask"
+                val hasLock = q["lock"] != null && q["lock"] !is JsonNull
+                val id = (q["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                (!hasLock) && (qEntry == "collection" || (qEntry == "ask" && id !in setOf("X1", "X2", "X3")))
+            }
+            else -> throw IllegalArgumentException("Unsupported entry for prep: $entry")
         }.filter { q ->
             val id = (q["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             onlyIds == null || id in onlyIds
         }
 
-        val neededBookKeys = targetItems.mapNotNull { (it["book"] as? JsonPrimitive)?.contentOrNull }.toSet()
+        val neededBookKeys = LinkedHashSet<String>()
+        for (it in targetItems) {
+            (it["book"] as? JsonPrimitive)?.contentOrNull?.let(neededBookKeys::add)
+            (it["books"] as? JsonArray)?.forEach { b ->
+                (b as? JsonPrimitive)?.contentOrNull?.let(neededBookKeys::add)
+            }
+        }
         val importedByKey = LinkedHashMap<String, Textbook>()
         val existingByHash = library.catalog().associateBy { it.id }
 
-        // Always import all corpus books when no --only filter, or only needed books when filtered
-        val keysToImport = if (onlyIds == null) booksSpec.keys else neededBookKeys
+        // Always import all corpus books when no --only filter (or in collection mode so stance pairs exist), or only needed books when filtered
+        val keysToImport = if (onlyIds == null || entry == "collection") booksSpec.keys else neededBookKeys
         for (bookKey in keysToImport) {
             val meta = booksSpec[bookKey]?.jsonObject ?: error("Unknown book key: $bookKey")
             val relFile = (meta["file"] as JsonPrimitive).content
@@ -142,7 +154,16 @@ object BookStanceCorpusPrep {
 
         val stanceSourceResolver = BookStanceSources.forLibrary(library)
         val pageTexts = LinkedHashMap<String, String>()
-        val preparedItems = buildJsonArray {
+        val preparedItems = if (entry == "collection") {
+            prepareCollectionItems(
+                library = library,
+                booksSpec = booksSpec,
+                importedByKey = importedByKey,
+                stanceSourceResolver = stanceSourceResolver,
+                targetItems = targetItems,
+                pageTexts = pageTexts,
+            )
+        } else buildJsonArray {
             for (item in targetItems) {
                 val id = (item["id"] as JsonPrimitive).content
                 val bookKey = (item["book"] as JsonPrimitive).content
@@ -275,6 +296,224 @@ object BookStanceCorpusPrep {
             put("pages", buildJsonObject {
                 for ((k, v) in pageTexts) put(k, v)
             })
+        }
+    }
+
+    private fun prepareCollectionItems(
+        library: TextbookLibrary,
+        booksSpec: JsonObject,
+        importedByKey: Map<String, Textbook>,
+        stanceSourceResolver: BookStanceSource,
+        targetItems: List<JsonObject>,
+        pageTexts: MutableMap<String, String>,
+    ): JsonArray {
+        val booksByStance = LinkedHashMap<String, List<String>>()
+        for (bookKey in booksSpec.keys) {
+            val meta = booksSpec.getValue(bookKey).jsonObject
+            val st = (meta["defaultStance"] as JsonPrimitive).content
+            booksByStance[st] = booksByStance[st].orEmpty() + bookKey
+        }
+
+        fun ensureCollection(colId: String, title: String, bookIds: List<String>) {
+            library.withCourseDatabase { db ->
+                CourseStore.ensureReady(db)
+                val now = System.currentTimeMillis()
+                db.prepareStatement(
+                    """INSERT INTO collections(id, kind, title, metadata_json, created_at, updated_at, sort_order, exam_date, last_active_anchor_json, source_hash, user_locked, archived)
+                       VALUES(?, 'BOOKLIST', ?, '{}', ?, ?, 0, NULL, NULL, NULL, 0, 0)
+                       ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at""",
+                ).use { sql ->
+                    sql.setString(1, colId)
+                    sql.setString(2, title)
+                    sql.setLong(3, now)
+                    sql.setLong(4, now)
+                    sql.executeUpdate()
+                }
+                db.prepareStatement("DELETE FROM collection_materials WHERE collection_id=?").use { sql ->
+                    sql.setString(1, colId)
+                    sql.executeUpdate()
+                }
+                CourseStore.addMaterials(db, colId, bookIds, trustedBookIds = bookIds.toSet())
+            }
+        }
+
+        fun recordPages(book: Textbook) {
+            for (pg in book.pages) {
+                val key = "${book.id}:${pg.number}"
+                if (key !in pageTexts) pageTexts[key] = pg.text
+            }
+        }
+
+        val collectionIdsByKey = HashMap<List<String>, String>()
+        for ((st, keys) in booksByStance) {
+            val colId = "stance-col-$st"
+            val ids = keys.map { importedByKey.getValue(it).id }
+            ensureCollection(colId, "Collection-$st", ids)
+            collectionIdsByKey[keys] = colId
+        }
+        val mixedKeys = listOf(
+            "nonfiction/walden",
+            "chinese/zhouyi",
+            "textbooks/openstax-economics-2e",
+            "fiction/pride-and-prejudice",
+        )
+        val mixedIds = mixedKeys.mapNotNull { importedByKey[it]?.id }
+        if (mixedIds.size == mixedKeys.size) {
+            ensureCollection("stance-col-mixed", "Collection-mixed", mixedIds)
+            collectionIdsByKey[mixedKeys] = "stance-col-mixed"
+        }
+
+        return buildJsonArray {
+            for (item in targetItems) {
+                val id = (item["id"] as JsonPrimitive).content
+                val qEntry = (item["entry"] as? JsonPrimitive)?.contentOrNull ?: "ask"
+                val rawQuestion = (item["question"] as JsonPrimitive).content
+                val cleanQuestion = rawQuestion
+                    .replace(Regex("""^（点「换个角度\s*→\s*[^」]+」）"""), "")
+                    .trim()
+
+                val bookKeysForItem: List<String> = if (qEntry == "collection") {
+                    (item["books"] as JsonArray).map { (it as JsonPrimitive).content }
+                } else {
+                    val primaryKey = (item["book"] as JsonPrimitive).content
+                    val defStance = (booksSpec.getValue(primaryKey).jsonObject["defaultStance"] as JsonPrimitive).content
+                    booksByStance[defStance] ?: listOf(primaryKey)
+                }
+                val colId = collectionIdsByKey[bookKeysForItem] ?: run {
+                    val customId = "stance-col-${id.lowercase()}"
+                    ensureCollection(customId, "Collection-$id", bookKeysForItem.map { importedByKey.getValue(it).id })
+                    customId
+                }
+
+                val booksInCol = bookKeysForItem.map { it to importedByKey.getValue(it) }
+                booksInCol.forEach { (_, b) -> recordPages(b) }
+
+                val primaryBookKey = if (qEntry == "collection") bookKeysForItem.first() else (item["book"] as JsonPrimitive).content
+                val primaryBook = importedByKey.getValue(primaryBookKey)
+                val bookPages = maxOf(primaryBook.pages.size, primaryBook.pages.maxOfOrNull { it.number } ?: 1)
+
+                val locator = (item["locator"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                var selectionPage = 1
+                var selectionBlockId = ""
+                val overrides = LinkedHashMap<String, Int?>()
+                val fictionBooksJson = buildJsonObject {
+                    for ((bk, bkObj) in booksInCol) {
+                        val res = stanceSourceResolver.resolve(bkObj) as? BookStanceResolution.Determined
+                        val isFiction = res != null && BookStanceGuard.FICTION in res.guards
+                        if (isFiction) {
+                            val missingKey = (item["expectMissingRecordBook"] as? JsonPrimitive)?.contentOrNull
+                            val rawRtp = item["readThroughPage"]
+                            val rtp: Int? = when {
+                                missingKey == bk -> null
+                                bk == "fiction/pride-and-prejudice" && rawRtp is JsonPrimitive && rawRtp.isString && rawRtp.content == "locator" -> {
+                                    locateBlock(bkObj, locator)?.first?.page ?: 1
+                                }
+                                bk == primaryBookKey && rawRtp is JsonPrimitive && rawRtp.isString && rawRtp.content == "locator" -> {
+                                    locateBlock(bkObj, locator)?.first?.page ?: 1
+                                }
+                                bk == primaryBookKey && rawRtp is JsonPrimitive && !rawRtp.isString -> {
+                                    rawRtp.content.toIntOrNull()
+                                }
+                                else -> 1
+                            }
+                            overrides[bkObj.id] = rtp
+                            if (rtp != null) put(bkObj.id, rtp)
+                        }
+                    }
+                }
+
+                if (locator.isNotBlank()) {
+                    val locBook = if (qEntry == "collection") {
+                        importedByKey["fiction/pride-and-prejudice"]?.takeIf { bk ->
+                            bk.id in booksInCol.map { it.second.id } &&
+                                ((item["readThroughPage"] as? JsonPrimitive)?.contentOrNull == "locator" ||
+                                    (item["expectMissingRecordBook"] as? JsonPrimitive)?.contentOrNull != null)
+                        } ?: primaryBook
+                    } else primaryBook
+                    locateBlock(locBook, locator)?.let { (chosen, _) ->
+                        selectionPage = chosen.page
+                        selectionBlockId = chosen.id
+                    }
+                }
+
+                val questionText = if (qEntry == "ask") {
+                    val shortHint = (booksSpec.getValue(primaryBookKey).jsonObject["title"] as JsonPrimitive).content
+                    val needsLoc = locator.isNotBlank() && !cleanQuestion.contains(locator, ignoreCase = true)
+                    val prefix = if (needsLoc) "在《$shortHint》（$locator）里，" else "在《$shortHint》里，"
+                    if (shortHint in cleanQuestion && !needsLoc) cleanQuestion else "$prefix$cleanQuestion"
+                } else {
+                    cleanQuestion
+                }
+
+                val bundle = CollectionQaRetriever.retrieve(
+                    library = library,
+                    collectionId = colId,
+                    question = questionText,
+                    readThroughPageOverrides = overrides.takeIf { it.isNotEmpty() },
+                )
+                val primaryRes = stanceSourceResolver.resolve(primaryBook)
+                val primaryDet = primaryRes as? BookStanceResolution.Determined
+                val actualStanceSource = primaryDet?.source ?: "undetermined"
+
+                fun buildColWire(overrideStance: BookStance?): JsonObject {
+                    val reqId = UUID.randomUUID().toString().replace("-", "").take(16)
+                    val stanceWire = if (bundle.allStancesDetermined) {
+                        overrideStance?.wire
+                            ?: bundle.bookStances.map { it.defaultStance }.distinct().singleOrNull()?.wire
+                            ?: "mixed"
+                    } else null
+                    return CollectionQaJson.encodeRequest(
+                        requestId = reqId,
+                        collection = bundle.collection,
+                        question = questionText,
+                        blocks = bundle.blocks,
+                        discrepancies = bundle.matchedDiscrepancies,
+                        shortLabelByBookId = bundle.shortLabelByBookId,
+                        stanceWire = stanceWire,
+                        overrideStance = overrideStance,
+                        bookStances = bundle.bookStances,
+                    )
+                }
+
+                val switchTarget = (item["switchTo"] as? JsonPrimitive)?.contentOrNull?.let(BookStance::fromWire)
+                val hasInitialStep = item["initialStance"] != null && item["initialStance"] !is JsonNull
+                val missingKey = (item["expectMissingRecordBook"] as? JsonPrimitive)?.contentOrNull
+                val missingBookObj = missingKey?.let { importedByKey[it] }
+
+                add(buildJsonObject {
+                    put("id", id)
+                    put("entry", "collection")
+                    put("bookKey", if (qEntry == "collection") bookKeysForItem.joinToString(",") else primaryBookKey)
+                    put("bookHash", primaryBook.id)
+                    put("bookTitle", primaryBook.title)
+                    put("bookPages", bookPages)
+                    put("locator", locator)
+                    put("selectionPage", selectionPage)
+                    put("selectionBlockId", selectionBlockId)
+                    put("stanceSource", actualStanceSource)
+                    if (primaryDet != null) {
+                        put("resolvedDefaultStance", primaryDet.defaultStance.wire)
+                        put("resolvedGuards", buildJsonArray { primaryDet.guards.forEach { add(JsonPrimitive(it.wire)) } })
+                    } else {
+                        put("resolvedDefaultStance", JsonNull)
+                        put("resolvedGuards", JsonArray(emptyList()))
+                    }
+                    put("fictionBooks", fictionBooksJson)
+                    if (missingBookObj != null) {
+                        put("missingRecordBookHash", missingBookObj.id)
+                        put("missingRecordBookTitle", missingBookObj.title)
+                    }
+                    overrides[primaryBook.id]?.let { put("readThroughPage", it) } ?: put("readThroughPage", JsonNull)
+                    overrides[primaryBook.id]?.let { put("effectiveReadThroughPage", it) } ?: put("effectiveReadThroughPage", JsonNull)
+                    put("strictSinglePage", false)
+                    put("meta", item)
+                    put("request", buildColWire(switchTarget))
+                    if (hasInitialStep) {
+                        put("initialStance", (item["initialStance"] as JsonPrimitive).content)
+                        put("initialRequest", buildColWire(null))
+                    }
+                })
+            }
         }
     }
 

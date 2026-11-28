@@ -12,8 +12,12 @@ class SubscriptionOnly:
     json_response_format = True
 
     def configure(self, body, headers):
-        if body.get("model") != "gpt-6.1-sol":
-            raise ValueError("Only explicit Codex requests are supported")
+        model = body.get("model")
+        if model == "gpt-6.1-sol":
+            return False
+        if model == "gpt-6.2-astra" and headers.get(b"x-coach-task") == b"COLLECTION_QA":
+            return False
+        raise ValueError("Only explicit Codex requests are supported")
 
     def __init__(self, app):
         self.app = app

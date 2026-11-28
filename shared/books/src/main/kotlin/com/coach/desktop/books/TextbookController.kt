@@ -2173,7 +2173,15 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         val clampedPage = citation.page.coerceIn(1, loaded.pages.size.coerceAtLeast(1))
         val pageObj = loaded.page(clampedPage)
         val passage = if (pageObj != null) {
-            SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, citation.quoteAnchor, citation.timestampLabel)
+            val text = pageObj.text
+            if (citation.startUtf16 in 0 until citation.endUtf16 &&
+                citation.endUtf16 <= text.length &&
+                text.substring(citation.startUtf16, citation.endUtf16) == citation.quoteAnchor
+            ) {
+                BookPassage(loaded.id, clampedPage, citation.startUtf16, citation.endUtf16, citation.quoteAnchor)
+            } else {
+                SentenceCitationGate.locatePassageInPage(loaded.id, pageObj, citation.quoteAnchor, citation.timestampLabel)
+            }
         } else {
             citation.timestampLabel?.let { ts ->
                 CourseTranscriptParser.findTimestampAnchor(loaded.pages, ts)?.let { anchor ->

@@ -447,6 +447,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onRetryUpload = { bookId -> controller.retryBookUpload(bookId) },
                             library = controller.library,
                             firstOpenGuide = firstOpenGuide,
+                            onAskCollection = { payload ->
+                                if (!explainer.loaded) explainer.load()
+                                explainer.askCollection(payload)
+                            },
+                            onJumpCollectionCitation = { citation ->
+                                scope.launch { controller.jumpToCollectionCitation(citation) }
+                            },
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)

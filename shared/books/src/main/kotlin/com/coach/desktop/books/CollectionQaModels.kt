@@ -1,5 +1,7 @@
 package com.coach.desktop.books
 
+import com.coach.protocol.BookStance
+import com.coach.protocol.BookStanceGuard
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -87,6 +89,19 @@ internal data class MatchedOfflineDiscrepancy(
     val citations: List<CourseCitationRef>,
 )
 
+internal data class CollectionBookStancePayload(
+    val bookId: String,
+    val title: String,
+    val aliases: List<String> = emptyList(),
+    val defaultStance: BookStance,
+    val secondaryStance: BookStance? = null,
+    val guards: Set<BookStanceGuard> = emptySet(),
+    val readThroughPage: Int? = null,
+    val bookPages: Int? = null,
+    val missingReadingRecord: Boolean = false,
+    val annotationContext: String? = null,
+)
+
 internal data class CollectionQaTurn(
     val question: String,
     val sentences: List<CollectionQaSentence>,
@@ -95,6 +110,8 @@ internal data class CollectionQaTurn(
     val conflictCards: List<CollectionQaConflictCard> = emptyList(),
     val fallbackMessage: String? = null,
     val droppedUnverifiedCount: Int = 0,
+    val stanceAnswer: StanceAnswer? = null,
+    val collectionId: String? = null,
 )
 
 internal data class CollectionQaSessionState(
@@ -114,12 +131,37 @@ internal object CollectionQaJson {
         blocks: List<CollectionQaBlock>,
         discrepancies: List<MatchedOfflineDiscrepancy>,
         shortLabelByBookId: Map<String, String> = emptyMap(),
+        stanceWire: String? = null,
+        overrideStance: BookStance? = null,
+        bookStances: List<CollectionBookStancePayload> = emptyList(),
     ): JsonObject = buildJsonObject {
         put("requestId", requestId)
         put("collectionId", collection.id)
         put("collectionKind", collection.kind.name)
         put("collectionTitle", collection.title)
         put("question", question)
+        if (stanceWire != null && bookStances.isNotEmpty()) {
+            put("stance", stanceWire)
+            overrideStance?.let { put("overrideStance", it.wire) }
+            put("bookStances", buildJsonArray {
+                for (bs in bookStances) {
+                    add(buildJsonObject {
+                        put("bookId", bs.bookId)
+                        put("title", bs.title)
+                        if (bs.aliases.isNotEmpty()) {
+                            put("aliases", buildJsonArray { bs.aliases.forEach { add(JsonPrimitive(it)) } })
+                        }
+                        put("defaultStance", bs.defaultStance.wire)
+                        bs.secondaryStance?.let { put("secondaryStance", it.wire) }
+                        put("guards", buildJsonArray { bs.guards.forEach { add(JsonPrimitive(it.wire)) } })
+                        bs.readThroughPage?.let { put("readThroughPage", it) }
+                        bs.bookPages?.let { put("bookPages", it) }
+                        put("missingReadingRecord", bs.missingReadingRecord)
+                        bs.annotationContext?.takeIf { it.isNotBlank() }?.let { put("annotationContext", it) }
+                    })
+                }
+            })
+        }
         put("blocks", buildJsonArray {
             for (b in blocks) {
                 add(buildJsonObject {

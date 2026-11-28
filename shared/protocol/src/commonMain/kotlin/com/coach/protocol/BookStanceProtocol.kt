@@ -35,7 +35,7 @@ enum class BookStance(val wire: String, val headerLabel: String) {
      * 切换后的新卡题头仍按 [labelForBook] 显示为「只按原文答」。
      */
     fun switchLabelForBook(defaultStance: BookStance? = null, guards: Set<BookStanceGuard> = emptySet()): String {
-        if (this == ORIGINAL && BookStanceGuard.ESOTERIC in guards) {
+        if (this == ORIGINAL && (BookStanceGuard.ESOTERIC in guards || defaultStance == ESOTERIC)) {
             return BookStanceCopy.ORIGINAL_ON_ESOTERIC_SWITCH_LABEL
         }
         return labelForBook(defaultStance, guards)
@@ -94,6 +94,7 @@ object BookStanceCopy {
     const val ESOTERIC_SYSTEM_NOTICE = "按本书体系看，不是对现实的断言"
     const val HIGH_RISK_BOUNDARY = "high_risk"
     const val HIGH_RISK_NOTICE = "看病、法律、投资这类具体决定不从书里推，下面只讲书里怎么说。"
+    const val MIXED_STANCE_LABEL = "按各书立场答"
 
     const val NO_BOOK_DIRECT = "这本书里没有直接讲到这一点。"
     const val NO_BOOK_FICTION = "读到这里，书里还没讲到这一点。"

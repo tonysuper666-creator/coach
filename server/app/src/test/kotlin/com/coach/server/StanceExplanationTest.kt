@@ -761,7 +761,7 @@ class StanceExplanationTest {
         val enPayload = """
             {"paragraphs":[{"layer":"book","sentences":[
                 {"text":"他用红墨水画了七列，并用首字母标出星期几。","anchors":["S1"],"quote":"red ink into seven columns"},
-                {"text":"他先做了小册子，再用十三条红线横穿七列。","anchors":["S1"],"quotes":["made a little book","thirteen red lines"]}
+                {"text":"他先做了小册子，再用十三条红线横穿竖列。","anchors":["S1"],"quotes":["made a little book","thirteen red lines"]}
             ]}],"boundary":null}
         """.trimIndent()
         val enRes = assertNotNull(checkedStancePayload(enPayload, enPack, BookStance.LIFE))

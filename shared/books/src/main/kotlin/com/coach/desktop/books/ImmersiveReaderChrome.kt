@@ -1594,6 +1594,9 @@ internal fun CollectionQaTurnView(
     turnIndex: Int,
     tagPrefix: String,
     onOpenCitation: (CollectionQaCitation) -> Unit,
+    onSwitchStance: ((com.coach.protocol.BookStance) -> Unit)? = null,
+    switchEnabled: Boolean = true,
+    onClose: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val pine = v7Pine()
@@ -1607,6 +1610,31 @@ internal fun CollectionQaTurnView(
             style = MaterialTheme.typography.labelMedium,
             color = colors.actionPrimary,
         )
+        val stanceAnswer = turn.stanceAnswer
+        if (stanceAnswer != null) {
+            LayeredAnswerCard(
+                answer = stanceAnswer,
+                onOpenCitation = { cite ->
+                    val resolvedBookId = cite.bookId.ifBlank { cite.docId.substringBefore(":p") }
+                    onOpenCitation(
+                        CollectionQaCitation(
+                            collectionId = turn.collectionId ?: CollectionQaVirtualCollections.READ_LIBRARY_ID,
+                            bookId = resolvedBookId,
+                            docLabel = cite.bookTitle.ifBlank { resolvedBookId },
+                            shortLabel = cite.bookTitle.take(12).ifBlank { resolvedBookId.take(12) },
+                            page = cite.page,
+                            quoteAnchor = cite.quote,
+                            startUtf16 = cite.startUtf16,
+                            endUtf16 = cite.endUtf16,
+                        ),
+                    )
+                },
+                onSwitchStance = onSwitchStance,
+                switchEnabled = switchEnabled,
+                onClose = onClose,
+            )
+            return@Column
+        }
         if (turn.sentences.isNotEmpty()) {
             turn.sentences.forEachIndexed { sIdx, sentence ->
                 Column(

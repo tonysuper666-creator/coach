@@ -185,7 +185,7 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(os.environ["HOME"], "/isolated-home")
             self.assertNotIn("fixture-key", str(run.call_args))
 
-    async def call_adapter(self, traffic=b"test", payload=None):
+    async def call_adapter(self, traffic=b"test", payload=None, task=b"READER_SELECTION"):
         received, output = [], []
         async def upstream(scope, receive, send):
             received.append((scope, await receive()))
@@ -194,7 +194,7 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
         queue = asyncio.Queue()
         await queue.put({"type": "http.request", "body": data, "more_body": False})
         await adapter.SubscriptionOnly(upstream)({"type": "http", "path": "/v1/chat/completions",
-            "headers": [(b"x-coach-traffic", traffic), (b"x-coach-task", b"READER_SELECTION")]}, queue.get, self.sender(output))
+            "headers": [(b"x-coach-traffic", traffic), (b"x-coach-task", task)]}, queue.get, self.sender(output))
         return received, output
 
     @staticmethod
@@ -220,6 +220,23 @@ class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
             received, output = await self.call_adapter(traffic, payload)
             self.assertEqual(received, [])
             self.assertEqual(output[0]["status"], expected)
+
+    async def test_collection_qa_allows_gpt_62_astra_for_owner_only(self):
+        data = json.dumps({"model": "gpt-6.2-astra", "messages": [{"role": "user", "content": "ask"}]}).encode()
+        received, output = await self.call_adapter(payload=data, task=b"COLLECTION_QA")
+        self.assertEqual(len(received), 1)
+        scope, part = received[0]
+        body = json.loads(part["body"])
+        self.assertEqual(body["model"], "gpt-6.2-astra")
+        self.assertNotIn("response_format", body)
+        headers = dict(scope["headers"])
+        self.assertEqual(headers[b"x-coach-fallback"], b"off")
+        self.assertEqual(headers[b"x-coach-background"], b"off")
+        self.assertEqual(output, [])
+
+        rejected_recv, rejected_out = await self.call_adapter(payload=data, task=b"READER_SELECTION")
+        self.assertEqual(rejected_recv, [])
+        self.assertEqual(rejected_out[0]["status"], 400)
 
 
 if __name__ == "__main__":

@@ -906,7 +906,8 @@ function Find-ConsentAllow($lines) {
         $m = Find-Text $lines $s
         if ($m) { return $m }
     }
-    $title = Has $lines @('这段原文会发到哪里', '还没允许讲解')
+    $title = Find-Text $lines '这段原文会发到哪里'
+    if (-not $title) { $title = Find-Text $lines '还没允许讲解' }
     # 退化到这一条时必须有标题做锚：没有标题就没法区分「框里的允许」和正文里的「允许」，
     # 宁可不点（外面 Click-Confirm 会重拍新帧再找）也不往正文上点。
     if (-not $title) { return $null }

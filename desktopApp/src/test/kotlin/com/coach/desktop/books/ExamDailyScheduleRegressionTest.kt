@@ -28,6 +28,8 @@ class ExamDailyScheduleRegressionTest {
         assertTrue(board.all { it.totalMinutes <= 120 })
         assertTrue(board.all { day -> day.courses.single { it.courseId == "c" }.minutes == 0 })
         assertTrue("12 月 15 日开始" in assertNotNull(rows.getValue("c").deferral))
+        assertEquals("今天的时间先给了a（12 月考）、b（12 月考），预计 12 月 15 日开始", rows.getValue("c").reason)
+        assertTrue(board.all { day -> day.courses.single { it.courseId == "c" }.reason.endsWith("预计 12 月 15 日开始") })
         for (offset in 1L..16L) {
             val day = MultiCourseDailyPlanner.plan(today.plusDays(offset), courses, 120)
             assertEquals(offset == 16L, day.courses.single { it.courseId == "c" }.minutes > 0)
@@ -41,6 +43,17 @@ class ExamDailyScheduleRegressionTest {
             .first { date -> MultiCourseDailyPlanner.plan(date, moved, 120).courses.any { it.courseId == "c" && it.minutes > 0 } }
         assertTrue(firstDate < today.plusDays(16))
         assertTrue("${firstDate.monthValue} 月 ${firstDate.dayOfMonth} 日开始" in assertNotNull(far.deferral))
+        assertTrue(far.reason.endsWith("预计 ${firstDate.monthValue} 月 ${firstDate.dayOfMonth} 日开始"))
+    }
+
+    @Test fun deferredReasonWithoutAStartDateExplainsWhereTheTimeWent() {
+        val courseA = course("A", 1, 2)
+        val courseB = course("B", 1, 1)
+        val shared = MultiCourseDailyPlanner.plan(today, listOf(courseA, courseB), 20)
+        assertEquals("今天的时间先给了A（11 月考），离考试近了会开始排", shared.courses.single { it.courseId == "B" }.reason)
+
+        val tooShort = MultiCourseDailyPlanner.plan(today, listOf(courseB), 15)
+        assertEquals("今天的 15 分钟排不下一项学习任务，离考试近了会开始排", tooShort.courses.single().reason)
     }
 
     @Test fun examDayReleasesEvenPinnedWorkAndLeavesRoomForAShortReview() {
@@ -114,6 +127,8 @@ class ExamDailyScheduleRegressionTest {
                     .assertTextContains("${tomorrow.monthValue} 月 ${tomorrow.dayOfMonth} 日开始", substring = true)
                 onAllNodesWithTag("home-exam-day").assertCountEquals(0)
                 onNodeWithTag("home-exam-summary").performClick()
+                onNodeWithText("Later · 今天的时间先给了Soon（${tomorrow.monthValue} 月考），预计 ${tomorrow.monthValue} 月 ${tomorrow.dayOfMonth} 日开始")
+                    .assertIsDisplayed()
                 onNodeWithTag("home-exam-minutes-120").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("home-exam-deferred").fetchSemanticsNodes().isEmpty() }
             }

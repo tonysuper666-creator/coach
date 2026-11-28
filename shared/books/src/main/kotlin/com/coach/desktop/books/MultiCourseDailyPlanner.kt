@@ -39,6 +39,8 @@ internal data class MultiCourseDay(
  * A point with no question is a "read this section" task, not an empty question.
  */
 internal object MultiCourseDailyPlanner {
+    private const val UNKNOWN_START = "离考试近了会开始排"
+
     fun preview(
         today: LocalDate,
         courses: List<CourseDayInput>,
@@ -46,43 +48,49 @@ internal object MultiCourseDailyPlanner {
         days: Int = 5,
     ): List<MultiCourseDay> {
         val preview = (0 until days.coerceIn(1, 14)).map { offset ->
-            plan(today.plusDays(offset.toLong()), courses, budgetMinutes)
+            planDay(today.plusDays(offset.toLong()), courses, budgetMinutes)
         }
-        val first = preview.first()
-        val waiting = first.courses.filter { it.deferral != null }.map { it.courseId }.toMutableSet()
-        if (waiting.isEmpty()) return preview
-
-        // Use the same dates, pins, progress snapshot and shared budget as the visible preview.
-        val starts = mutableMapOf<String, LocalDate>()
-        for (day in preview.drop(1)) {
+        if (preview.none { day -> day.courses.any { it.deferral != null } }) return preview
+        // Only look past the preview for courses that still need a start date at its end.
+        val waiting = mutableSetOf<String>()
+        for (day in preview) {
             for (course in day.courses) {
-                if (course.minutes > 0 && waiting.remove(course.courseId)) starts[course.courseId] = day.date
+                if (course.deferral != null) waiting.add(course.courseId)
+                if (course.minutes > 0) waiting.remove(course.courseId)
             }
         }
+        val starts = mutableMapOf<String, LocalDate>()
         val exams = courses.mapNotNull { c -> c.examDate?.let { c.courseId to it } }.toMap()
         var date = preview.last().date.plusDays(1)
         // Bound work on the home screen even for an exam date entered years in the future.
         val horizon = today.plusYears(1)
         while (date <= horizon && waiting.any { date < exams.getValue(it) }) {
-            for ((demand, tasks) in allocate(date, courses, first.budgetMinutes)) {
+            for ((demand, tasks) in allocate(date, courses, preview.first().budgetMinutes)) {
                 if (tasks.minutes > 0 && waiting.remove(demand.input.courseId)) starts[demand.input.courseId] = date
             }
             date = date.plusDays(1)
         }
-        val annotated = first.courses.map { course ->
-            val why = course.deferral ?: return@map course
-            val start = starts[course.courseId]
-            val whenPart = when {
-                start != null -> "预计 ${start.monthValue} 月 ${start.dayOfMonth} 日开始"
-                exams.getValue(course.courseId) <= horizon -> "按当前时长，考前排不下"
-                else -> "未来一年暂未排上"
+        // Walk back so each zero-minute row uses the next funded day after that row.
+        return preview.asReversed().map { day ->
+            val scheduled = day.courses.filter { it.minutes > 0 }
+            for (course in scheduled) starts[course.courseId] = day.date
+            val recipients = scheduled.joinToString("、") { "${it.title}（${exams.getValue(it.courseId).monthValue} 月考）" }
+            val priority = if (scheduled.isEmpty()) "今天的 ${day.budgetMinutes} 分钟排不下一项学习任务" else "今天的时间先给了$recipients"
+            val annotated = day.courses.map { course ->
+                val note = course.deferral
+                if (note == null) course else {
+                    val whenPart = starts[course.courseId]?.let { "预计 ${it.monthValue} 月 ${it.dayOfMonth} 日开始" } ?: UNKNOWN_START
+                    course.copy(reason = "$priority，$whenPart", deferral = "$note，$whenPart")
+                }
             }
-            course.copy(deferral = "$why，$whenPart")
-        }
-        return listOf(first.copy(courses = annotated)) + preview.drop(1)
+            day.copy(courses = annotated)
+        }.asReversed()
     }
 
-    fun plan(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay {
+    fun plan(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay =
+        preview(today, courses, budgetMinutes, days = 1).first()
+
+    private fun planDay(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay {
         val cap = budgetMinutes.coerceIn(15, 240)
         val tasks = allocate(today, courses, cap).map { (demand, planned) ->
             val reason = reason(demand, planned.minutes)

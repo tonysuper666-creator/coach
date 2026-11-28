@@ -397,6 +397,42 @@ internal fun WindowsTextbookHost(
                                     homeIncidentBanner?.invoke()
                                 }
                                 Box(Modifier.weight(1f).fillMaxWidth()) { workspaceContent() }
+                                val tasteBook = ui.book
+                                if (tasteBook != null && ui.screen == BookScreen.READER) {
+                                    if (tasteExpanded) {
+                                        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+                                        Box(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .background(colors.surface1)
+                                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            com.coach.desktop.books.FirstTastePanel(
+                                                book = tasteBook,
+                                                explainer = hostExplainer,
+                                                connectivity = connectivity,
+                                                onReadBook = { tasteExpanded = false },
+                                                onDone = ::finishFirstTaste,
+                                                modifier = Modifier.heightIn(max = 360.dp),
+                                                memory = tasteMemory,
+                                                compact = true,
+                                                onDismiss = { tasteExpanded = false },
+                                                library = controller.library,
+                                                onAllowExplain = {
+                                                    ExplainConsent(controller.library.directory).allow(tasteBook.id)
+                                                    preferences.chooseAiExplain(true)
+                                                },
+                                            )
+                                        }
+                                    } else if (firstOpenGuide && sawEmptyShelf && !tasteDone && !tasteStripDismissed) {
+                                        com.coach.desktop.books.FirstTasteStrip(
+                                            onTry = { tasteExpanded = true },
+                                            onDismiss = { tasteStripDismissed = true },
+                                            onNeverShow = ::finishFirstTaste,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -413,34 +449,6 @@ internal fun WindowsTextbookHost(
                     ui.screen != BookScreen.REVIEWING &&
                     ui.screen != BookScreen.COURSE_MOCK
                 updateBanner?.invoke(this, updateIdle)
-                val tasteBook = ui.book
-                if (tasteBook != null && ui.screen == BookScreen.READER) {
-                    if (tasteExpanded) {
-                        com.coach.desktop.books.FirstTastePanel(
-                            book = tasteBook,
-                            explainer = hostExplainer,
-                            connectivity = connectivity,
-                            onReadBook = { tasteExpanded = false },
-                            onDone = ::finishFirstTaste,
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 56.dp),
-                            memory = tasteMemory,
-                            compact = true,
-                            onDismiss = { tasteExpanded = false },
-                            library = controller.library,
-                            onAllowExplain = {
-                                ExplainConsent(controller.library.directory).allow(tasteBook.id)
-                                preferences.chooseAiExplain(true)
-                            },
-                        )
-                    } else if (firstOpenGuide && sawEmptyShelf && !tasteDone && !tasteStripDismissed) {
-                        com.coach.desktop.books.FirstTasteStrip(
-                            onTry = { tasteExpanded = true },
-                            onDismiss = { tasteStripDismissed = true },
-                            onNeverShow = ::finishFirstTaste,
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 56.dp),
-                        )
-                    }
-                }
             }
 
             if (settings) {

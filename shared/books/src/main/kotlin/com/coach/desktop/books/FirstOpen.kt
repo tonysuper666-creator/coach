@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,7 +29,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.coach.ui.theme.CoachTheme
@@ -228,7 +234,8 @@ internal sealed interface TasteStep {
 }
 
 /**
- * 进阅读页后轻提示开胃题小条：不遮挡正文，提供「来一道」「×」「不再提示」三个入口。
+ * 进阅读页后底部轻提示开胃题栏：紧贴在阅读区下方（独立占位不遮挡正文与插图），
+ * 提供「来一道」「不再提示」「×」三个入口。
  */
 @Composable
 internal fun FirstTasteStrip(
@@ -238,30 +245,67 @@ internal fun FirstTasteStrip(
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
-    PaperCard(
-        modifier = modifier.widthIn(max = 460.dp).testTag("first-taste-strip"),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    val pillShape = RoundedCornerShape(6.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(colors.surface1)
+            .testTag("first-taste-strip"),
     ) {
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
                 "想先试一道开胃题吗？",
                 style = MaterialTheme.typography.bodySmall,
-                color = colors.fgPrimary,
+                color = colors.fgSecondary,
+                maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
-            V7TextButton(onClick = onTry, modifier = Modifier.testTag("first-taste-try")) {
-                Text("来一道")
-            }
-            V7TextButton(onClick = onNeverShow, modifier = Modifier.testTag("first-taste-never")) {
-                Text("不再提示")
-            }
-            V7TextButton(onClick = onDismiss, modifier = Modifier.testTag("first-taste-dismiss")) {
-                Text("×")
-            }
+            Text(
+                "来一道",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.actionPrimary,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .clip(pillShape)
+                    .clickable(role = Role.Button, onClick = onTry)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("first-taste-try"),
+            )
+            Text(
+                "不再提示",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.fgSecondary,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .clip(pillShape)
+                    .clickable(role = Role.Button, onClick = onNeverShow)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("first-taste-never"),
+            )
+            Text(
+                "×",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.fgSecondary,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .clip(pillShape)
+                    .clickable(role = Role.Button, onClick = onDismiss)
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("first-taste-dismiss"),
+            )
         }
     }
 }

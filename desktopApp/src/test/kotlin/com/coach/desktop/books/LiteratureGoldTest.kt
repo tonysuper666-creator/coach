@@ -1,10 +1,24 @@
 package com.coach.desktop.books
 
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory
+import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode
+import org.apache.pdfbox.util.Matrix
+import java.awt.Color
+import java.awt.Font
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class LiteratureGoldTest {
@@ -175,6 +189,213 @@ class LiteratureGoldTest {
             println("Body $hits/$totalBody; note leaks $leaks; unexpected candidates ${extras.size}")
             assertTrue(hits * 100 >= totalBody * 99 && leaks == 0 && extras.isEmpty(),
                 "Body $hits/$totalBody; note leaks $leaks\nMissing:\n${misses.joinToString("\n")}\nUnexpected:\n${extras.joinToString("\n")}")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun buildTightScanPdf(
+        path: Path,
+        rotate180: Boolean = false,
+        includeBottomCaption: Boolean = false,
+        includeMidPageQuote: Boolean = false,
+        singleFootnote: Boolean = false,
+    ) {
+        val pageW = 420f
+        val pageH = 620f
+        val dpiScale = 4
+        val img = BufferedImage((pageW * dpiScale).toInt(), (pageH * dpiScale).toInt(), BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics()
+        try {
+            g.color = Color.WHITE
+            g.fillRect(0, 0, img.width, img.height)
+            g.color = Color.BLACK
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+
+            val bodyFont = Font("Serif", Font.PLAIN, (10.5f * dpiScale).toInt())
+            val noteFont = Font("Serif", Font.PLAIN, (8.8f * dpiScale).toInt())
+            val supFont = Font("Serif", Font.PLAIN, (6.0f * dpiScale).toInt())
+            val pdfFont = PDType1Font(Standard14Fonts.FontName.TIMES_ROMAN)
+
+            data class DrawWord(val x: Float, val width: Float, val pt: Float, val text: String)
+            data class DrawLine(
+                val y: Float,
+                val words: List<DrawWord>,
+                val visualFont: Font,
+                val supFirst: Boolean = false,
+            )
+
+            fun measureVisual(font: Font, text: String): Float =
+                g.getFontMetrics(font).stringWidth(text).toFloat() / dpiScale
+
+            val drawLines = mutableListOf<DrawLine>()
+            fun bodyRow(y: Float, text: String) {
+                var x = 40f
+                val ws = text.split(' ').map { w ->
+                    val width = measureVisual(bodyFont, w)
+                    val dw = DrawWord(x, width, 10.5f, w)
+                    x += width + 3.2f
+                    dw
+                }
+                drawLines += DrawLine(y, ws, bodyFont)
+            }
+            fun noteRow(y: Float, text: String, marker: String? = null) {
+                val ws = mutableListOf<DrawWord>()
+                var x = 40f
+                if (marker != null) {
+                    val mw = measureVisual(supFont, marker)
+                    ws += DrawWord(x, mw, 6.0f, marker)
+                    x = 52f
+                }
+                for (w in text.split(' ')) {
+                    val width = measureVisual(noteFont, w)
+                    ws += DrawWord(x, width, 10.5f, w) // Uniform OCR point size matching body
+                    x += width + 2.8f
+                }
+                drawLines += DrawLine(y, ws, noteFont, supFirst = marker != null)
+            }
+
+            // Running header + upper body
+            bodyRow(40f, "Survey of Early Collections")
+            var y = 64f
+            for (i in 1..14) {
+                bodyRow(y, "The curators preserved specimen batch $i inside wooden cabinets for regular study.")
+                y += 11.4f
+            }
+            if (includeMidPageQuote) {
+                y += 14f
+                for (i in 1..3) {
+                    var x = 56f
+                    val text = "Quoted ledger entry $i remained legible inside the central chapter narrative."
+                    val ws = text.split(' ').map { w ->
+                        val width = measureVisual(noteFont, w)
+                        val dw = DrawWord(x, width, 10.5f, w)
+                        x += width + 2.8f
+                        dw
+                    }
+                    drawLines += DrawLine(y, ws, noteFont)
+                    y += 10.0f
+                }
+                y += 14f
+                for (i in 15..24) {
+                    bodyRow(y, "Later observers compared ledger record $i against surviving museum inventories.")
+                    y += 11.4f
+                }
+            } else {
+                for (i in 15..22) {
+                    bodyRow(y, "Later observers compared ledger record $i against surviving museum inventories.")
+                    y += 11.4f
+                }
+            }
+
+            // Tightly-leaded footnotes (dy=10.0 < nominal 10.5pt) after a vertical gap, NO horizontal rule.
+            y += 28f
+            noteRow(y, "Archive register volume forty records the first transfer.", marker = "58")
+            y += 10.0f
+            noteRow(y, "This flush left continuation belongs to the first footnote.")
+            y += 10.0f
+            noteRow(y, "Another flush left line completes the first note entry.")
+            if (!singleFootnote) {
+                y += 10.0f
+                noteRow(y, "Catalog appendix twelve confirms the second footnote reference.", marker = "59")
+                y += 10.0f
+                noteRow(y, "Flush left detail continues the second footnote quietly.")
+            }
+
+            if (includeBottomCaption) {
+                y += 26f
+                g.fillRect((40f * dpiScale).toInt(), ((y - 12f) * dpiScale).toInt(), (180f * dpiScale).toInt(), 2)
+                bodyRow(y, "Plate 7. Engraved diagram showing the gallery arrangement.")
+                y += 11.4f
+                bodyRow(y, "Scale bar indicates original cabinet dimensions.")
+            }
+
+            for (dl in drawLines) {
+                for ((idx, dw) in dl.words.withIndex()) {
+                    val isSup = dl.supFirst && idx == 0
+                    g.font = if (isSup) supFont else dl.visualFont
+                    val wy = if (isSup) dl.y - 2.6f else dl.y
+                    g.drawString(dw.text, (dw.x * dpiScale).toInt(), (wy * dpiScale).toInt())
+                }
+            }
+
+            val finalImg = if (rotate180) {
+                BufferedImage(img.width, img.height, BufferedImage.TYPE_INT_RGB).also { rot ->
+                    val rg = rot.createGraphics()
+                    rg.rotate(Math.PI, img.width / 2.0, img.height / 2.0)
+                    rg.drawImage(img, 0, 0, null)
+                    rg.dispose()
+                }
+            } else img
+
+            PDDocument().use { doc ->
+                val page = PDPage(PDRectangle(pageW, pageH))
+                if (rotate180) page.rotation = 180
+                doc.addPage(page)
+                val ximg = LosslessFactory.createFromImage(doc, finalImg)
+                PDPageContentStream(doc, page).use { cs ->
+                    cs.drawImage(ximg, 0f, 0f, pageW, pageH)
+                    cs.setRenderingMode(RenderingMode.NEITHER)
+                    for (dl in drawLines) {
+                        for ((idx, dw) in dl.words.withIndex()) {
+                            val isSup = dl.supFirst && idx == 0
+                            val wy = if (isSup) dl.y - 2.6f else dl.y
+                            val rawPdfW = pdfFont.getStringWidth(dw.text) / 1000f * dw.pt
+                            val sx = if (rawPdfW > 0f) dw.pt * (dw.width / rawPdfW) else dw.pt
+                            cs.beginText()
+                            cs.setFont(pdfFont, 1f)
+                            if (rotate180) {
+                                // Counter-rotated 180° text matrix has negative yScale, matching real scanned PDFs.
+                                cs.setTextMatrix(Matrix(-sx, 0f, 0f, -dw.pt, pageW - dw.x, wy))
+                            } else {
+                                cs.setTextMatrix(Matrix(sx, 0f, 0f, dw.pt, dw.x, pageH - wy))
+                            }
+                            cs.showText(dw.text)
+                            cs.endText()
+                        }
+                    }
+                }
+                doc.save(path.toFile())
+            }
+            if (finalImg !== img) finalImg.flush()
+        } finally {
+            g.dispose()
+            img.flush()
+        }
+    }
+
+    @Test fun tightlyLeadedScanFootnotesBeforeCaptionAndRotated180PagesWork() {
+        val root = Files.createTempDirectory("literature-tight-scan")
+        try {
+            val library = TextbookLibrary(root.resolve("library"))
+
+            // 1. Tightly-leaded footnotes (dy < nominal pt) with flush-left continuations + bottom caption below rule.
+            val p1 = root.resolve("tight-caption.pdf")
+            buildTightScanPdf(p1, rotate180 = false, includeBottomCaption = true)
+            val book1 = library.literatureBook(library.importBook(p1).id)
+            val cands1 = LiteraturePassages.extractCandidates(book1).map { it.anchor.quoteAnchor }
+            assertTrue(cands1.any { "specimen batch 5" in it }, "Expected body sentence in $cands1")
+            assertFalse(cands1.any { "Archive register" in it || "flush left" in it || "Catalog appendix" in it },
+                "Footnotes leaked: $cands1")
+
+            // 2. Single footnote at bottom + mid-page smaller quote followed by resuming body prose.
+            val p2 = root.resolve("single-note-mid-quote.pdf")
+            buildTightScanPdf(p2, rotate180 = false, includeMidPageQuote = true, singleFootnote = true)
+            val book2 = library.literatureBook(library.importBook(p2).id)
+            val cands2 = LiteraturePassages.extractCandidates(book2).map { it.anchor.quoteAnchor }
+            assertTrue(cands2.any { "Quoted ledger entry 2" in it }, "Mid-page quote must stay body: $cands2")
+            assertTrue(cands2.any { "ledger record 20" in it }, "Resuming body must stay body: $cands2")
+            assertFalse(cands2.any { "Archive register" in it || "flush left" in it },
+                "Single bottom footnote leaked: $cands2")
+
+            // 3. 180°-rotated scan with negative yScale must not mark body spaces as wide gaps.
+            val p3 = root.resolve("rotated-180.pdf")
+            buildTightScanPdf(p3, rotate180 = true, includeBottomCaption = false)
+            val book3 = library.literatureBook(library.importBook(p3).id)
+            val cands3 = LiteraturePassages.extractCandidates(book3).map { it.anchor.quoteAnchor }
+            assertTrue(cands3.any { "specimen batch 5" in it }, "180-deg rotated body lost: $cands3")
+            assertFalse(cands3.any { "Archive register" in it || "Catalog appendix" in it },
+                "180-deg rotated footnote leaked: $cands3")
         } finally {
             root.toFile().deleteRecursively()
         }

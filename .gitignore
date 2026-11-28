@@ -13,3 +13,4 @@ __pycache__/
 /.service-build.log
 /.reminder-evidence*/
 /.reminder-*.log
+/tools/book-stance/out/

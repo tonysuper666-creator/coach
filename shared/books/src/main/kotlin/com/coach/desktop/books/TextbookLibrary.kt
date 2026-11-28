@@ -2766,15 +2766,7 @@ internal class TextbookLibrary(
         sentBlocks: List<SourceBlock>,
     ) = database().use { db ->
         if (!BookSchemaMigration.tableExists(db, "book_ask_turns")) return@use
-        val citationsJson = buildJsonArray {
-            explanation.citations.forEach { c ->
-                add(buildJsonObject {
-                    put("anchor", c.anchor)
-                    put("blockId", c.blockId)
-                    put("page", c.page)
-                })
-            }
-        }.toString()
+        val citationsJson = StanceAnswerCodec.encodeCitationsColumn(explanation)
         val sentBlocksJson = buildJsonArray {
             sentBlocks.forEach { b ->
                 add(buildJsonObject {
@@ -2840,7 +2832,7 @@ internal class TextbookLibrary(
         val turns = mutableListOf<InlineExplainEntry>()
         db.prepareStatement(
             """SELECT selection_id, selection_page, selection_start, selection_end, selection_text,
-                      section_location, label, answer_text, citations_json, sent_blocks_json, elapsed_ms
+                      section_location, action_kind, label, question_text, answer_text, citations_json, sent_blocks_json, elapsed_ms
                FROM book_ask_turns
                WHERE book=? AND thread_id=?
                ORDER BY id ASC""".trimIndent(),
@@ -2860,21 +2852,16 @@ internal class TextbookLibrary(
                         )
                         sectionLoc = rs.getString(6).orEmpty()
                     }
-                    val label = rs.getString(7)
-                    val answerText = rs.getString(8)
-                    val citationsRaw = rs.getString(9).orEmpty()
-                    val sentRaw = rs.getString(10).orEmpty()
-                    val elapsedMs = rs.getLong(11)
-                    val citations = runCatching {
-                        LedgerJson.parseToJsonElement(citationsRaw).jsonArray.mapNotNull { el ->
-                            val o = el as? JsonObject ?: return@mapNotNull null
-                            Citation(
-                                anchor = o["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                                blockId = o["blockId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
-                                page = o["page"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
-                            )
-                        }
-                    }.getOrDefault(emptyList())
+                    val actionKind = rs.getString(7).orEmpty()
+                    val label = rs.getString(8)
+                    val questionText = rs.getString(9)?.takeIf { it.isNotBlank() }
+                    val answerText = rs.getString(10)
+                    val citationsRaw = rs.getString(11).orEmpty()
+                    val sentRaw = rs.getString(12).orEmpty()
+                    val elapsedMs = rs.getLong(13)
+                    val (citations, stanceAnswer) = StanceAnswerCodec.decodeCitationsColumn(citationsRaw)
+                    val action = SelectionExplainAction.entries.firstOrNull { it.kind.equals(actionKind, ignoreCase = true) }
+                        ?: SelectionExplainAction.ASK
                     val sentBlocks = runCatching {
                         LedgerJson.parseToJsonElement(sentRaw).jsonArray.mapNotNull { el ->
                             val o = el as? JsonObject ?: return@mapNotNull null
@@ -2888,7 +2875,13 @@ internal class TextbookLibrary(
                             )
                         }
                     }.getOrDefault(emptyList())
-                    turns += InlineExplainEntry(label, Explanation(answerText, citations, elapsedMs), sentBlocks)
+                    turns += InlineExplainEntry(
+                        label = label,
+                        explanation = Explanation(answerText, citations, elapsedMs, stanceAnswer),
+                        sentBlocks = sentBlocks,
+                        action = action,
+                        questionText = questionText,
+                    )
                 }
             }
         }

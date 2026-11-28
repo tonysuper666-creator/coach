@@ -73,14 +73,10 @@ internal fun TextbookLibrary.finishBookQuestion(turn: BookQuestionAttempt, answe
                 it.setLong(1, turn.rowId); it.setString(2, turn.writeId); it.executeUpdate()
             }
         } else {
-            val citations = buildJsonArray {
-                for (c in answer.citations) add(buildJsonObject {
-                    put("anchor", c.anchor); put("blockId", c.blockId); put("page", c.page)
-                })
-            }
+            val citationsJson = StanceAnswerCodec.encodeCitationsColumn(answer)
             db.prepareStatement("""UPDATE book_ask_turns SET answer_status='complete',answer_text=?,citations_json=?,elapsed_ms=?
                 WHERE id=? AND write_id=? AND answer_status='pending'""").use {
-                it.setString(1, answer.text); it.setString(2, citations.toString()); it.setLong(3, answer.elapsedMs)
+                it.setString(1, answer.text); it.setString(2, citationsJson); it.setLong(3, answer.elapsedMs)
                 it.setLong(4, turn.rowId); it.setString(5, turn.writeId); check(it.executeUpdate() == 1)
             }
         }

@@ -213,6 +213,12 @@ internal fun TextbookReader(
     val learnableSelection = chosen?.takeIf { it.text.trim().length <= 4_000 }
     val explainer = remember(library, explainProvider) { explainProvider ?: BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
+    val bookStanceResolution = remember(book.id, library) {
+        BookStanceSources.forLibrary(library).resolve(book)
+    }
+    val bookTotalPages = remember(book.id, book.pages) {
+        maxOf(book.pages.size, book.pages.maxOfOrNull { it.number } ?: 1)
+    }
     val aiEnabled = LocalReadingAiExplain.current
     val connectivity = LocalCoachConnectivity.current
     val isOffline = connectivity == CoachConnectivityStatus.OFFLINE
@@ -279,7 +285,8 @@ internal fun TextbookReader(
         }
     }
     fun runInlineSelection(target: SourceBlock, action: SelectionExplainAction, questionText: String? = null,
-        visibleContext: List<SourceBlock>? = null, retry: BookQuestionAttempt? = null) {
+        visibleContext: List<SourceBlock>? = null, retry: BookQuestionAttempt? = null,
+        stanceOverride: com.coach.protocol.BookStance? = null) {
         val request = ++inlineRequest
         val secIdx = guideController.sectionIndexForAnchor(target.page, target.start).takeIf { it >= 0 } ?: currentSectionIndex
         val section = guideController.contextForSection(secIdx)
@@ -384,7 +391,19 @@ internal fun TextbookReader(
             }
             val result = try {
                 if (!explainer.loaded) explainer.load()
-                suspend fun ask() = explainer.explainSelection(action.kind, target, secCtx, questionText, history)
+                val stanceReq = (bookStanceResolution as? BookStanceResolution.Determined)?.let { det ->
+                    ExplainStanceRequest(
+                        stance = stanceOverride ?: det.defaultStance,
+                        guards = det.guards,
+                        readThroughPage = book.readingPage.takeIf { it in 1..bookTotalPages },
+                        bookPages = bookTotalPages,
+                    )
+                }
+                suspend fun ask() = if (stanceReq != null) {
+                    explainer.explainSelectionWithStance(action.kind, target, secCtx, questionText, history, stanceReq)
+                } else {
+                    explainer.explainSelection(action.kind, target, secCtx, questionText, history)
+                }
                 val answer = if (attempt == null) ask() else withContext(BookAnswerProgress { partial ->
                     withContext(Dispatchers.IO) { library.saveBookQuestionProgress(attempt, partial) }
                     received = partial
@@ -427,14 +446,14 @@ internal fun TextbookReader(
             }
             inlineThread = when (result) {
                 is ExplainResult.Done -> pending.copy(
-                    turns = previous + InlineExplainEntry(label, result.explanation, sent),
+                    turns = previous + InlineExplainEntry(label, result.explanation, sent, action = action, questionText = questionText),
                     loading = false,
                     error = null,
                     askingOpen = true,
                     pendingLabel = null,
                 )
                 is ExplainResult.Refused -> pending.copy(
-                    turns = if (attempt == null) previous else previous + InlineExplainEntry(label, Explanation(received, emptyList(), 0), sent),
+                    turns = if (attempt == null) previous else previous + InlineExplainEntry(label, Explanation(received, emptyList(), 0), sent, action = action, questionText = questionText),
                     retryTurn = attempt,
                     loading = false,
                     error = result.message to result.trouble,
@@ -2263,6 +2282,21 @@ internal fun TextbookReader(
                     } else {
                         onOpenCrossBookPage?.invoke(cit.bookId, cit.page, cit.quoteAnchor, cit.startUtf16)
                     }
+                },
+                bookStanceResolution = bookStanceResolution,
+                onOpenStanceCitation = { cite, sentBlocks ->
+                    val passage = stanceCitationPassage(book, sentBlocks, cite)
+                    if (passage != null) handleCitationJump(passage)
+                    else sentBlocks.firstOrNull { it.id == cite.docId }?.let { handleCitationJump(BookPassage.from(book, it)) }
+                },
+                onSwitchTurnStance = { entry, nextStance ->
+                    val target = visibleThread?.selection ?: return@CompanionAskPane
+                    runInlineSelection(target, entry.action, entry.questionText, stanceOverride = nextStance)
+                },
+                onBoundaryReadBook = { entry ->
+                    val target = visibleThread?.selection ?: return@CompanionAskPane
+                    val currentStance = entry.explanation.stanceAnswer?.stance
+                    runInlineSelection(target, SelectionExplainAction.EXPLAIN, null, stanceOverride = currentStance)
                 },
             )
         }

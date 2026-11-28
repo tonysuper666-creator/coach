@@ -7,8 +7,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.coach.protocol.BookStance
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 
@@ -141,17 +143,39 @@ internal fun PageExplanation(
     currentPageOffset: Int = 0,
     visibleRanges: List<IntRange>? = null,
     library: TextbookLibrary? = null,
+    onOpenPassage: ((BookPassage) -> Unit)? = null,
 ) {
     val blocks = remember(book, page, currentPageOffset, visibleRanges) {
         selectScreenExplainBlocks(book, page, currentPageOffset, visibleRanges)
     }
+    val stanceResolution = remember(book.id, library) {
+        library?.let { BookStanceSources.forLibrary(it).resolve(book) } ?: BookStanceResolution.Undetermined
+    }
+    val determinedStance = stanceResolution as? BookStanceResolution.Determined
+    val bookPages = remember(book.id, book.pages) {
+        maxOf(book.pages.size, book.pages.maxOfOrNull { it.number } ?: 1)
+    }
     val connectivity = LocalCoachConnectivity.current
     val cacheKey = remember(page, blocks) { pageExplainCacheKey(page, blocks) }
     var attempt by remember(book.id, cacheKey) { mutableIntStateOf(0) }
-    val reply by produceState<ExplainResult?>(null, blocks, cacheKey, explainer.loaded, explainer.identity, enabled, attempt) {
+    val switchedCards = remember(book.id, cacheKey) { mutableStateListOf<Explanation>() }
+    var switching by remember(book.id, cacheKey) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun buildStanceReq(override: BookStance? = null): ExplainStanceRequest? {
+        val det = determinedStance ?: return null
+        return ExplainStanceRequest(
+            stance = override ?: det.defaultStance,
+            guards = det.guards,
+            readThroughPage = book.readingPage.takeIf { it in 1..bookPages },
+            bookPages = bookPages,
+        )
+    }
+
+    val reply by produceState<ExplainResult?>(null, blocks, cacheKey, explainer.loaded, explainer.identity, enabled, attempt, determinedStance) {
         value = null
         if (enabled && blocks.isNotEmpty()) {
-            val cached = if (library != null) {
+            val cached = if (library != null && determinedStance == null) {
                 withContext(Dispatchers.IO) { runCatching { library.sectionGuide(book.id, cacheKey) }.getOrNull() }
             } else null
             if (cached != null) {
@@ -160,8 +184,10 @@ internal fun PageExplanation(
             }
             if (explainer.loaded && explainer.identity != null) {
                 val positionRefusal = ExplainResult.Refused("这一页的段落位置无法核对，可以选中一段再问。")
+                val stanceReq = buildStanceReq()
                 suspend fun ask(): ExplainResult = try {
-                    explainer.explainLesson(blocks, book.pages.maxOf { it.number })
+                    if (stanceReq != null) explainer.explainLessonWithStance(blocks, bookPages, stanceReq)
+                    else explainer.explainLesson(blocks, bookPages)
                 } catch (_: IllegalArgumentException) {
                     positionRefusal
                 }
@@ -172,7 +198,7 @@ internal fun PageExplanation(
                 if (attempt == 0 && res !== positionRefusal && res is ExplainResult.Refused && res.trouble.retry) {
                     res = ask()
                 }
-                if (res is ExplainResult.Done && library != null) {
+                if (res is ExplainResult.Done && library != null && determinedStance == null) {
                     val toCache = CachedSectionGuide(
                         brief = emptyList(),
                         text = res.explanation.text,
@@ -191,6 +217,23 @@ internal fun PageExplanation(
             attempt++
         }
     }
+
+    fun switchPageStance(nextStance: BookStance) {
+        if (switching || determinedStance == null || blocks.isEmpty()) return
+        switching = true
+        scope.launch {
+            try {
+                val req = buildStanceReq(nextStance) ?: return@launch
+                val res = explainer.explainLessonWithStance(blocks, bookPages, req)
+                if (res is ExplainResult.Done) {
+                    switchedCards += res.explanation
+                }
+            } finally {
+                switching = false
+            }
+        }
+    }
+
     when {
         blocks.isEmpty() -> Text("这一页没有可讲解的正文。")
         !enabled -> Text("伴读讲解已在设置中关闭。")
@@ -201,8 +244,43 @@ internal fun PageExplanation(
         }
         else -> when (val result = reply) {
             null -> Text("正在讲解这一页…")
-            is ExplainResult.Done -> ExplanationView(book, book.sourceBlocks(), result.explanation, blocks, showReaderPage = true) { citation ->
-                blocks.firstOrNull { it.id == citation.blockId }?.let(onOpen)
+            is ExplainResult.Done -> {
+                val allBlocks = remember(book.id, book.pages, book.structure) { book.sourceBlocks() }
+                val cards = listOf(result.explanation) + switchedCards
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    cards.forEach { exp ->
+                        val stanceAns = exp.stanceAnswer
+                        if (stanceAns != null) {
+                            LayeredAnswerCard(
+                                book = book,
+                                allBlocks = allBlocks,
+                                answer = stanceAns,
+                                bookDefaultStance = determinedStance?.defaultStance,
+                                bookSecondaryStance = determinedStance?.secondaryStance,
+                                bookGuards = determinedStance?.guards.orEmpty(),
+                                showReaderPage = true,
+                                onOpenCitation = { cite ->
+                                    val passage = stanceCitationPassage(book, blocks, cite)
+                                    if (passage != null && onOpenPassage != null) {
+                                        onOpenPassage(passage)
+                                    } else {
+                                        blocks.firstOrNull { it.id == cite.docId }?.let(onOpen)
+                                    }
+                                },
+                                onSwitchStance = { nextStance -> switchPageStance(nextStance) },
+                                onBoundaryReadBook = { switchPageStance(stanceAns.stance) },
+                                switchEnabled = !switching,
+                            )
+                        } else {
+                            ExplanationView(book, allBlocks, exp, blocks, showReaderPage = true) { citation ->
+                                blocks.firstOrNull { it.id == citation.blockId }?.let(onOpen)
+                            }
+                        }
+                    }
+                    if (switching) {
+                        Text("正在换个角度整理…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
             is ExplainResult.Refused -> {
                 Text(result.message, modifier = Modifier.testTag("page-explanation-error"))

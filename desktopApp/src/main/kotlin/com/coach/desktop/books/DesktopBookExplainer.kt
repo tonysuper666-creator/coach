@@ -123,10 +123,32 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         return send(ExplainWire.request(requestId, chosen, context), context, requestId)
     }
 
+    open suspend fun explainWithStance(
+        chosen: SourceBlock,
+        blocks: List<SourceBlock>,
+        stanceRequest: ExplainStanceRequest?,
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): ExplainResult {
+        if (stanceRequest == null) return explain(chosen, blocks, requestId)
+        val context = ExplainWire.context(blocks, chosen)
+        return send(ExplainWire.request(requestId, chosen, context, stanceRequest), context, requestId)
+    }
+
     open suspend fun explainLesson(blocks: List<SourceBlock>, bookPages: Int,
         requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
         if (!BookLessonWire.fits(blocks)) return ExplainResult.Refused(BookLessonWire.TOO_LONG)
         return send(BookLessonWire.request(requestId, blocks, bookPages), blocks, requestId)
+    }
+
+    open suspend fun explainLessonWithStance(
+        blocks: List<SourceBlock>,
+        bookPages: Int,
+        stanceRequest: ExplainStanceRequest?,
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): ExplainResult {
+        if (stanceRequest == null) return explainLesson(blocks, bookPages, requestId)
+        if (!BookLessonWire.fits(blocks)) return ExplainResult.Refused(BookLessonWire.TOO_LONG)
+        return send(BookLessonWire.request(requestId, blocks, bookPages, stanceRequest), blocks, requestId)
     }
 
     open suspend fun explainSectionGuide(
@@ -156,6 +178,29 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         }
         val blocks = ExplainWire.selectionBlocks(chosen, context)
         val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
+        return send(wire, blocks, requestId)
+    }
+
+    open suspend fun explainSelectionWithStance(
+        kind: String,
+        chosen: SourceBlock,
+        context: ExplainSectionContext? = null,
+        question: String? = null,
+        history: List<FollowUpTurn> = emptyList(),
+        stanceRequest: ExplainStanceRequest? = null,
+        requestId: String = UUID.randomUUID().toString().replace("-", ""),
+    ): ExplainResult {
+        if (stanceRequest == null) {
+            return explainSelection(kind, chosen, context, question, history, requestId)
+        }
+        if (kind == "ask" && !question.isNullOrBlank() && kotlinx.coroutines.currentCoroutineContext()[BookAnswerProgress] == null) {
+            val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id }
+            if (bookId != null && library != null) {
+                withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
+            }
+        }
+        val blocks = ExplainWire.selectionBlocks(chosen, context)
+        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history, stanceRequest)
         return send(wire, blocks, requestId)
     }
 

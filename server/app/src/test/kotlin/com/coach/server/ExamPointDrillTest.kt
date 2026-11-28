@@ -595,6 +595,42 @@ class ExamPointDrillTest {
         assertTrue(body.arr("choices")[0].jsonObject.str("stem").contains("门诊"))
     }
 
+    @Test
+    fun truncatedOrMalformedJsonOnFirstOrRepairPassRetriesAutomaticallyAndRecovers() = runBlocking {
+        // Case 1: First draft has malformed JSON (broken closing brackets), retry succeeds,
+        //         AND checker round-1 returns empty/broken JSON -> checker retries cleanly without polluting agreed/checked!
+        val genFirstBroken = script(haiku) { call ->
+            if (call == 1) """{"choices":[{"id":"c1","stem":"broken"}}],"essay":null}"""
+            else choicesJson(listOf("c1" to "A", "c2" to "B", "c3" to "C"))
+        }
+        val checkFirstBroken = script(gpt) { call ->
+            if (call == 1) "oops"
+            else votes(listOf("c1" to "A", "c2" to "B", "c3" to "C"))
+        }
+        val recoveredFirst = ExamPointDrillPipeline(genFirstBroken, checkFirstBroken).generate(input(choiceOnly = true))
+        assertEquals(3, recoveredFirst.arr("choices").size, "Malformed first draft must retry and recover")
+        assertEquals(2, genFirstBroken.prompts.size)
+        assertTrue(genFirstBroken.keys[1].startsWith("drill-gen-retry-"))
+        assertEquals(3, recoveredFirst.int("checked"), "Broken checker JSON retry must not inflate checked count")
+        assertEquals(3, recoveredFirst.int("agreed"))
+        assertTrue(checkFirstBroken.keys[1].startsWith("drill-check-retry-"))
+
+        // Case 2: First draft has bad citation -> repair pass returns truncated JSON -> repair retries once and recovers!
+        val genRepairBroken = script(haiku) { call ->
+            when (call) {
+                1 -> choicesJson(listOf("c1" to "A"), quote = "not in the source")
+                2 -> """{"choices":[{"id":"c1","stem":"truncated..."""
+                else -> choicesJson(listOf("c1" to "A"))
+            }
+        }
+        val checkOk = script(gpt) { votes(listOf("c1" to "A")) }
+        val recoveredRepair = ExamPointDrillPipeline(genRepairBroken, checkOk).generate(input(choiceOnly = true))
+        assertEquals(1, recoveredRepair.arr("choices").size, "Malformed repair draft must retry once and recover")
+        assertEquals(3, genRepairBroken.prompts.size)
+        assertTrue(genRepairBroken.keys[1].startsWith("drill-repair-"))
+        assertTrue(genRepairBroken.keys[2].startsWith("drill-repair-retry-"))
+    }
+
     private fun choiceObj(
         id: String,
         stem: String,

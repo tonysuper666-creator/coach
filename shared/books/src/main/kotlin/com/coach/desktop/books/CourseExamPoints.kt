@@ -38,13 +38,17 @@ internal object CourseExamPoints {
     private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise|but)\s+""")
     private val conversationalLeadNoise = Regex("""(?i)^(?:let\s+us|let's|consider\s+(?:the|two|three|a|an|how|why|what)|suppose\s+(?:that|a|an|we)|assume\s+(?:that|a|an|we)|imagine\s+(?:that|a|an)|think\s+about|notice\s+that|note\s+that|recall\s+that|remember\s+that|those\s+(?:in|who|with|conceived|born|aged)\b|(?:a\s+)?special\s+note\s+for)\b""")
     private val truncatedTrailingWordNoise = Regex("""(?i)\s+(?:the|a|an|of|for|and|or|to|in|on|at|by|from|with|into|onto|upon|as|than|that|which|who|whose|where|when|while|between|among|under|over|through|during|without|within|against|about|across|after|before|toward|towards)$""")
+    private val incompleteBetweenNoise = Regex("""(?i)^(?:the\s+)?relationship\s+between\s+(?!.*\band\b)""")
     private val leadingEdgeCounterNoise = Regex("""^(?:\d{1,3}\s*/\s*\d{1,3}|\d{1,3}[.)]?)\s+""")
     private val trailingEdgeCounterNoise = Regex("""(?i)(?:\s*\(\s*\d{1,3}\s*/\s*\d{1,3}\s*\)|\s+\d{1,3}\s*/\s*\d{1,3}|\s+page\s+\d{1,4}|\s+\d{4}(?:\s*[-/]\s*\d{2,4})?|\s+\d{1,4})+$""")
     private val edgeSeparatorTrim = Regex("""^[\s\-–—|·•:：,，/]+|[\s\-–—|·•:：,，/]+$""")
     private val functionCallNoise = Regex("""^[A-Za-z]{1,2}\([^)]{1,20}\)$""")
-    private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
+    private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b\d{1,4}\(\d{1,4}\)\s*:\s*\d{1,5}\s*[-–—]\s*\d{1,5}|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
+    private val figureOrTableCaptionLine = Regex("""(?i)^(?:figure|fig\.?|table|box|exhibit|panel|chart)\s+\d+(?:\.\d+)*\b""")
+    private val leadingArticlePrefix = Regex("""^(?:the|a|an)\s+""")
+    private val wrappedContinuationPrefix = Regex("""^(?:of|for|in|on|to|and|or|with|from|by|as|at|the|a|an)\b""")
     // Case-sensitive lowercase verbs so uppercase acronyms/variables (e.g. "IS" in "IH–IS") are never misread as verbs.
-    private val sentenceVerbNoise = Regex("""\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes|relies|satisfies|prevents|allows|enables|creates|produces|reduces|increases|decreases|determines|explains|describes)\b""")
+    private val sentenceVerbNoise = Regex("""\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes|relies|satisfies|prevents|allows|enables|creates|produces|reduces|increases|decreases|determines|explains|describes|predicts|yields|generates|states|argues|claims|holds|exists|occurs|happens|follows|remains|becomes|provides|offers|gives|takes|uses|needs|wants|prefers|chooses|faces|pays|charges|sets|raises|lowers|changes|shifts|moves)\b""")
     private val nonTopicLabel = Regex(
         """(?i)^(?:example|examples|note|notes|side\s*note|sidebar|aside|figure|fig\.?|table|box|source|sources|step|steps|case|cases|question|questions|problem|problems|exercise|exercises|answer|answers|solution|solutions|hint|hints|remark|remarks|proof|equation|eq\.?|formula|definition|def\.?|theorem|lemma|proposition|corollary|assumption|assumptions|chart|graph|panel|exhibit|diagram|warning|tip|recall|key|true|false|unclear|uncertain|appendix|part|chapter|section|unit|module|lecture|week)(?:\s+[a-z0-9]+(?:\.[a-z0-9]+)*)?$""",
     )
@@ -57,6 +61,10 @@ internal object CourseExamPoints {
         "evidence", "results", "findings", "setup", "framework", "implications", "remarks",
         "readings", "suggested reading", "review", "wrap-up", "today", "plan", "lecture plan",
         "sources", "examples", "experiment", "experiments", "side note", "sidebar", "enrollment", "next week", "last week",
+        "healthy", "sick",
+        "germany", "france", "canada", "japan", "sweden", "switzerland", "netherlands",
+        "spain", "italy", "norway", "denmark", "finland", "australia", "india", "china",
+        "england", "scotland", "britain", "america",
         "hypothesis", "hypotheses", "possible explanation", "possible explanations",
         "alternative explanation", "stylized facts", "key facts", "empirical evidence",
         "empirical results", "main results", "main findings", "key findings",
@@ -523,10 +531,10 @@ internal object CourseExamPoints {
             trailingSlideFraction.containsMatchIn(heading) || tableMetaSuffixNoise.containsMatchIn(heading) ||
             numericCohortLabelNoise.containsMatchIn(heading) || parentheticalUnitCohortNoise.containsMatchIn(heading) ||
             conditionalLeadNoise.containsMatchIn(heading) || conversationalLeadNoise.containsMatchIn(heading) ||
-            truncatedTrailingWordNoise.containsMatchIn(heading) ||
+            truncatedTrailingWordNoise.containsMatchIn(heading) || incompleteBetweenNoise.containsMatchIn(heading) ||
             functionCallNoise.matches(heading)
         ) return false
-        if (journalCitationNoise.containsMatchIn(heading)) return false
+        if (journalCitationNoise.containsMatchIn(heading) || journalCitationNoise.containsMatchIn(rawLine)) return false
         val first = heading.first()
         // Reject lowercase-initial fragments ("to live", "in the past", "regime are clear", ...)
         if (first in 'a'..'z') return false
@@ -584,6 +592,7 @@ internal object CourseExamPoints {
         val chapterStartsByBook = mutableMapOf<String, Set<Int>>()
         val chapterRangesByBook = mutableMapOf<String, List<IntRange>>()
         val sectionSpansByBook = mutableMapOf<String, List<ExamSectionSpan>>()
+        val fullTocTitlesByBook = mutableMapOf<String, Set<String>>()
         for (mat in teaching) {
             val excludedRanges = excluded.filter { it.bookId == mat.bookId }.map { it.startPage..it.endPage }
             val bookPages = CourseStore.loadPagesForBook(db, mat.bookId, mat.pageCount.coerceAtLeast(1))
@@ -600,6 +609,12 @@ internal object CourseExamPoints {
                 if (starts.isNotEmpty()) chapterStartsByBook[mat.bookId] = starts
                 val chRanges = chapterNodes.map { it.startPage..it.endPage.coerceAtLeast(it.startPage) }
                 if (chRanges.isNotEmpty()) chapterRangesByBook[mat.bookId] = chRanges
+                val allTocTitles = structure.tocNodes
+                    .filter { it.kind in setOf(TocNodeKind.CHAPTER, TocNodeKind.SECTION, TocNodeKind.SUBSECTION) }
+                    .map { normalize(it.title.trim().replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()) }
+                    .filter { it.length >= 4 }
+                    .toSet()
+                if (allTocTitles.isNotEmpty()) fullTocTitlesByBook[mat.bookId] = allTocTitles
                 val spans = structure.tocNodes
                     .filter { it.kind in setOf(TocNodeKind.SECTION, TocNodeKind.SUBSECTION) }
                     .mapNotNull { node ->
@@ -626,7 +641,7 @@ internal object CourseExamPoints {
             }
         }
         val cleaned = stripExercisesFromTextbookPages(pages, chapterStartsByBook)
-        return identifyFromPages(courseId, cleaned, chapterStartsByBook, sectionSpansByBook, chapterRangesByBook)
+        return identifyFromPages(courseId, cleaned, chapterStartsByBook, sectionSpansByBook, chapterRangesByBook, fullTocTitlesByBook)
     }
 
     private fun normalizeEdgeCandidate(line: String): String {
@@ -660,6 +675,7 @@ internal object CourseExamPoints {
         chapterStartPagesByBook: Map<String, Set<Int>> = emptyMap(),
         sectionSpansByBook: Map<String, List<ExamSectionSpan>> = emptyMap(),
         chapterRangesByBook: Map<String, List<IntRange>> = emptyMap(),
+        fullTocTitlesByBook: Map<String, Set<String>> = emptyMap(),
     ): List<CourseTopicPlan> {
         val bodyPages = stripExercisesFromTextbookPages(
             pages.filter { it.role in teachingRoles && it.text.isNotBlank() && !isTocOrIndexPage(it.text) },
@@ -795,6 +811,8 @@ internal object CourseExamPoints {
                         continue
                     }
                 }
+                // Reject tiny math-symbol textbook labels like "Healthy: I'" (rhs < 6 chars).
+                if (!isSlideLike && defMatch != null && defMatch.groupValues[2].trim().length < 6) continue
                 val defined = bulletMatch != null || (defMatch != null && !numericTableDef)
                 val markdown = line.startsWith("#")
                 val numbered = sectionNumber.containsMatchIn(line)
@@ -824,6 +842,29 @@ internal object CourseExamPoints {
             indexed += page.copy(text = normalize(page.text))
         }
 
+        // Strip figure/table caption lines when verifying whether a slide-only title is genuinely discussed in textbook body.
+        val textbookNonCaptionByPage = HashMap<Pair<String, Int>, String>()
+        for (pg in bodyPages) {
+            if (pg.role != CourseMaterialRole.CORE_TEXTBOOK) continue
+            val rawLines = pg.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+            val nonCaption = mutableListOf<String>()
+            var skipNextCaptionCont = false
+            for (l in rawLines) {
+                if (figureOrTableCaptionLine.containsMatchIn(l)) {
+                    skipNextCaptionCont = true
+                    continue
+                }
+                if (skipNextCaptionCont) {
+                    skipNextCaptionCont = false
+                    if (l.length <= 90 && !l.endsWith(".") && !l.endsWith("。")) continue
+                }
+                nonCaption += l
+            }
+            textbookNonCaptionByPage[pg.bookId to pg.page] = normalize(nonCaption.joinToString("\n"))
+        }
+        val allFullTocTitles = fullTocTitlesByBook.values.flatten().toSet() +
+            sectionSpansByBook.values.flatten().map { it.normalizedTitle }.toSet()
+
         val sectionRangesByKey = HashMap<String, MutableList<Pair<String, IntRange>>>()
         for ((bookId, spans) in sectionSpansByBook) {
             for (span in spans) {
@@ -835,14 +876,30 @@ internal object CourseExamPoints {
             val key: String,
             val title: String,
             val sources: MutableList<CourseTopicLinkPlan>,
-            val sectionStartByBook: Map<String, Int>,
+            val sectionStartByBook: MutableMap<String, Int>,
+            var textbookBacked: Boolean,
         )
 
-        val drafts = titles.mapNotNull { (key, title) ->
+        val rawDrafts = titles.mapNotNull { (key, title) ->
+            // Drop line-wrapped truncated chapter/section prefixes (e.g. "Technology and the price" when TOC has
+            // "Technology and the price of health care"), while keeping genuine shorter titles before a subtitle colon.
+            if (key !in officialTocSectionKeys && allFullTocTitles.any { full ->
+                    full.startsWith("$key ") && wrappedContinuationPrefix.containsMatchIn(full.removePrefix("$key "))
+                }
+            ) {
+                return@mapNotNull null
+            }
             val pattern = termPattern(key)
+            val isStrong = key in textbookStrong
             val linkMap = LinkedHashMap<Pair<String, Int>, CourseTopicLinkPlan>()
             for (pg in indexed) {
-                if (pattern.containsMatchIn(pg.text)) {
+                val matched = if (!isStrong && pg.role == CourseMaterialRole.CORE_TEXTBOOK) {
+                    val bodyOnly = textbookNonCaptionByPage[pg.bookId to pg.page].orEmpty()
+                    pattern.containsMatchIn(bodyOnly)
+                } else {
+                    pattern.containsMatchIn(pg.text)
+                }
+                if (matched) {
                     linkMap.putIfAbsent(
                         pg.bookId to pg.page,
                         CourseTopicLinkPlan(pg.bookId, startPage = pg.page, endPage = pg.page, role = pg.role),
@@ -863,10 +920,49 @@ internal object CourseExamPoints {
                 }
             }
             val sources = linkMap.values.sortedWith(compareBy({ it.role.authorityRank }, { it.bookId }, { it.startPage })).toMutableList()
-            val textbookBacked = key in textbookStrong && sources.any { it.role == CourseMaterialRole.CORE_TEXTBOOK }
+            val textbookBacked = isStrong && sources.any { it.role == CourseMaterialRole.CORE_TEXTBOOK }
             // A name that is only a slide title stays on its weekly topic. A textbook definition does not.
             if (sources.distinctBy { it.bookId }.size < 2 && !textbookBacked) return@mapNotNull null
-            DraftTopic(key, title, sources, secStartByBook)
+            DraftTopic(key, title, sources, secStartByBook, textbookBacked)
+        }
+
+        // Canonicalize and merge near-duplicate exam points:
+        // 1. Leading article variants ("The efficient producer hypothesis" vs "Efficient producer hypothesis")
+        // 2. PDF missing-space / hyphen variants ("Ex postmoral hazard" vs "Ex post moral hazard")
+        val canonicalGroups = LinkedHashMap<String, MutableList<DraftTopic>>()
+        for (draft in rawDrafts) {
+            val bare = leadingArticlePrefix.replace(draft.key, "").trim()
+            val collapsed = bare.replace(Regex("""[\s\-–—]+"""), "")
+            val groupKey = if (collapsed.length >= 6) collapsed else bare
+            canonicalGroups.getOrPut(groupKey) { mutableListOf() }.add(draft)
+        }
+        val drafts = canonicalGroups.values.map { group ->
+            if (group.size == 1) {
+                group.single()
+            } else {
+                // Prefer: spaced form (more words, avoiding PDF glued words like "postmoral") -> without leading "The " -> textbookBacked.
+                val winner = group.maxWith(
+                    compareBy<DraftTopic>(
+                        { it.key.split(whitespace).size - if (leadingArticlePrefix.containsMatchIn(it.key)) 1 else 0 },
+                        { !leadingArticlePrefix.containsMatchIn(it.key) },
+                        { it.textbookBacked },
+                        { it.sources.size },
+                    ),
+                )
+                val mergedLinks = LinkedHashMap<Pair<String, Int>, CourseTopicLinkPlan>()
+                val mergedSecStarts = HashMap<String, Int>()
+                for (d in group) {
+                    for (s in d.sources) mergedLinks.putIfAbsent(s.bookId to s.startPage, s)
+                    for ((b, sp) in d.sectionStartByBook) {
+                        mergedSecStarts[b] = minOf(mergedSecStarts[b] ?: Int.MAX_VALUE, sp)
+                    }
+                }
+                winner.copy(
+                    sources = mergedLinks.values.sortedWith(compareBy({ it.role.authorityRank }, { it.bookId }, { it.startPage })).toMutableList(),
+                    sectionStartByBook = mergedSecStarts,
+                    textbookBacked = group.any { it.textbookBacked },
+                )
+            }
         }
 
         // Attach orphan cleaned textbook body pages (e.g. a chapter's Conclusion or unrepeated section page)

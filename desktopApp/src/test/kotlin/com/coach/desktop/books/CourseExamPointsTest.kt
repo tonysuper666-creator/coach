@@ -852,4 +852,68 @@ class CourseExamPointsTest {
         assertTrue("Indifference curves in IH–IS space" in titles, "TOC section with uppercase IS MUST stay: $titles")
         assertTrue("Health is uncertain and contagious" in titles, "Official 5-word TOC section MUST stay: $titles")
     }
+
+    @Test
+    fun filtersRemainingNoiseDeduplicatesArticleAndGluedVariantsAndDropsTruncatedTocPrefixes() {
+        val textbookPages = listOf(
+            ExamTeachingPage("tb", 50, CourseMaterialRole.CORE_TEXTBOOK, """
+                Healthy: I'
+                Insurance Experiment: Smith and Doe, Synthetic Review, 77(2): 251-277, 1987.
+                Rothschild-Stiglitz model predicts just the opposite: Prose sentence fragment.
+                Figure 6.2 Surgical mortality rates for various regional procedures
+                Figure 6.3
+                Chart of northern and southern corridors
+                Figure 6.4 Relationship between tariff coverage and peak demand
+                The efficient producer hypothesis: Higher schooling raises marginal productivity of preventive inputs.
+                12.1 Ex postmoral hazard
+                Ex post moral hazard: Greater utilization after an adverse event occurs because coverage lowers marginal cost.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 286, CourseMaterialRole.CORE_TEXTBOOK, """
+                13 Technology and the price
+                of grid services
+                Technology and the price of grid services: Innovation shifts both quality and total expenditure over time.
+            """.trimIndent()),
+        )
+        val slidePages = listOf(
+            ExamTeachingPage("slides-w2", 1, CourseMaterialRole.LECTURE_SLIDES, """
+                Efficient producer hypothesis
+                Germany: Single-country comparative bullet point.
+                Surgical mortality rates for various regional procedures
+                Chart of northern and southern corridors
+                Relationship between tariff coverage
+            """.trimIndent()),
+            ExamTeachingPage("slides-w6", 1, CourseMaterialRole.LECTURE_SLIDES, "Ex post moral hazard\nReview of utilization response."),
+        )
+
+        val identified = CourseExamPoints.identifyFromPages(
+            courseId = "r7-dedup-clean",
+            pages = textbookPages + slidePages,
+            chapterStartPagesByBook = mapOf("tb" to setOf(50, 286)),
+            fullTocTitlesByBook = mapOf("tb" to setOf("technology and the price of grid services")),
+        )
+        val titles = identified.map { it.title }.toSet()
+
+        // Remaining non-point noise must all be filtered
+        for (bad in listOf(
+            "Healthy",
+            "Germany",
+            "Insurance Experiment",
+            "Rothschild-Stiglitz model predicts just the opposite",
+            "Surgical mortality rates for various regional procedures",
+            "Chart of northern and southern corridors",
+            "Relationship between tariff coverage",
+            "Technology and the price",
+        )) {
+            assertFalse(bad in titles, "Noise/caption/truncated title '$bad' must be filtered: $titles")
+        }
+
+        // Duplicate pairs must collapse into ONE canonical title each
+        assertEquals(1, identified.count { it.title.contains("efficient producer hypothesis", ignoreCase = true) },
+            "Article duplicate pair must merge into one: $titles")
+        assertTrue("Efficient producer hypothesis" in titles)
+        assertEquals(1, identified.count { it.title.replace(" ", "").equals("expostmoralhazard", ignoreCase = true) },
+            "PDF glued-space duplicate pair must merge into spaced canonical title: $titles")
+        assertTrue("Ex post moral hazard" in titles)
+        assertTrue("Technology and the price of grid services" in titles)
+    }
 }

@@ -91,8 +91,8 @@ class StanceExplanationTest {
         assertEquals("$bookHash:p4:20", cite.docId)
         assertEquals(4, cite.pdfPage)
         assertEquals(20, cite.startUtf16)
-        assertEquals(20 + "Synthetic pears grow in the orchard".length, cite.endUtf16)
-        assertEquals("Synthetic pears grow in the orchard", cite.quote)
+        assertEquals(20 + pageText.length, cite.endUtf16)
+        assertEquals(pageText, cite.quote)
 
         val payloadWithInlineQuotes = """
             {
@@ -386,10 +386,175 @@ class StanceExplanationTest {
         assertEquals("注 · 王弼", noteLayer.label)
         assertEquals("书外 · 未对照原文 · 今人解读", outLayer.label)
         val noteCite = noteLayer.sentences.single().citations.single()
-        assertEquals("指事造形，非其常也", noteCite.quote)
+        assertEquals("〈可道之道，可名之名，指事造形，非其常也。〉", noteCite.quote)
         val relStart = noteCite.startUtf16 - 100
         val relEnd = noteCite.endUtf16 - 100
         assertEquals(noteCite.quote, pageText.substring(relStart, relEnd))
+    }
+
+    /**
+     * 裁定回归：模型给出半句 quote 时，服务端必须向两侧扩到本块内的整句原句（支持跨硬折行，
+     * 不跨空行/块界；扩后超 400 UTF-16 时保留原区间；同块多句用 quotes 数组分别引并各自扩到整句）。
+     */
+    @Test
+    fun halfSentenceQuoteExpandsToFullSentenceWithinBlockAndCapsAt400Utf16() {
+        val bookHash = "9".repeat(64)
+        // 1. 英文多句块含约 70 字符硬折行与缩写 Mr.：给出半句 quote，必须扩到整句（不截在硬折行，也不吞上下句）
+        val enSent1 = "Mr. Franklin made a little book for each virtue."
+        val enSent2 = "He ruled each page with red ink into seven columns,\nmarking each day of the week with its initial letter."
+        val enSent3 = "Then he crossed those columns with thirteen red lines."
+        val enBlock = "$enSent1 $enSent2 $enSent3"
+        val enPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p47:100", 47, enBlock))),
+            BookStance.LIFE,
+        )
+        val enPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"他用红墨水画了七列，并用首字母标出星期几。","anchors":["S1"],"quote":"red ink into seven columns"},
+                {"text":"他先做了小册子，再用十三条红线横穿七列。","anchors":["S1"],"quotes":["made a little book","thirteen red lines"]}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val enRes = assertNotNull(checkedStancePayload(enPayload, enPack, BookStance.LIFE))
+        val enSents = (enRes.layers.single() as CheckedStanceLayer.Book).sentences
+        assertEquals(2, enSents.size)
+        val c0 = enSents[0].citations.single()
+        assertEquals(enSent2, c0.quote)
+        assertEquals(100 + enBlock.indexOf(enSent2), c0.startUtf16)
+        assertEquals(100 + enBlock.indexOf(enSent2) + enSent2.length, c0.endUtf16)
+        // 同块 quotes 数组两条半句各自扩为整句
+        assertEquals(listOf(enSent1, enSent3), enSents[1].citations.map { it.quote })
+
+        // 2. 中文多句块含空行标题：半句扩到所在整句，不跨空行，也不吞下一句
+        val zhSent = "果园东边只种晚熟的秋梨，每年十月采摘。"
+        val zhBlock = "第一章\n\n${zhSent}西边种着樱桃。"
+        val zhPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p2:50", 2, zhBlock))),
+            BookStance.KNOWLEDGE,
+        )
+        val zhPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"果园东边种晚熟秋梨并在十月采摘。","anchors":["S1"],"quote":"晚熟的秋梨"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val zhRes = assertNotNull(checkedStancePayload(zhPayload, zhPack, BookStance.KNOWLEDGE))
+        val zhCite = (zhRes.layers.single() as CheckedStanceLayer.Book).sentences.single().citations.single()
+        assertEquals(zhSent, zhCite.quote)
+        assertEquals(50 + zhBlock.indexOf(zhSent), zhCite.startUtf16)
+        assertEquals(50 + zhBlock.indexOf(zhSent) + zhSent.length, zhCite.endUtf16)
+
+        // 3. 扩后超过 400 UTF-16 时保留原定位区间，不把整段巨长句全高亮
+        val longSent = "Only pears grow in this orchard " + "and every autumn visitors walk along the quiet path ".repeat(8) + "until dusk."
+        assertTrue(longSent.length > 400)
+        val longPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p3:0", 3, longSent))),
+            BookStance.KNOWLEDGE,
+        )
+        val shortQuote = "Only pears grow in this orchard"
+        val longPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"果园里只种梨。","anchors":["S1"],"quote":"$shortQuote"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val longRes = assertNotNull(checkedStancePayload(longPayload, longPack, BookStance.KNOWLEDGE))
+        val longCite = (longRes.layers.single() as CheckedStanceLayer.Book).sentences.single().citations.single()
+        assertEquals(shortQuote, longCite.quote)
+        assertEquals(0, longCite.startUtf16)
+        assertEquals(shortQuote.length, longCite.endUtf16)
+    }
+
+    /**
+     * 裁定回归（E1 / 古籍短引文扩整句）：古籍与繁文典籍块里只给一段短 quote（5 字以上），
+     * 服务端必须将区间与 quote 扩到所在整句原句，且该句通过全部门禁并保留。
+     */
+    @Test
+    fun classicalShortQuoteExpandsToFullSentenceAndKeepsSentence() {
+        val bookHash = "8".repeat(64)
+        val firstSent = "初九：潛龍勿用。"
+        val secondSent = "象曰：潛龍勿用，陽在下也。"
+        val zhouyiBlock = "$firstSent$secondSent"
+        val esotericPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p2:40", 2, zhouyiBlock))),
+            BookStance.ESOTERIC,
+        )
+        val esotericPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"象传解释初九潜龙勿用是因为阳气尚处在最下方。","anchors":["S1"],"quote":"潛龍勿用，陽在下"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val esotericRes = assertNotNull(checkedStancePayload(esotericPayload, esotericPack, BookStance.ESOTERIC))
+        assertEquals(0, esotericRes.droppedSentences)
+        val esotericSent = (esotericRes.layers.single() as CheckedStanceLayer.Book).sentences.single()
+        val esotericCite = esotericSent.citations.single()
+        assertEquals(secondSent, esotericCite.quote)
+        assertEquals(40 + zhouyiBlock.indexOf(secondSent), esotericCite.startUtf16)
+        assertEquals(40 + zhouyiBlock.indexOf(secondSent) + secondSent.length, esotericCite.endUtf16)
+
+        val lunyuSent1 = "子曰：學而時習之，不亦說乎？"
+        val lunyuSent2 = "有朋自遠方來，不亦樂乎？"
+        val lunyuBlock = "$lunyuSent1$lunyuSent2"
+        val classicPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p3:10", 3, lunyuBlock))),
+            BookStance.CLASSIC,
+        )
+        val classicPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"原文说朋友从远方到来也是令人快乐的事。","anchors":["S1"],"quote":"有朋自遠方來"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val classicRes = assertNotNull(checkedStancePayload(classicPayload, classicPack, BookStance.CLASSIC))
+        assertEquals(0, classicRes.droppedSentences)
+        val classicLayer = classicRes.layers.single() as CheckedStanceLayer.Book
+        assertEquals("原文", classicLayer.label)
+        val classicCite = classicLayer.sentences.single().citations.single()
+        assertEquals(lunyuSent2, classicCite.quote)
+        assertEquals(10 + lunyuBlock.indexOf(lunyuSent2), classicCite.startUtf16)
+        assertEquals(10 + lunyuBlock.indexOf(lunyuSent2) + lunyuSent2.length, classicCite.endUtf16)
+    }
+
+    /**
+     * QA 安全回归：丢句日志只能输出本次来源包 `pack.byAnchor` 中已知的 anchor 编号，
+     * 形状 / 句数 / 非法 anchor 三处分支中模型填入的未知字符串必须统一记为 `invalid`，绝不进入日志。
+     */
+    @Test
+    fun dropLogNeverEmitsUntrustedModelAnchorStrings() {
+        val bookHash = "7".repeat(64)
+        val canary = "SYNTHETIC_SECRET_BOOK_TEXT_CANARY_98765"
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p1:0", 1, "Only pears grow in this orchard."))),
+            BookStance.KNOWLEDGE,
+        )
+        val payload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"含换行\n的非法形状。","anchors":["$canary","S1"]},
+                {"text":"第一句。第二句超出单句限制。","anchors":["$canary"]},
+                {"text":"果园里只种梨。","anchors":["S1","$canary"],"quote":"Only pears grow in this orchard."}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val capturedLogs = mutableListOf<String>()
+        val res = assertNotNull(checkedStancePayload(payload, pack, BookStance.KNOWLEDGE, onDropLog = capturedLogs::add))
+        assertEquals(3, res.droppedSentences)
+        assertEquals(3, capturedLogs.size)
+        assertEquals(
+            listOf(
+                "COACH stance.drop stance=knowledge reason=SHAPE anchors=invalid,S1",
+                "COACH stance.drop stance=knowledge reason=SENTENCE_COUNT anchors=invalid",
+                "COACH stance.drop stance=knowledge reason=ANCHOR anchors=S1,invalid",
+            ),
+            capturedLogs,
+        )
+        assertTrue(capturedLogs.none { canary in it }, "未知模型字符串绝不能出现在丢句日志中")
+
+        // 同时验证默认 SLF4J 日志输出路径也不会泄露未知字符串
+        val prevErr = System.err
+        val errBuf = java.io.ByteArrayOutputStream()
+        try {
+            System.setErr(java.io.PrintStream(errBuf, true, Charsets.UTF_8))
+            assertNotNull(checkedStancePayload(payload, pack, BookStance.KNOWLEDGE))
+        } finally {
+            System.setErr(prevErr)
+        }
+        val stderrText = errBuf.toString(Charsets.UTF_8)
+        assertFalse(canary in stderrText, "默认服务端日志输出绝不能包含未知 anchor 字符串")
     }
 
     /**

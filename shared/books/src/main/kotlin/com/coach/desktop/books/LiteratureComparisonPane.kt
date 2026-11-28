@@ -20,11 +20,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.V7TextButton
 import java.nio.file.Files
@@ -54,7 +56,17 @@ internal fun LiteratureComparisonPane(
     var notice by remember { mutableStateOf("") }
     var markdown by remember { mutableStateOf("") }
     val enabled = LocalReadingAiExplain.current
+    val currentEnabled by rememberUpdatedState(enabled)
+    val allowBookExplain = LocalAllowBookExplain.current
     val consent = remember(library) { ExplainConsent(library.directory) }
+    var pendingConsentRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    LaunchedEffect(enabled) {
+        if (enabled && pendingConsentRetry != null) {
+            pendingConsentRetry = null
+            notice = ""
+        }
+    }
 
     fun persist(next: LiteratureComparison, bookIds: List<String>) {
         scope.launch(Dispatchers.IO) {
@@ -72,7 +84,7 @@ internal fun LiteratureComparisonPane(
     suspend fun pollModel(submission: kotlinx.serialization.json.JsonObject, ids: List<String>, paired: Any?): kotlinx.serialization.json.JsonObject {
         while (true) {
             check(explainer.identity == paired) { "连接已更换，请重新打开对比表。" }
-            check(ids.all(consent::allowed)) { "AI 讲解已关闭。" }
+            if (!ids.all(consent::allowed)) throw ComparisonExplainDisabledException(COMPARISON_EXPLAIN_DISABLED)
             val response = explainer.courseTopicPack(submission)
             val result = response.body ?: error(response.error ?: "连接失败，请重试。")
             if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) return result
@@ -81,7 +93,8 @@ internal fun LiteratureComparisonPane(
         }
     }
 
-    suspend fun open(ids: List<String>, generate: Boolean) {
+    suspend fun open(ids: List<String>, generate: Boolean, unlocked: Boolean = false) {
+        pendingConsentRetry = null
         if (ids.size < COMPARISON_MIN_PAPERS) {
             table = null
             markdown = ""
@@ -114,7 +127,9 @@ internal fun LiteratureComparisonPane(
                 notice = if (cached?.stored != null) "上次的对比表对不上现在的原文，需要重新生成。" else ""
                 return
             }
-            check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
+            if (!((currentEnabled || unlocked) && ids.all(consent::allowed))) {
+                throw ComparisonExplainDisabledException(COMPARISON_EXPLAIN_DISABLED)
+            }
             explainer.load()
             val paired = explainer.identity
             notice = "正在生成对比表…"
@@ -136,6 +151,20 @@ internal fun LiteratureComparisonPane(
             notice = outcome.notice
         } catch (e: CancellationException) {
             throw e
+        } catch (e: ComparisonExplainDisabledException) {
+            notice = e.message ?: COMPARISON_EXPLAIN_DISABLED
+            pendingConsentRetry = {
+                val activeIds = if (table == null) {
+                    selected.takeIf { it.size in COMPARISON_MIN_PAPERS..COMPARISON_MAX_PAPERS } ?: ids
+                } else ids
+                ReadingSettings(library.directory).chooseAiExplain(true)
+                activeIds.forEach(consent::allow)
+                activeIds.firstOrNull()?.let { allowBookExplain?.invoke(it) }
+                busy = true
+                notice = ""
+                markdown = ""
+                scope.launch { open(activeIds, generate = true, unlocked = true) }
+            }
         } catch (e: Exception) {
             table = null
             notice = e.message ?: "对比表暂未完成，请重试。"
@@ -176,6 +205,7 @@ internal fun LiteratureComparisonPane(
                     table = null
                     markdown = ""
                     notice = ""
+                    pendingConsentRetry = null
                 }) { Text("换一组文献") }
                 V7TextButton(
                     onClick = {
@@ -231,10 +261,26 @@ internal fun LiteratureComparisonPane(
                 enabled = !busy && selected.size in COMPARISON_MIN_PAPERS..COMPARISON_MAX_PAPERS,
             ) { Text("生成对比表") }
             val shown = notice.ifBlank { reason }
-            if (shown.isNotEmpty()) Text(shown, modifier = Modifier.testTag("comparison-notice"))
+            ComparisonNoticeRow(
+                text = shown,
+                onAllowExplain = pendingConsentRetry?.takeIf { !busy }?.let { retry ->
+                    {
+                        pendingConsentRetry = null
+                        retry()
+                    }
+                },
+            )
         } else {
             Text("文献对比", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("comparison-table"))
-            if (notice.isNotEmpty()) Text(notice, modifier = Modifier.testTag("comparison-notice"))
+            ComparisonNoticeRow(
+                text = notice,
+                onAllowExplain = pendingConsentRetry?.takeIf { !busy }?.let { retry ->
+                    {
+                        pendingConsentRetry = null
+                        retry()
+                    }
+                },
+            )
             current.rows.forEach { row ->
                 Column(Modifier.fillMaxWidth().testTag("comparison-row-${row.bookId}"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     HorizontalDivider()
@@ -358,6 +404,29 @@ private fun SideLine(role: String, side: OutlineSide, onSource: (GuideExcerpt) -
         }
     }
 }
+
+@Composable
+private fun ComparisonNoticeRow(text: String, onAllowExplain: (() -> Unit)?) {
+    if (text.isEmpty()) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(text, modifier = Modifier.weight(1f, fill = false).testTag("comparison-notice"))
+        if (onAllowExplain != null) {
+            PaperButton(
+                onClick = onAllowExplain,
+                modifier = Modifier.testTag("comparison-allow-explain"),
+            ) {
+                Text("开启伴读讲解")
+            }
+        }
+    }
+}
+
+private const val COMPARISON_EXPLAIN_DISABLED = "伴读讲解与提问已关闭，开启后可继续生成对比表。"
+
+private class ComparisonExplainDisabledException(message: String) : IllegalStateException(message)
 
 private fun guideOcr(library: TextbookLibrary) = CachingOcrVerifier(object : LiteratureOcrVerifier {
     override fun ocrPageText(book: Textbook, pdfPage: Int): String = library.ocrPdfPageForGuide(book.id, pdfPage)

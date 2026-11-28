@@ -294,7 +294,7 @@ internal object CollectionQaRetriever {
         "辞职" to listOf("labor", "business", "living"),
         "上班" to listOf("business", "labor", "employment"),
         "习惯" to listOf("habits", "habit", "virtues", "order"),
-        "智能手机" to listOf("telegraph", "news", "mail", "tools"),
+        "手机" to listOf("telegraph", "news", "mail", "tools"),
         "打卡" to listOf("little book", "table", "black mark", "week"),
         "回家吃饭" to listOf("dinner", "visit", "village", "friends"),
         "晚年" to listOf("later", "old age", "life", "virtues"),

@@ -3,10 +3,12 @@ package com.coach.desktop.books
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.ui.v7.AnswerOption
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.V7TextButton
 
 /**
@@ -19,6 +21,7 @@ internal fun LiteratureQuizSection(
     notice: String,
     gaps: List<String>,
     library: TextbookLibrary,
+    onAllowExplain: (() -> Unit)? = null,
     onSource: (GuideExcerpt) -> Unit,
 ) {
     var picks by remember(quiz?.digest) { mutableStateOf<Map<Int, QuizPick>>(emptyMap()) }
@@ -31,7 +34,20 @@ internal fun LiteratureQuizSection(
             busy -> "正在核对选择题…"
             else -> ""
         }
-        if (status.isNotEmpty()) Text(status, modifier = Modifier.testTag("quiz-notice"))
+        if (status.isNotEmpty()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(status, modifier = Modifier.weight(1f, fill = false).testTag("quiz-notice"))
+                if (onAllowExplain != null && !busy && errorText.isEmpty()) {
+                    PaperButton(
+                        onClick = onAllowExplain,
+                        modifier = Modifier.testTag("quiz-allow-explain"),
+                    ) { Text("开启伴读讲解") }
+                }
+            }
+        }
         if (gaps.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().testTag("quiz-gaps"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 gaps.forEach { line -> Text(line, style = MaterialTheme.typography.bodySmall) }

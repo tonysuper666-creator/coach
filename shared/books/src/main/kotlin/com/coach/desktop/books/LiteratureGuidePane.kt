@@ -38,12 +38,29 @@ internal fun LiteratureGuidePane(
     var quizNotice by remember { mutableStateOf("") }
     var quizBusy by remember { mutableStateOf(false) }
     val enabled = LocalReadingAiExplain.current
+    val currentEnabled by rememberUpdatedState(enabled)
+    val allowBookExplain = LocalAllowBookExplain.current
     val consent = remember(library) { ExplainConsent(library.directory) }
+    var pendingConsentRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingQuizConsentRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    LaunchedEffect(enabled) {
+        if (enabled) {
+            if (pendingConsentRetry != null) {
+                pendingConsentRetry = null
+                notice = ""
+            }
+            if (pendingQuizConsentRetry != null) {
+                pendingQuizConsentRetry = null
+                quizNotice = ""
+            }
+        }
+    }
 
     suspend fun pollModel(submission: JsonObject, ids: List<String>, paired: Any?): JsonObject {
         while (true) {
             check(explainer.identity == paired) { "连接已更换，请重新打开导读。" }
-            check(ids.all(consent::allowed)) { "AI 讲解已关闭。" }
+            if (!ids.all(consent::allowed)) throw GuideExplainDisabledException(GUIDE_EXPLAIN_DISABLED)
             val response = explainer.courseTopicPack(submission)
             val result = response.body ?: error(response.error ?: "连接失败，请重试。")
             if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) return result
@@ -52,10 +69,17 @@ internal fun LiteratureGuidePane(
         }
     }
 
-    suspend fun openQuiz(ids: List<String>, prompts: List<String>, metaSnapshot: Map<String, LiteraturePaperMeta>, generate: Boolean) {
+    suspend fun openQuiz(
+        ids: List<String>,
+        prompts: List<String>,
+        metaSnapshot: Map<String, LiteraturePaperMeta>,
+        generate: Boolean,
+        unlocked: Boolean = false,
+    ) {
         quizBusy = true
         quizNotice = ""
         quizGaps = emptyList()
+        pendingQuizConsentRetry = null
         try {
             val books = withContext(Dispatchers.IO) { ids.map(library::literatureBook) }
             val input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, metaSnapshot) }
@@ -71,7 +95,9 @@ internal fun LiteratureGuidePane(
                 }
             }
             if (!generate) return
-            check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
+            if (!((currentEnabled || unlocked) && ids.all(consent::allowed))) {
+                throw GuideExplainDisabledException(QUIZ_EXPLAIN_DISABLED)
+            }
             explainer.load()
             val paired = explainer.identity
             val ocr = CachingOcrVerifier(object : LiteratureOcrVerifier {
@@ -83,7 +109,7 @@ internal fun LiteratureGuidePane(
             suspend fun poll(submission: JsonObject): JsonObject {
                 while (true) {
                     check(explainer.identity == paired) { "连接已更换，请重新打开导读。" }
-                    check(ids.all(consent::allowed)) { "AI 讲解已关闭。" }
+                    if (!ids.all(consent::allowed)) throw GuideExplainDisabledException(QUIZ_EXPLAIN_DISABLED)
                     val response = explainer.literatureQuiz(submission)
                     val result = response.body ?: error(response.error ?: "连接失败，请重试。")
                     if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) return result
@@ -120,6 +146,15 @@ internal fun LiteratureGuidePane(
             quizNotice = ""
         } catch (e: CancellationException) {
             throw e
+        } catch (e: GuideExplainDisabledException) {
+            quiz = null
+            quizNotice = e.message ?: QUIZ_EXPLAIN_DISABLED
+            pendingQuizConsentRetry = {
+                ReadingSettings(library.directory).chooseAiExplain(true)
+                ids.forEach(consent::allow)
+                ids.firstOrNull()?.let { allowBookExplain?.invoke(it) }
+                scope.launch { openQuiz(ids, prompts, metaSnapshot, generate = true, unlocked = true) }
+            }
         } catch (e: Exception) {
             quiz = null
             quizNotice = e.message ?: "选择题没有生成。"
@@ -128,7 +163,14 @@ internal fun LiteratureGuidePane(
         }
     }
 
-    suspend fun open(ids: List<String>, prompts: List<String>, metaSnapshot: Map<String, LiteraturePaperMeta>, generate: Boolean) {
+    suspend fun open(
+        ids: List<String>,
+        prompts: List<String>,
+        metaSnapshot: Map<String, LiteraturePaperMeta>,
+        generate: Boolean,
+        unlocked: Boolean = false,
+    ) {
+        pendingConsentRetry = null
         try {
             failures = emptyList()
             val books = withContext(Dispatchers.IO) { ids.map(library::literatureBook) }
@@ -147,7 +189,9 @@ internal fun LiteratureGuidePane(
                 }
             }
             if (!generate) return
-            check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
+            if (!((currentEnabled || unlocked) && ids.all(consent::allowed))) {
+                throw GuideExplainDisabledException(GUIDE_EXPLAIN_DISABLED)
+            }
             explainer.load()
             val paired = explainer.identity
             withContext(Dispatchers.IO) {
@@ -229,6 +273,20 @@ internal fun LiteratureGuidePane(
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: GuideExplainDisabledException) {
+            notice = e.message ?: GUIDE_EXPLAIN_DISABLED
+            pendingConsentRetry = {
+                val activeIds = selected.takeIf { it.size in 3..5 } ?: ids
+                val activePrompts = questions.lines().map(String::trim).filter(String::isNotEmpty)
+                    .takeIf { it.size in 1..7 && it.all { q -> q.length <= 400 } } ?: prompts
+                val activeSnapshot = paperMetas.toMap().ifEmpty { metaSnapshot }
+                ReadingSettings(library.directory).chooseAiExplain(true)
+                activeIds.forEach(consent::allow)
+                activeIds.firstOrNull()?.let { allowBookExplain?.invoke(it) }
+                busy = true
+                notice = "正在核对材料…"
+                scope.launch { open(activeIds, activePrompts, activeSnapshot, generate = true, unlocked = true) }
+            }
         } catch (e: Exception) {
             notice = e.message ?: "导读暂未完成，请重试。"
         } finally {
@@ -282,6 +340,8 @@ internal fun LiteratureGuidePane(
                         quiz = null
                         quizGaps = emptyList()
                         quizNotice = ""
+                        pendingConsentRetry = null
+                        pendingQuizConsentRetry = null
                     }) { Text("换一组材料") }
                 }
             }
@@ -361,7 +421,26 @@ internal fun LiteratureGuidePane(
                 }
                 if (prompts.size > 7) Text("一次最多放 7 个思考题。")
                 if (materials.size < 3) Text("请先回课程页补充 PDF 或 EPUB 材料。")
-                if (notice.isNotEmpty()) Text(notice, modifier = Modifier.testTag("guide-notice"))
+                if (notice.isNotEmpty()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(notice, modifier = Modifier.weight(1f, fill = false).testTag("guide-notice"))
+                        val allowAction = pendingConsentRetry
+                        if (allowAction != null && !busy) {
+                            PaperButton(
+                                onClick = {
+                                    pendingConsentRetry = null
+                                    allowAction()
+                                },
+                                modifier = Modifier.testTag("guide-allow-explain"),
+                            ) {
+                                Text("开启伴读讲解")
+                            }
+                        }
+                    }
+                }
                 if (failures.isNotEmpty()) {
                     Column(
                         modifier = Modifier.fillMaxWidth().testTag("guide-failures").padding(top = 4.dp),
@@ -424,11 +503,29 @@ internal fun LiteratureGuidePane(
                         }
                     }
                 }
-                LiteratureQuizSection(quiz, quizBusy, quizNotice, quizGaps, library, onSource)
+                LiteratureQuizSection(
+                    quiz = quiz,
+                    busy = quizBusy,
+                    notice = quizNotice,
+                    gaps = quizGaps,
+                    library = library,
+                    onAllowExplain = pendingQuizConsentRetry?.let { retry ->
+                        {
+                            pendingQuizConsentRetry = null
+                            retry()
+                        }
+                    },
+                    onSource = onSource,
+                )
             }
         }
     }
 }
+
+private const val GUIDE_EXPLAIN_DISABLED = "伴读讲解与提问已关闭，开启后可继续生成导读。"
+private const val QUIZ_EXPLAIN_DISABLED = "伴读讲解与提问已关闭，开启后可继续生成选择题。"
+
+private class GuideExplainDisabledException(message: String) : IllegalStateException(message)
 
 @Composable
 private fun GuideSource(source: GuideExcerpt, showQuote: Boolean, onSource: (GuideExcerpt) -> Unit) {

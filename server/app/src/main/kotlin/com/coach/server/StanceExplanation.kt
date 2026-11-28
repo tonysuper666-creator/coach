@@ -592,11 +592,11 @@ internal fun buildStanceSystemPrompt(
         RULES:
         1. Root JSON object MUST contain ONLY the keys "paragraphs" and "boundary" (never add "stance" or other root keys).
         2. Output 0 to 5 items in "paragraphs". Allowed layer values: $allowedLayersDesc.
-        3. Every "book" paragraph MUST use ONLY keys "layer" and "sentences". Each item in "sentences" is STRICTLY ONE Chinese sentence (only ONE sentence-ending mark 。！？ at the end; NEVER put two sentences in one item).
+        3. Every "book" paragraph MUST use ONLY keys "layer" and "sentences". Each item in "sentences" is STRICTLY ONE Chinese sentence (only ONE sentence-ending mark 。！？ at the end; NEVER put two sentences in one item) stating ONLY ONE concise fact supported by its own cited original sentence(s). STRICT SINGLE-FACT SPLIT: When the source passage spans two or more original sentences (for example, a classical quotation with two sentences separated by 。, or two consecutive English sentences expressing separate traits/attitudes), split them into separate items in "sentences", each with its own exact "quote" from its supporting original sentence. NEVER pack facts from a second original sentence into the second half of a compound sentence while only quoting the first original sentence.
         4. Each "book" sentence MUST state ONLY facts or claims explicitly written in its cited original sentence(s) — NEVER state anything not written in the cited original sentence(s), and NEVER put meta-disclaimers (like "本书不能预测现实") into a "book" sentence (put meta-disclaimers in "outside"). Each "book" sentence MUST have:
            - "text": one plain Chinese sentence (no newlines, no 【】, no page numbers) stating ONLY what is written in its cited original sentence(s). In "text", use NO quotation marks of any kind (", “”, 「」, 『』, '') and NEVER put an original sentence (especially with sentence-ending punctuation) inside 「」 — write source terms bare; the application highlights the exact cited sentence.
            - "anchors": non-empty array of supplied anchor IDs (like ["S1"]) with no duplicates, citing ONLY blocks that directly support THIS specific sentence.
-           - "quote": copy a verbatim contiguous substring (at least 5 characters, prefer short and exact over long and approximate — the application automatically expands it to the full supporting sentence; no "..." and no edits) from the first cited anchor block. Optionally, when one Chinese sentence merges facts from multiple original sentences, you may cite each separately using multiple anchors or "quotes" (e.g. "quotes":{"S1":"...","S2":"..."} or "quotes":["...","..."]).
+           - "quote": copy a verbatim contiguous substring (at least 5 characters, prefer short and exact over long and approximate — the application automatically expands it to the full supporting sentence; no "..." and no edits) from the first cited anchor block. Every clause in "text" MUST be directly supported by the expanded cited original sentence(s). If one Chinese sentence genuinely combines facts from two original sentences, you MUST cite EVERY supporting original sentence using "quotes" (e.g. "quotes":["substring from original sentence 1","substring from original sentence 2"] or "quotes":{"S1":"...","S2":"..."}), or split it into two separate items in "sentences".
         5. Every "outside" paragraph MUST use ONLY keys "layer", "kind" (one of "通行讲法", "注家读法", "今人解读", "史学"), and "text" (plain text, NO anchors, NO page numbers like 第X页 / page X, NO 【】, NEVER write unescaped ASCII double quotes ").
         6. Every "guess" paragraph (ONLY allowed in "life" stance) MUST use ONLY keys "layer" and "text" (third-person ONLY, NO 我/我们/I/my, NO anchors, NO page numbers, NO 【】, NEVER write unescaped ASCII double quotes ").
         7. NEVER invent facts as "book" sentences. If the supplied blocks do not directly answer the question, omit "book" paragraphs (leave only valid "outside"/"guess" if allowed by stance, or {"paragraphs":[],"boundary":null}).
@@ -1356,6 +1356,14 @@ internal fun checkedStancePayload(
                     // 规则 1：词面粗筛，陈述与该句所引原句毫不相干就丢句；不判断语义蕴含（见 StanceClaimSupport 注释）
                     if (!StanceClaimSupport.isSupported(text, citations, blocks)) {
                         logDrop("CLAIM_SUPPORT", anchorIds)
+                        droppedSentences++
+                        continue
+                    }
+
+                    // 规则 1（TON-1982 复句缺引回归）：复句的每条实质分句都必须被本句已高亮的引文原句覆盖，
+                    // 避免前半句有高亮、后半句却引自未高亮原句或无出处。
+                    if (!isHighRisk && !StanceClaimSupport.areAllSubstantiveClausesSupported(text, citations, blocks)) {
+                        logDrop("CLAUSE_UNSUPPORTED", anchorIds)
                         droppedSentences++
                         continue
                     }

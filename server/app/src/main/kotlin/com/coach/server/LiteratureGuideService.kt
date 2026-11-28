@@ -34,7 +34,7 @@ class LiteratureGuideService(private val bridge: BridgeClient) {
             try {
                 when (val result = client.chat(ChatRequest(
                     task = "literature_guide", model = BridgeClient.HAIKU, system = systemPrompt, user = prompt,
-                    stream = false, background = true, maxTokens = 8000,
+                    stream = false, background = true, maxTokens = 16_000,
                     friendId = friend?.let(::friendId), friendDevice = device.takeIf { friend != null },
                 ))) {
                     is BridgeResult.Success -> {

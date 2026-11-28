@@ -110,7 +110,7 @@ class BatchRouter:
                 if state["phase"] == "complete":
                     return state["result"]
                 if state["phase"] in {"submitting", "fallback"}:
-                    raise ApiFailure(state.get("reason", "batch_submit_unknown"))
+                    raise ApiFailure(state.get("public_reason", state.get("reason", "batch_submit_unknown")))
             else:
                 state = {"version": 1, "phase": "submitting", "task": task, "model": model,
                          "created": self.clock(), "custom_id": key,
@@ -176,8 +176,9 @@ class BatchRouter:
                     self.failed(path, state, "batch_deadline")
                     raise ApiFailure("batch_deadline") from None
                 raise BatchPending() from None
-            except (ApiFailure, Denied, ValueError, KeyError, TypeError, AttributeError):
-                self.failed(path, state, "batch_result_unavailable")
+            except (ApiFailure, Denied, ValueError, KeyError, TypeError, AttributeError) as error:
+                state["public_reason"] = "batch_result_unavailable"
+                self.failed(path, state, str(error) if isinstance(error, ApiFailure) else type(error).__name__)
                 raise ApiFailure("batch_result_unavailable") from None
 
     @staticmethod

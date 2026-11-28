@@ -32,7 +32,7 @@ object ExamPointDrillLimits {
     const val CHECKER_MODEL: String = BridgeClient.GPT_62_ASTRA
     const val MIN_CHOICES: Int = 3
     const val MAX_CHOICES: Int = 5
-    const val MAX_TOKENS: Int = 8_000
+    const val MAX_TOKENS: Int = 16_000
     // api_batch.py reserves 4 KiB in addition to both serialized UTF-8 prompts.
     const val BRIDGE_PROMPT_BYTES: Int = 90_000 - 4096
 }

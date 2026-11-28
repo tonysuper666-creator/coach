@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import java.io.StringWriter
 import java.text.Normalizer
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 internal data class LiteraturePaperMeta(
     val bookId: String,
@@ -173,6 +174,10 @@ internal object LiteratureMetadata {
         """(?i)^(?:(?:book|chapter|article)\s+)?author(?:\(s\))?\s*[:：]|^(?:editor(?:\(s\))?|pub\.?\s*year|publication\s+date|published(?:\s+in\s+print)?|source|date|year|isbn|issn|doi)\s*[:：]""",
     )
     private val titleSmallWords = setOf("of", "the", "in", "and", "a", "to", "for", "on", "or", "by", "an", "from", "with")
+    /** Chapter lines name societies and journals. The shared affiliation cue treats those words as bylines. */
+    private val chapterAffiliation = Regex(
+        """(?i)\b(?:university|college|institute|department|school\s+of|faculty|academy|museum|laboratory|hospital|clinic)\b""",
+    )
     private val sectionOnly = Regex(
         """(?i)^(?:abstract|introduction|background|contents|preface|foreword|references|bibliography|acknowledgements|summary|conclusion|index|appendix)$""",
     )
@@ -563,12 +568,12 @@ internal object LiteratureMetadata {
         val after = lines.getOrNull(nextIndex).orEmpty()
         if (!opensChapter(after)) return null
         // The author sits directly above an affiliation. The chapter title sits above the author.
-        if (personNameLine.matches(title) && (affiliationCue.containsMatchIn(after) || after.equals("abstract", true) || after.equals("summary", true))) {
+        if (personNameLine.matches(title) && (chapterAffiliation.containsMatchIn(after) || after.equals("abstract", true) || after.equals("summary", true))) {
             return null
         }
         val look = lines.subList(nextIndex, minOf(lines.size, nextIndex + 6))
         val confirmed = look.any { line ->
-            affiliationCue.containsMatchIn(line) || line.equals("abstract", true) || line.equals("summary", true) ||
+            chapterAffiliation.containsMatchIn(line) || line.equals("abstract", true) || line.equals("summary", true) ||
                 (line.length >= 40 && line.last() in ".!?。")
         }
         if (!confirmed) return null
@@ -580,7 +585,7 @@ internal object LiteratureMetadata {
     private fun chapterLine(line: String): Boolean {
         if (line.length !in 12..160 || line.last() in ".!?。！？") return false
         if (titledLabel.matches(line) || fieldStop.matches(line) || sectionOnly.matches(line)) return false
-        if (!isUsefulTitle(line) || affiliationCue.containsMatchIn(line)) return false
+        if (!isUsefulTitle(line) || chapterAffiliation.containsMatchIn(line)) return false
         if (nonTitleLine.containsMatchIn(line)) return false
         val words = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
         if (words.size !in 2..18) return false
@@ -589,7 +594,7 @@ internal object LiteratureMetadata {
 
     private fun opensChapter(line: String): Boolean {
         if (line.isEmpty()) return false
-        if (personNameLine.matches(line) || affiliationCue.containsMatchIn(line)) return true
+        if (personNameLine.matches(line) || chapterAffiliation.containsMatchIn(line)) return true
         return line.equals("abstract", true) || line.equals("summary", true)
     }
 
@@ -1491,6 +1496,51 @@ internal object LiteraturePdfLayout {
         map.getOrPut(page) { mutableListOf() }.addAll(values)
     }
 
+    /**
+     * Page digits in the top or bottom band. Repeated ones are removed from the reading text
+     * before words are built, so the printed-page chain has to see them here.
+     */
+    private fun marginFolioValues(positions: List<BookPdfTextPosition>, height: Float): List<Int> {
+        if (height <= 0f) return emptyList()
+        val band = positions.filter {
+            it.dir == 0f && (it.yDirAdj < height * 0.07f || it.yDirAdj > height * 0.94f)
+        }
+        if (band.isEmpty()) return emptyList()
+        val found = mutableListOf<Int>()
+        for (row in band.groupBy { it.yDirAdj.roundToInt() }.values) {
+            val tokens = mutableListOf<String>()
+            val field = StringBuilder()
+            var right = Float.NEGATIVE_INFINITY
+            fun finish() {
+                val text = field.toString().trim()
+                if (text.isNotEmpty()) tokens += text
+                field.clear()
+            }
+            for (glyph in row.sortedBy { it.xDirAdj }) {
+                if (glyph.xDirAdj - right > maxOf(12f, glyph.heightDir * 2)) finish()
+                field.append(glyph.unicode.orEmpty())
+                right = glyph.xDirAdj + glyph.widthDirAdj
+            }
+            finish()
+            if (tokens.isEmpty()) continue
+            fun take(token: String, alone: Boolean) {
+                val match = folio.matchEntire(token.trim()) ?: return
+                val raw = match.groupValues[1]
+                if (!raw.all(Char::isDigit)) return
+                val value = raw.toIntOrNull() ?: return
+                if (value !in 1..9999) return
+                if (!alone && value in 1500..2099) return
+                found += value
+            }
+            val joined = tokens.joinToString(" ")
+            take(joined, tokens.size == 1)
+            take(tokens.first(), tokens.size == 1)
+            if (tokens.size > 1) take(tokens.last(), alone = false)
+            LiteraturePrintedPages.rangeStart(joined)?.let { found += it }
+        }
+        return found
+    }
+
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
         val tm = position.textMatrix
         val tx = tm.translateX
@@ -1524,6 +1574,9 @@ internal object LiteraturePdfLayout {
                 super.processTextPosition(position)
             }
             override fun writePage() {
+                if (pdfPage.rotation == 0) {
+                    rememberEdgeFolios(page, charactersByArticle.flatMap { marginFolioValues(it, crop.height) })
+                }
                 scanLayer = glyphs > 0 && (graphics.textBehindScan || hiddenGlyphs.toLong() * 10 >= glyphs.toLong() * 9)
                 // OCR word boxes can overlap. Sorting their individual glyphs interleaves letters.
                 if (scanLayer) sortByPosition = false

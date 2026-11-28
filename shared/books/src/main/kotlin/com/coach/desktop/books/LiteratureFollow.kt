@@ -456,6 +456,13 @@ internal object LiteratureSections {
         if (page <= 1) return false
         val first = candidates.filter { it.anchor.pdfPage == page }.minOfOrNull { it.anchor.startUtf16 } ?: return false
         if (excerpt.anchor.startUtf16 != first || excerpt.anchor.startUtf16 > 220) return false
+        // The candidate layer already drops the real cross-page tail. A finished line above this
+        // sentence means it is the next body sentence, not that leftover.
+        val above = previousNonBlank(book, excerpt)
+        if (above != null) {
+            val mark = above.last()
+            if (mark == '.' || mark == '!' || mark == '?' || mark == '。' || mark == '！' || mark == '？') return false
+        }
         val prev = book.pages.firstOrNull { it.number == page - 1 } ?: return false
         val last = prev.guideRegions.asSequence()
             .flatMap { it.text.lineSequence() }

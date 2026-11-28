@@ -2,6 +2,10 @@ package com.coach.server
 
 import com.coach.ai.BridgeClient
 import com.coach.store.sha256
+import io.ktor.http.HttpStatusCode
+import java.text.BreakIterator
+import java.util.Locale
+import kotlin.random.Random
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -29,6 +33,8 @@ object ExamPointDrillLimits {
     const val MIN_CHOICES: Int = 3
     const val MAX_CHOICES: Int = 5
     const val MAX_TOKENS: Int = 8_000
+    // api_batch.py reserves 4 KiB in addition to both serialized UTF-8 prompts.
+    const val BRIDGE_PROMPT_BYTES: Int = 90_000 - 4096
 }
 
 data class DrillOptionDraft(
@@ -854,8 +860,12 @@ class ExamPointDrillPipeline(
                 ExamPointDrillLimits.MIN_CHOICES, essayWanted, emptyMap(), 0, 0, emptyReason, "", "",
             ).toJson()
         }
-        val kept = selectEvidence(topicTitle, prepared)
         val system = generatorSystem(essayWanted)
+        // Generation, rewrites and blind checks share the same evidence. Allow room for the
+        // generated paper on the check, as well as the topic and instructions on each request.
+        val overhead = (system + sourcePrompt(topicTitle, emptyList(), essayWanted)).toByteArray().size
+        val evidenceBytes = ExamPointDrillLimits.BRIDGE_PROMPT_BYTES - overhead - 4 * ExamPointDrillLimits.MAX_TOKENS
+        val kept = selectEvidence(topicId, topicTitle, prepared, evidenceBytes)
         val prompt = sourcePrompt(topicTitle, kept, essayWanted)
         // Durable batches cache their result by key, even after a prompt or exam format changes.
         val scope = sha256("$system\u0000$prompt".toByteArray(Charsets.UTF_8))
@@ -1062,10 +1072,10 @@ class ExamPointDrillPipeline(
     private fun generatorSystem(essayWanted: Boolean) = """
         你在为备考写教学题。题干考理解，不考原句复述，不得连续摘抄材料里 8 个英文词或 12 个汉字。
         语言要求：所有题干（stem）、选项（text）、理由（reason）以及论述提纲（thesis、claim）一律使用简体中文书写；专业术语、缩写和公式可在中文句子中保留英文原词；原句引用（citation.quote）必须保持材料原文语言逐字摘抄，不得翻译。
-        用中文写 5 道围绕 topicTitle 的单选题，各题从机制、边界、概念区分或情境应用等不同角度提问。材料只够支撑较少题目时可少写，确实无依据时返回 {"choices":[],"essay":null}。不要考同页无关概念、重复考同一定义或凑数。
+        每题直接考查 topicTitle 本身，最多 ${ExamPointDrillLimits.MAX_CHOICES} 道。只写材料确实能支撑的不同角度，如机制、适用边界或情境应用。材料不足宁可少写，能支撑一道就只写一道，没有依据就返回空数组 "choices":[]。严禁用同页其他概念或重复的定义凑数。
         严禁出「哪一节/哪一章/第几页讲 X」这类目录定位题；严禁把章末习题、判断题（True/False/Unclear）的待判陈述或分析题题设当作教材结论出处。
         每题恰好 4 个选项，字母固定为 A、B、C、D，恰好一个 correct 为 true。
-        每个选项都写一句有据可查的对错理由 reason。citation 填 bookId、page、quote，连续抄录直接支持理由的原文子句，保留原文语言。字符位置由服务端核准。
+        每个选项（包括三个错项）都要说明对错理由 reason。citation 填 bookId、page、quote。quote 须逐字摘录能直接支持该理由的完整连续原句或子句。只摘一两个词或凭空添加判断的题不要写。字符位置由服务端核准。
         材料里有 CORE_TEXTBOOK 时，引用只能来自教材，不能引用课件或讲义。
         不要使用往年题，不要输出材料里没有的页码。
         ${if (essayWanted) "另外写一份论述提纲：thesis，2 到 6 个 paragraphs，每段 claim 紧扣当前考点并挂一处完整教材原句。论点用自己的话，不要照抄原文。" else "不要写论述提纲，essay 设为 null。"}
@@ -1096,25 +1106,59 @@ class ExamPointDrillPipeline(
         put("materials", materialsJson(blocks))
     }.toString()
 
-    // The bridge counts serialized UTF-8 bytes for both the Haiku batch and the GPT check.
-    // Leave room within its 90 kB bound for instructions, the blind paper and the reservation.
-    private fun selectEvidence(topic: String, blocks: List<CourseMaterialTextBlock>): List<CourseMaterialTextBlock> {
-        var remaining = 32_000
-        val matches = Regex(Regex.escape(topic), RegexOption.IGNORE_CASE)
-        val ranked = blocks.sortedWith(compareBy<CourseMaterialTextBlock> { it.role != "CORE_TEXTBOOK" }
-            .thenByDescending { matches.findAll(it.text).take(10).count() })
-        return buildList {
-            for (block in ranked) {
-                val hit = block.text.indexOf(topic, ignoreCase = true)
-                val start = (hit - 600).coerceIn(0, (block.text.length - 3200).coerceAtLeast(0))
-                val excerpt = block.copy(startUtf16 = block.startUtf16 + start, text = block.text.drop(start).take(3200))
-                val bytes = materialJson(excerpt).toString().toByteArray(Charsets.UTF_8).size + 1
-                if (bytes <= remaining) {
-                    add(excerpt)
-                    remaining -= bytes
-                }
+    private fun selectEvidence(
+        topicId: String, topic: String, prepared: List<CourseMaterialTextBlock>, budget: Int,
+    ): List<CourseMaterialTextBlock> {
+        val term = Regex(Regex.escape(topic), RegexOption.IGNORE_CASE)
+        val blocks = prepared.sortedWith(compareBy<CourseMaterialTextBlock> { it.role != "CORE_TEXTBOOK" }
+            .thenByDescending { term.findAll(it.text).take(10).count() })
+        fun fits(rows: List<CourseMaterialTextBlock>) = materialsJson(rows).toString().toByteArray().size <= budget
+        if (fits(blocks)) return blocks
+
+        // Rotate among matching passages (or across the page if there is no literal match).
+        // A point always gets the same window on retry, including after a service restart.
+        val anchors = blocks.map { block ->
+            val random = Random(topicId.hashCode() xor block.blockId.hashCode())
+            val hits = term.findAll(block.text).map { it.range.first }.toList()
+            if (hits.isEmpty()) random.nextInt(block.text.length) else hits.random(random) + topic.length / 2
+        }
+        fun windows(width: Int, alignSentences: Boolean = false) = blocks.mapIndexed { index, block ->
+            evidenceWindow(block, anchors[index], width, alignSentences)
+        }
+
+        // Grow all pages together. Short pages are already whole, leaving room for longer ones.
+        var low = 0
+        var high = blocks.maxOf { it.text.length }
+        while (low < high) {
+            val width = (low + high + 1) / 2
+            if (fits(windows(width))) low = width else high = width - 1
+        }
+        if (low < 2) throw MockError(HttpStatusCode.PayloadTooLarge, "单次请求的材料过多，请缩小考点范围。")
+        return windows(low, alignSentences = true)
+    }
+
+    private fun evidenceWindow(
+        block: CourseMaterialTextBlock, anchor: Int, width: Int, alignSentences: Boolean,
+    ): CourseMaterialTextBlock {
+        val text = block.text
+        if (text.length <= width) return block
+        var start = (anchor - width / 2).coerceIn(0, text.length - width)
+        var end = start + width
+        if (text[start].isLowSurrogate()) start++
+        if (text[end - 1].isHighSurrogate()) end--
+        if (alignSentences) {
+            val sentences = BreakIterator.getSentenceInstance(Locale.ROOT)
+            sentences.setText(text)
+            if (!sentences.isBoundary(start)) {
+                val next = sentences.following(start)
+                if (next <= anchor) start = next
+            }
+            if (!sentences.isBoundary(end)) {
+                val previous = sentences.preceding(end)
+                if (previous > anchor) end = previous
             }
         }
+        return block.copy(startUtf16 = block.startUtf16 + start, text = text.substring(start, end))
     }
 
     private fun materialJson(block: CourseMaterialTextBlock) = buildJsonObject {

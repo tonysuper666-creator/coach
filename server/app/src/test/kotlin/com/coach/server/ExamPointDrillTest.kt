@@ -284,6 +284,84 @@ class ExamPointDrillTest {
     }
 
     @Test
+    fun thinEvidenceProducesOneSupportedQuestionWithoutAQuotaRetry() = runBlocking {
+        val keys = listOf("c1" to "A")
+        val gen = script(haiku) { choicesJson(keys) }
+        val check = script(gpt) { votes(keys) }
+        val body = ExamPointDrillPipeline(gen, check).generate(input(choiceOnly = true))
+
+        val instructions = gen.systems.single()
+        assertTrue(instructions.contains("最多 5 道"))
+        assertTrue(instructions.contains("宁可少写"))
+        assertTrue(instructions.contains("完整连续原句或子句"))
+        assertEquals(1, body.arr("choices").size)
+        assertEquals(1, body.int("agreed"))
+        assertEquals(quote, option(body, 0, 0).obj("citation").str("quote"))
+        assertEquals(2, body.int("missingChoices"))
+    }
+
+    @Test
+    fun pagesThatFitTravelWholeEvenBeyondTheOldCutoffs() = runBlocking {
+        val pages = (141..150).associateWith { page ->
+            "Synthetic explanation for page $page. ".repeat(115) + "End of page $page."
+        }
+        val blocks = buildJsonArray {
+            pages.forEach { (page, text) -> add(block("tb", "CORE_TEXTBOOK", text, "Textbook", page)) }
+            add(block("slides", "LECTURE_SLIDES", "Review the model assumptions.", "Slides"))
+        }
+        val gen = script(haiku) { """{"choices":[],"essay":null}""" }
+        ExamPointDrillPipeline(gen, script(gpt) { error("no questions") }).generate(input(true, blocks))
+        val sent = Json.parseToJsonElement(gen.prompts.single()).jsonObject.arr("materials")
+        assertEquals(pages, sent.map { it.jsonObject }.filter { it.str("bookId") == "tb" }
+            .associate { it.int("page") to it.str("text") })
+    }
+
+    @Test
+    fun overBudgetMaterialsKeepEveryPageAndRotatePassagesAcrossPoints() = runBlocking {
+        val repeated = "Supply links costs to the response in this example."
+        val pages = (131..150).associateWith { page ->
+            val detail = if (page == 150) "This passage explains the cost model." else repeated
+            (1..70).joinToString(" ") { i -> "合成第${page}页第${i}组，注明 \"条件\" 🧪。$detail" } +
+                if (page == 150) " $quote" else ""
+        }
+        val blocks = buildJsonArray {
+            pages.forEach { (page, text) -> add(block("tb", "CORE_TEXTBOOK", text, "Textbook", page)) }
+            add(block("slides", "LECTURE_SLIDES", "A contextual reminder.", "Slides"))
+        }
+        suspend fun materials(point: String): JsonArray {
+            // The only support for these options is at the very end of the last textbook page.
+            val keys = listOf("c1" to "A")
+            val gen = script(haiku) { choicesJson(keys, page = 150) }
+            val check = script(gpt) { votes(keys, page = 150) }
+            val request = buildJsonObject {
+                input(true, blocks).forEach { (key, value) -> put(key, value) }
+                put("topicId", point)
+            }
+            val body = ExamPointDrillPipeline(gen, check).generate(request)
+            assertEquals(1, body.int("agreed"))
+            val citation = option(body, 0, 0).obj("citation")
+            assertEquals(150, citation.int("page"))
+            assertEquals(quote, pages.getValue(150).substring(citation.int("startUtf16"), citation.int("endUtf16")))
+            val seen = listOf(gen, check).map { transport ->
+                val prompt = transport.prompts.single()
+                assertTrue((transport.systems.single() + prompt).toByteArray().size + 4096 <= 90_000)
+                Json.parseToJsonElement(prompt).jsonObject.arr("materials")
+            }
+            assertEquals(seen.first(), seen.last())
+            val textbookRows = seen.first().map { it.jsonObject }.filter { it.str("bookId") == "tb" }
+            assertEquals(pages.keys, textbookRows.map { it.int("page") }.toSet())
+            textbookRows.forEach { row ->
+                assertTrue(row.str("text").contains(if (row.int("page") == 150) quote else repeated))
+                assertTrue(row.str("text") in pages.getValue(row.int("page")))
+            }
+            return seen.first()
+        }
+        val first = materials("point-one")
+        assertEquals(first, materials("point-one"))
+        assertFalse(first == materials("point-two"))
+    }
+
+    @Test
     fun fencedJsonStillParses() = runBlocking {
         val gen = script(haiku) { "```json\n${choicesJson(listOf("c1" to "A", "c2" to "B", "c3" to "C"))}\n```" }
         val check = script(gpt) { votes(listOf("c1" to "A", "c2" to "B", "c3" to "C")) }
@@ -677,9 +755,9 @@ class ExamPointDrillTest {
         put("text", text)
     }
 
-    private fun cite(bookId: String, quote: String) = buildJsonObject {
+    private fun cite(bookId: String, quote: String, page: Int = 1) = buildJsonObject {
         put("bookId", bookId)
-        put("page", 1)
+        put("page", page)
         put("quote", quote)
     }
 
@@ -688,6 +766,7 @@ class ExamPointDrillTest {
         quote: String = this.quote,
         bookId: String = "tb",
         stem: String = "Why does a lower input cost move the supply curve?",
+        page: Int = 1,
     ) = buildJsonObject {
         put("choices", buildJsonArray {
             for ((id, correct) in keys) {
@@ -701,7 +780,7 @@ class ExamPointDrillTest {
                                 put("text", "option $letter for $id")
                                 put("correct", letter == correct)
                                 put("reason", "REASON_SENTINEL $letter")
-                                put("citation", cite(bookId, quote))
+                                put("citation", cite(bookId, quote, page))
                             })
                         }
                     })
@@ -736,13 +815,14 @@ class ExamPointDrillTest {
         bookId: String = "tb",
         essaySupported: List<Boolean>? = null,
         quote: String = this.quote,
+        page: Int = 1,
     ) = buildJsonObject {
         put("answers", buildJsonArray {
             for ((id, letter) in letters) {
                 add(buildJsonObject {
                     put("id", id)
                     put("letter", letter)
-                    put("support", cite(bookId, quote))
+                    put("support", cite(bookId, quote, page))
                 })
             }
         })

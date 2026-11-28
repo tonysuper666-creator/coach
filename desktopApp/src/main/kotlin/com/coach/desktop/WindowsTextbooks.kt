@@ -72,6 +72,26 @@ internal fun windowsThemeOverride(value: String?): Boolean? = when {
 }
 
 /**
+ * 「异常退出后询问是否发送问题记录」。默认开；顶栏徽标里的「不再提示」和设置里的开关改的是同一个标记。
+ * 关掉只是不再问，问题记录本身留在本机。
+ */
+@Stable
+internal class ReportOffersState(private val clientDirectory: Path) {
+    var enabled by mutableStateOf(!Files.exists(marker(clientDirectory)))
+        private set
+
+    fun set(enabled: Boolean) {
+        Files.createDirectories(clientDirectory)
+        if (enabled) Files.deleteIfExists(marker(clientDirectory)) else Files.writeString(marker(clientDirectory), "")
+        this.enabled = enabled
+    }
+
+    private companion object {
+        fun marker(directory: Path): Path = directory.resolve("disable-report-offers")
+    }
+}
+
+/**
  * Startup login gate for the Windows textbook app (TON-1782):
  * - First launch or missing identity shows the full-screen login page (Sable primary, pairing code tucked below).
  * - Existing identity enters the bookshelf/last reading spot immediately without waiting on network, so offline use is never blocked.
@@ -83,6 +103,7 @@ internal fun WindowsTextbookGate(
     sableIssuer: String = com.coach.client.SABLE_ORIGIN,
     darkTheme: Boolean = windowsThemeOverride(System.getProperty("coach.windows.theme")) ?: isSystemInDarkTheme(),
     offerReports: Boolean = true,
+    onDisableOffers: () -> Unit = {},
     content: @Composable (DesktopIdentity) -> Unit,
 ) {
     val pairing = remember(settings) { DesktopPairing(settings) }
@@ -131,7 +152,6 @@ internal fun WindowsTextbookGate(
     }
 
     val paired = identity
-    var hostManagesPrompt by remember { mutableStateOf(false) }
     val currentPaired by rememberUpdatedState(paired)
     val reportsEnabled by rememberUpdatedState(offerReports)
     val currentDarkTheme by rememberUpdatedState(darkTheme)
@@ -141,12 +161,11 @@ internal fun WindowsTextbookGate(
     }
     val promptHost = remember {
         IncidentPromptHost(
-            onHostMounted = { hostManagesPrompt = it },
             prompt = {
                 if (reportsEnabled) IncidentExitPrompt(
                     identity = currentPaired,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     darkTheme = currentDarkTheme,
+                    onNeverShow = onDisableOffers,
                     state = promptState,
                 )
             },
@@ -220,9 +239,6 @@ internal fun WindowsTextbookGate(
             }
         }
     }
-    if (offerReports && initialized && (paired == null || !hostManagesPrompt)) {
-        IncidentExitPrompt(paired, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme, state = promptState)
-    }
     }
 }
 
@@ -252,9 +268,14 @@ internal fun runWindowsTextbooks() {
                 ),
             ) {
             WindowsReadingMinimum(window)
-            val reportPreference = remember { settings.clientDirectory.resolve("disable-report-offers") }
-            var offerReports by remember { mutableStateOf(!Files.exists(reportPreference)) }
-            WindowsTextbookGate(settings, offerReports = offerReports) { identity ->
+            val reportOffers = remember(settings.clientDirectory) { ReportOffersState(settings.clientDirectory) }
+            val offerReports = reportOffers.enabled
+            val setReportOffers: (Boolean) -> Unit = reportOffers::set
+            WindowsTextbookGate(
+                settings,
+                offerReports = offerReports,
+                onDisableOffers = { setReportOffers(false) },
+            ) { identity ->
                 val profiles = remember(directory) { LearningProfiles(directory) }
                 val profile = if (LearningJournal.enabled || profiles.hasProfiles) {
                     val selected by produceState<LearningProfile?>(null,identity) {
@@ -308,12 +329,7 @@ internal fun runWindowsTextbooks() {
                             DataSection(profile, sync, updateResult, onCheck = {
                                 updateResult = "正在检查更新…"
                                 updateRequest++
-                            }, offerReports = offerReports, onReports = { enabled ->
-                                Files.createDirectories(settings.clientDirectory)
-                                if (enabled) Files.deleteIfExists(reportPreference)
-                                else Files.writeString(reportPreference, "")
-                                offerReports = enabled
-                            })
+                            }, offerReports = offerReports, onReports = setReportOffers)
                             updates.ready?.let { release ->
                                 TextButton(updates::install, enabled = !updates.busy && !updates.rollbackBusy) {
                                     Text("立即更新到 ${release.version}")

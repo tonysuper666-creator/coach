@@ -13,11 +13,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import coach.design.tokens.CoachV7
 import com.coach.desktop.books.BookExplainer
 import com.coach.desktop.books.BookSearchResult
@@ -84,16 +90,20 @@ internal fun CreateCollectionDialog(
     onPickFiles: suspend () -> List<Path>,
     onConfirm: (title: String, examDate: String?, existingBookIds: List<String>, newFiles: List<Path>) -> Unit,
     onClose: () -> Unit,
+    initialSelectedBookIds: List<String> = emptyList(),
 ) {
     val colors = CoachTheme.colors
     val scope = rememberCoroutineScope()
     val isCourse = kind == CollectionKind.COURSE
     var title by remember(kind) { mutableStateOf("") }
     var examDate by remember(kind) { mutableStateOf("") }
-    val selectedBookIds = remember(kind) { mutableStateListOf<String>() }
+    val selectedBookIds = remember(kind, initialSelectedBookIds) {
+        mutableStateListOf<String>().apply { addAll(initialSelectedBookIds.filter { id -> existingBooks.any { it.id == id } }) }
+    }
     val stagedFiles = remember(kind) { mutableStateListOf<Path>() }
     val totalSelected = selectedBookIds.size + stagedFiles.size
-    val canConfirm = title.isNotBlank() && (isCourse || totalSelected >= 2)
+    // A booklist may start empty or with a single book; books can be added later.
+    val canConfirm = title.isNotBlank()
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
 
     fun addFiles(paths: List<Path>) {
@@ -145,7 +155,7 @@ internal fun CreateCollectionDialog(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            if (isCourse) "添加本地材料（支持多选或拖入）" else "选入本地书籍（至少 2 本）",
+                            if (isCourse) "添加本地材料（支持多选或拖入）" else "选入本地书籍（可先空着）",
                             style = MaterialTheme.typography.labelMedium,
                             color = colors.fgSecondary,
                             modifier = Modifier.weight(1f),
@@ -212,7 +222,12 @@ internal fun CreateCollectionDialog(
                     }
                 }
                 if (!isCourse && totalSelected < 2) {
-                    Text("至少选入 2 本书即可串起共同主题。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                    Text(
+                        "一本也能建；空书单也行，之后可以继续往里面加书。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag("collection-booklist-hint"),
+                    )
                 }
             }
         },
@@ -337,8 +352,17 @@ internal fun HostSearchDialog(
     }
 
     AlertDialog(
-        modifier = Modifier.testTag("host-search-dialog"),
+        modifier = Modifier
+            .testTag("host-search-dialog")
+            // Esc closes the search box. It stays a modal because the user opened it on purpose.
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onClose()
+                    true
+                } else false
+            },
         onDismissRequest = onClose,
+        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true),
         title = { Text("搜索与跨材料提问") },
         text = {
             Column(

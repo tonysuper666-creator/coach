@@ -90,21 +90,31 @@ internal fun BookImportProgressBar(
 }
 
 @Composable
-internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Unit, modifier: Modifier = Modifier) {
+internal fun BookImportToast(
+    notice: BookImportNotice?,
+    onDismiss: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+    onMergeIntoCourse: ((List<String>) -> Unit)? = null,
+    onBuildBooklist: ((List<String>) -> Unit)? = null,
+) {
     if (notice == null) return
+    val bookIds = notice.bookIds
+    val hasActions = bookIds.size >= 2 && (onMergeIntoCourse != null || onBuildBooklist != null)
     LaunchedEffect(notice.id) {
-        kotlinx.coroutines.delay(4_000)
+        // 带按钮的提示条要留够点击时间，其余照旧很快消失。
+        kotlinx.coroutines.delay(if (hasActions) 12_000 else 4_000)
         onDismiss(notice.id)
     }
     val colors = CoachTheme.colors
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
-    Box(
+    Column(
         modifier
             .paperShadow("card", colors.dark)
             .clip(shape)
             .background(colors.fgPrimary)
             .padding(horizontal = 14.dp, vertical = 8.dp)
             .testTag("book-import-toast"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -127,6 +137,24 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
                     .padding(horizontal = 4.dp, vertical = 2.dp)
                     .testTag("book-import-toast-close"),
             )
+        }
+        if (hasActions) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                onMergeIntoCourse?.let { merge ->
+                    V7TextButton(
+                        onClick = { merge(bookIds) },
+                        modifier = Modifier.testTag("import-toast-course"),
+                        ringInside = true,
+                    ) { Text("合并成课程", style = MaterialTheme.typography.bodySmall, color = colors.surface1) }
+                }
+                onBuildBooklist?.let { build ->
+                    V7TextButton(
+                        onClick = { build(bookIds) },
+                        modifier = Modifier.testTag("import-toast-booklist"),
+                        ringInside = true,
+                    ) { Text("建成书单", style = MaterialTheme.typography.bodySmall, color = colors.surface1) }
+                }
+            }
         }
     }
 }
@@ -153,8 +181,6 @@ internal fun LibraryHome(
     onNewCourse: () -> Unit = {},
     onNewBooklist: () -> Unit = {},
     onOpenCollection: (CollectionSummary) -> Unit = {},
-    onMultiDropAction: (MultiDropAction) -> Unit = {},
-    onDismissMultiDrop: () -> Unit = {},
     onRetryUpload: (String) -> Unit = {},
     library: TextbookLibrary? = null,
     firstOpenGuide: Boolean = false,
@@ -366,9 +392,10 @@ internal fun LibraryHome(
                                 }
                                 StudyModeSelectorButton(
                                     preference = focusPref,
-                                    onUpdatePreference = { next, modeChanged ->
+                                    onUpdatePreference = { next, _ ->
+                                        // Switching 学法 only saves the preference and repaints the card.
+                                        // Entering the reader stays behind 「继续」.
                                         focusPref = if (library != null) StudyModeStore.save(library, next) else next
-                                        if (modeChanged && !ui.busy) onRead()
                                     },
                                     compact = true,
                                     tag = "home-mode-trigger",
@@ -419,9 +446,8 @@ internal fun LibraryHome(
                                 }
                                 StudyModeSelectorButton(
                                     preference = summaryPref,
-                                    onUpdatePreference = { next, modeChanged ->
+                                    onUpdatePreference = { next, _ ->
                                         summaryPref = if (library != null) StudyModeStore.save(library, next) else next
-                                        if (modeChanged && !ui.busy) onOpenBook(focusSummary.id)
                                     },
                                     compact = true,
                                     tag = "home-mode-trigger",
@@ -638,7 +664,7 @@ internal fun LibraryHome(
                     } else {
                         Column(
                             Modifier.fillMaxWidth().verticalScroll(scroll)
-                                .padding(bottom = if (ui.pendingMultiDrop != null) 76.dp else 16.dp)
+                                .padding(bottom = 16.dp)
                                 .testTag("home-daily-hub"),
                             verticalArrangement = Arrangement.spacedBy(sectionSpacing),
                         ) {
@@ -648,19 +674,6 @@ internal fun LibraryHome(
                         BookScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = CoachV7.Space.s4))
                     }
                 }
-            }
-
-            // 一次拖入多份文件时，底部浮出单行询问条（建课程 / 建书单 / 分开单放）。
-            ui.pendingMultiDrop?.let { drop ->
-                MultiDropInquiryBar(
-                    count = drop.paths.size,
-                    enabled = !ui.busy,
-                    onCourse = { onMultiDropAction(MultiDropAction.COURSE) },
-                    onBooklist = { onMultiDropAction(MultiDropAction.BOOKLIST) },
-                    onSeparate = { onMultiDropAction(MultiDropAction.SEPARATE) },
-                    onDismiss = onDismissMultiDrop,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
-                )
             }
         }
     }
@@ -866,53 +879,6 @@ private fun CloudShelfBookCard(
                 "${book.format.uppercase()} · $statusText",
                 modifier = Modifier.testTag("cloud-book-status-${book.shelfBookId}"),
             )
-        }
-    }
-}
-
-@Composable
-internal fun MultiDropInquiryBar(
-    count: Int,
-    enabled: Boolean,
-    onCourse: () -> Unit,
-    onBooklist: () -> Unit,
-    onSeparate: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val colors = CoachTheme.colors
-    val shape = RoundedCornerShape(CoachV7.Radius.m)
-    Row(
-        modifier
-            .fillMaxWidth()
-            .paperShadow("sheet", colors.dark)
-            .clip(shape)
-            .background(colors.surface2)
-            .border(1.dp, colors.borderSubtle, shape)
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-            .testTag("multi-drop-bar"),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "要把这 $count 份文件建成课程，还是建成书单。",
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.fgPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        PrimaryButton(onClick = onCourse, enabled = enabled, modifier = Modifier.testTag("multi-drop-course")) {
-            Text("建课程")
-        }
-        PaperButton(onClick = onBooklist, enabled = enabled, modifier = Modifier.testTag("multi-drop-booklist")) {
-            Text("建书单")
-        }
-        PaperButton(onClick = onSeparate, enabled = enabled, modifier = Modifier.testTag("multi-drop-separate")) {
-            Text("分开单放")
-        }
-        V7TextButton(onClick = onDismiss, enabled = enabled, modifier = Modifier.testTag("multi-drop-cancel"), ringInside = true) {
-            Text("取消")
         }
     }
 }

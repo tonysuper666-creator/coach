@@ -1,20 +1,24 @@
 package com.coach.desktop.incident
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -106,6 +110,7 @@ internal fun IncidentExitPrompt(
     identity: DesktopIdentity?,
     modifier: Modifier = Modifier,
     darkTheme: Boolean = isSystemInDarkTheme(),
+    onNeverShow: () -> Unit = {},
     state: IncidentPromptState = run {
         val scope = rememberCoroutineScope()
         remember { IncidentPromptState(scope) }
@@ -117,45 +122,82 @@ internal fun IncidentExitPrompt(
     val offer = state.pending ?: return
     val sending = state.sending
     val notice = state.notice
+    var actionsOpen by remember { mutableStateOf(false) }
+    // 发出去了就把菜单收起，让阅读区恢复可点；发失败再把菜单打开，说清为什么没发出去。
+    LaunchedEffect(notice) { if (notice != null) actionsOpen = true }
     CoachTheme(darkTheme) {
     val colors = CoachTheme.colors
-    Surface(modifier.testTag("incident-exit-prompt"), color = colors.surface1, shadowElevation = 2.dp) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "上次异常退出，要把记录发给开发者吗？",
-                    color = colors.fgPrimary,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                TextButton({ state.preview = true }, Modifier.testTag("incident-view")) { Text("查看", maxLines = 1, softWrap = false) }
-                TextButton(
-                    { state.send(identity) },
-                    Modifier.testTag("incident-send"),
-                    enabled = !sending,
-                ) { Text(if (sending) "正在发送" else "发送", maxLines = 1, softWrap = false) }
-                TextButton(
-                    { state.decline() },
-                    Modifier.testTag("incident-decline"),
-                    enabled = !sending,
-                ) { Text("不发", maxLines = 1, softWrap = false) }
-            }
-            notice?.let { Text(it, color = colors.fgSecondary, modifier = Modifier.testTag("incident-notice")) }
+    // 顶栏角落的小徽标：不占一整行、不盖阅读区。点开才有 查看 / 发送 / 不发。
+    Box {
+        Surface(
+            onClick = { actionsOpen = true },
+            modifier = modifier.testTag("incident-exit-prompt"),
+            shape = RoundedCornerShape(percent = 50),
+            color = colors.surface1,
+            contentColor = colors.fgSecondary,
+            border = BorderStroke(1.dp, colors.borderSubtle),
+        ) {
+            Text(
+                "上次异常退出",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp).testTag("incident-badge-label"),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                softWrap = false,
+            )
         }
-    }
-    if (state.preview) {
-        AlertDialog(
-            onDismissRequest = { state.preview = false },
-            title = { Text("要发送的记录") },
-            text = {
-                SelectionContainer {
-                    Text(
-                        offer.text,
-                        modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).testTag("incident-preview"),
-                    )
-                }
-            },
-            confirmButton = { TextButton({ state.preview = false }, Modifier.testTag("incident-preview-close")) { Text("关闭") } },
-        )
+        DropdownMenu(
+            expanded = actionsOpen,
+            onDismissRequest = { actionsOpen = false },
+            modifier = Modifier.testTag("incident-actions"),
+        ) {
+            DropdownMenuItem(
+                text = { Text("查看") },
+                onClick = { actionsOpen = false; state.preview = true },
+                modifier = Modifier.testTag("incident-view"),
+            )
+            DropdownMenuItem(
+                text = { Text(if (sending) "正在发送" else "发送") },
+                enabled = !sending,
+                onClick = {
+                    // 已登录时立刻收起菜单；没登录就留着菜单，让「登录后才能发送」看得见。
+                    if (identity != null) actionsOpen = false
+                    state.send(identity)
+                },
+                modifier = Modifier.testTag("incident-send"),
+            )
+            DropdownMenuItem(
+                text = { Text("不发") },
+                enabled = !sending,
+                onClick = { actionsOpen = false; state.decline() },
+                modifier = Modifier.testTag("incident-decline"),
+            )
+            DropdownMenuItem(
+                text = { Text("不再提示") },
+                onClick = { actionsOpen = false; onNeverShow() },
+                modifier = Modifier.testTag("incident-never-ask"),
+            )
+            notice?.let { message ->
+                DropdownMenuItem(
+                    text = { Text(message, modifier = Modifier.testTag("incident-notice")) },
+                    onClick = { actionsOpen = false },
+                )
+            }
+        }
+        if (state.preview) {
+            AlertDialog(
+                onDismissRequest = { state.preview = false },
+                title = { Text("要发送的记录") },
+                text = {
+                    SelectionContainer {
+                        Text(
+                            offer.text,
+                            modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).testTag("incident-preview"),
+                        )
+                    }
+                },
+                confirmButton = { TextButton({ state.preview = false }, Modifier.testTag("incident-preview-close")) { Text("关闭") } },
+            )
+        }
     }
     }
 }

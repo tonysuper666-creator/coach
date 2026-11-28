@@ -220,7 +220,7 @@ class ShelfTrustFixTest {
         }
     }
 
-    @Test fun switchingFocusBookViaSeparateMultiDropDoesNotLeakPreviousBooksQuestion() {
+    @Test fun multiDroppedBooksImportDirectlyWithoutLeakingPreviousBooksQuestion() {
         val root = Files.createTempDirectory("coach-ton1822-switch-")
         try {
             val bookAFile = root.resolve("book-alpha.md").also {
@@ -252,12 +252,10 @@ class ShelfTrustFixTest {
                 // Initially focus is bookA with its asked question.
                 assertAsk("这个例子说明什么？", "上次问：这个例子说明什么？")
 
-                // Multi-drop two new books and choose "分开单放".
+                // Multi-drop two new books: each imports straight away, no inquiry bar first.
                 c.launchDroppedBooks(listOf(bookBFile, bookCFile))
-                waitForIdle()
-                onNodeWithTag("multi-drop-separate").performClick()
                 ready(c) { it.catalog.size == 3 && it.book?.id != bookA.id }
-
+                onAllNodesWithTag("multi-drop-bar").assertCountEquals(0)
                 val newBookMeta = nodeText("home-focus-meta")
                 assertFalse("上次问" in newBookMeta, "New focus book must not inherit old book's question: $newBookMeta")
                 assertFalse("这个例子说明什么" in newBookMeta, "Old question leaked onto new book card: $newBookMeta")

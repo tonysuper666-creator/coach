@@ -15,7 +15,12 @@ internal data class BookImportProgress(
     val totalOcr: Int = 0,
     val estimatedRemainingSeconds: Long? = null,
 )
-internal data class BookImportNotice(val id: Long, val message: String)
+internal data class BookImportNotice(
+    val id: Long,
+    val message: String,
+    /** Books this notice just imported; more than one lets the toast offer 合并成课程 / 建成书单. */
+    val bookIds: List<String> = emptyList(),
+)
 internal class BookImportCancelled : CancellationException()
 
 /** Cancellation is independent of the controller's action mutex and SQLite lock. */

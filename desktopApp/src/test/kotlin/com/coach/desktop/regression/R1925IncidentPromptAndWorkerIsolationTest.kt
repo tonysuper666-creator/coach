@@ -126,7 +126,7 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                     }
                 }
 
-                // 1. On Home: IncidentExitPrompt is visible, usable, and does not overlap HostTopBar or Home CTA.
+                // 1. On Home: 顶栏角落的小徽标在，点开才有查看/发送/不发，且不压顶栏、不盖首页主按钮。
                 waitUntil(timeoutMillis = 15_000) {
                     !controller.state.value.busy &&
                         controller.state.value.screen == BookScreen.HOME &&
@@ -134,21 +134,33 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                         onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("incident-exit-prompt").assertIsDisplayed()
+
+                val hostBarBounds = onNodeWithTag("host-bar").fetchSemanticsNode().boundsInRoot
+                val badgeBounds = onNodeWithTag("incident-exit-prompt").fetchSemanticsNode().boundsInRoot
+                val homeReadBounds = onNodeWithTag("home-read").fetchSemanticsNode().boundsInRoot
+                assertTrue(
+                    badgeBounds.top >= hostBarBounds.top - 1f && badgeBounds.bottom <= hostBarBounds.bottom + 1f,
+                    "Badge must sit inside HostTopBar: badge=$badgeBounds hostBar=$hostBarBounds",
+                )
+                assertTrue(
+                    badgeBounds.height < hostBarBounds.height,
+                    "Badge must be smaller than the bar height: badge=$badgeBounds hostBar=$hostBarBounds",
+                )
+                assertTrue(
+                    badgeBounds.bottom <= homeReadBounds.top + 1f || badgeBounds.top >= homeReadBounds.bottom - 1f,
+                    "Badge overlapped home-read button: badge=$badgeBounds homeRead=$homeReadBounds",
+                )
+
+                // Actions stay behind the badge, not on the page.
+                assertTrue(onAllNodesWithTag("incident-send").fetchSemanticsNodes().isEmpty())
+                onNodeWithTag("incident-exit-prompt").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
+                }
                 onNodeWithTag("incident-view").assertIsDisplayed()
                 onNodeWithTag("incident-send").assertIsDisplayed()
                 onNodeWithTag("incident-decline").assertIsDisplayed()
-
-                val hostBarBounds = onNodeWithTag("host-bar").fetchSemanticsNode().boundsInRoot
-                val promptBounds = onNodeWithTag("incident-exit-prompt").fetchSemanticsNode().boundsInRoot
-                val homeReadBounds = onNodeWithTag("home-read").fetchSemanticsNode().boundsInRoot
-                assertTrue(
-                    promptBounds.top >= hostBarBounds.bottom - 1f,
-                    "Prompt overlapped HostTopBar: prompt=$promptBounds hostBar=$hostBarBounds",
-                )
-                assertTrue(
-                    promptBounds.bottom <= homeReadBounds.top + 1f || promptBounds.top >= homeReadBounds.bottom - 1f,
-                    "Prompt overlapped home-read button: prompt=$promptBounds homeRead=$homeReadBounds",
-                )
+                onNodeWithTag("incident-never-ask").assertIsDisplayed()
 
                 // Preview dialog works on Home, then closes while keeping the offer pending.
                 onNodeWithTag("incident-view").performClick()
@@ -237,6 +249,10 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                         onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("incident-exit-prompt").assertIsDisplayed()
+                onNodeWithTag("incident-exit-prompt").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("incident-decline").fetchSemanticsNodes().isNotEmpty()
+                }
                 onNodeWithTag("incident-decline").performClick()
                 waitUntil(timeoutMillis = 5_000) {
                     onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isEmpty()
@@ -310,7 +326,11 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                 }
                 waitUntil(timeoutMillis = 15_000) {
                     onAllNodesWithTag("windows-host").fetchSemanticsNodes().isNotEmpty() &&
-                        onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
+                        onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("incident-exit-prompt").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("incident-send").performClick()
                 waitUntil(timeoutMillis = 10_000) {
@@ -397,7 +417,11 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                     !controller.state.value.busy &&
                         controller.state.value.screen == BookScreen.HOME &&
                         onAllNodesWithTag("home-read").fetchSemanticsNodes().isNotEmpty() &&
-                        onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
+                        onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("incident-exit-prompt").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("incident-send").performClick()
                 waitUntil(timeoutMillis = 6_000) { requestSeen.count == 0L }
@@ -428,7 +452,7 @@ class R1925IncidentPromptAndWorkerIsolationTest {
                 }
                 waitForIdle()
                 assertTrue(
-                    onAllNodesWithTag("incident-send").fetchSemanticsNodes().isEmpty(),
+                    onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().isEmpty(),
                     "Completed send must stay resolved after returning to Home",
                 )
             }

@@ -444,8 +444,6 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onNewCourse = onNewCourse,
                             onNewBooklist = onNewBooklist,
                             onOpenCollection = onOpenCollection,
-                            onMultiDropAction = { action -> controller.resolveMultiDrop(action) },
-                            onDismissMultiDrop = controller::dismissMultiDrop,
                             onRetryUpload = { bookId -> controller.retryBookUpload(bookId) },
                             library = controller.library,
                             firstOpenGuide = firstOpenGuide,

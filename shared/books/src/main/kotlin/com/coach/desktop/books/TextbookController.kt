@@ -29,8 +29,6 @@ import java.util.concurrent.atomic.AtomicReference
 
 internal enum class BookScreen { HOME, COURSE, COURSE_MOCK, BOOKLIST, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
-internal enum class MultiDropAction { COURSE, BOOKLIST, SEPARATE }
-internal data class PendingMultiDrop(val paths: List<Path>, val onStaged: () -> Unit = {})
 internal data class BookIndexProgress(val bookId: String, val page: Int, val total: Int)
 internal data class ExamDrillProgress(
     val courseId: String,
@@ -64,8 +62,6 @@ internal data class LibraryUi(
     val indexing: BookIndexProgress? = null,
     /** Path of a PDF that asked for an open password. The password itself is never stored. */
     val passwordPromptPath: String? = null,
-    /** 一次拖入多份文件时，在底部展示单行询问条（建课程 / 建书单 / 分开单放）。 */
-    val pendingMultiDrop: PendingMultiDrop? = null,
     /** 最近一次单文件导入直达正文首页的耗时（毫秒），供性能回归核验（<3000ms）。 */
     val lastImportDurationMs: Long? = null,
     /** 当前书最近落盘的伴读练习草稿（`book_chapter_progress.practice_draft_json`），供首页「继续」精确续接。 */
@@ -297,7 +293,6 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         importNotice = current.importNotice,
                         initialized = true,
                         indexing = current.indexing,
-                        pendingMultiDrop = current.pendingMultiDrop,
                         lastImportDurationMs = current.lastImportDurationMs,
                         activePracticeDraft = snap.activePracticeDraft,
                         focusRecommendation = snap.focusRecommendation,
@@ -340,6 +335,10 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         return queue.copy(cards = cards, lineup = lineup)
     }
 
+    /**
+     * 拖入多份文件时每份先按单本导入，不先拦着问用途；
+     * 导入完成后提示条再给「合并成课程 / 建成书单」两个按需按钮。
+     */
     fun launchDroppedBooks(paths: List<Path>, onStaged: () -> Unit = {}): Job? {
         if (paths.isEmpty()) {
             onStaged()
@@ -348,47 +347,7 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
         if (paths.size == 1) {
             return launchImport(paths.single(), onStaged)
         }
-        val previous = mutable.value.pendingMultiDrop
-        mutable.update { it.copy(error = null, pendingMultiDrop = PendingMultiDrop(paths.toList(), onStaged)) }
-        previous?.onStaged?.invoke()
-        return null
-    }
-
-    fun dismissMultiDrop() {
-        val pending = mutable.value.pendingMultiDrop ?: return
-        mutable.update { it.copy(pendingMultiDrop = null) }
-        pending.onStaged()
-    }
-
-    fun resolveMultiDrop(action: MultiDropAction, customTitle: String? = null, examDate: String? = null): Job {
-        val pending = mutable.value.pendingMultiDrop ?: return Job().apply { complete() }
-        mutable.update { it.copy(pendingMultiDrop = null) }
-        val defaultTitle = customTitle?.trim()?.takeIf(String::isNotEmpty)
-            ?: pending.paths.first().fileName?.toString()?.substringBeforeLast('.')?.takeIf(String::isNotBlank)
-            ?: when (action) {
-                MultiDropAction.COURSE -> "新课程"
-                MultiDropAction.BOOKLIST -> "新书单"
-                MultiDropAction.SEPARATE -> ""
-            }
-        return when (action) {
-            MultiDropAction.COURSE -> createCollection(
-                kind = CollectionKind.COURSE,
-                title = defaultTitle,
-                examDate = examDate,
-                existingBookIds = emptyList(),
-                newFiles = pending.paths,
-                onStaged = pending.onStaged,
-            )
-            MultiDropAction.BOOKLIST -> createCollection(
-                kind = CollectionKind.BOOKLIST,
-                title = defaultTitle,
-                examDate = null,
-                existingBookIds = emptyList(),
-                newFiles = pending.paths,
-                onStaged = pending.onStaged,
-            )
-            MultiDropAction.SEPARATE -> importMultipleStandalone(pending.paths, pending.onStaged)
-        }
+        return importMultipleStandalone(paths, onStaged)
     }
 
     private fun importMultipleStandalone(paths: List<Path>, onStaged: () -> Unit = {}): Job = backgroundScope.launch {
@@ -397,11 +356,13 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                 ?: runCatching { uploadCoordinator.resolveInitiatingAccountKey() }.getOrNull()
             action {
                 var lastBook: Textbook? = null
+                val importedIds = mutableListOf<String>()
                 for (path in paths) {
                     val useTier0 = library.lazyPdfExtras && path.fileName?.toString().orEmpty().endsWith(".pdf", ignoreCase = true)
                     val staged = if (useTier0) library.stageBookImportTier0(path) else library.stageBookImport(path)
                     persistImportOwnerIfNew(staged, initiatingAccountKey)
                     enqueueBookForUnifiedUpload(staged.book, initiatingAccountKey)
+                    importedIds += staged.book.id
                     lastBook = staged.book
                 }
                 val catalog = library.catalog()
@@ -426,7 +387,11 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                         activePracticeDraft = draft,
                         focusRecommendation = focusRec,
                         lastBookQuestion = lastQ,
-                        importNotice = BookImportNotice(System.nanoTime(), "已分开导入 ${paths.size} 份文件。"),
+                        importNotice = BookImportNotice(
+                            System.nanoTime(),
+                            "已导入 ${paths.size} 份文件，每份各自成一本书。",
+                            bookIds = importedIds.toList(),
+                        ),
                     )
                 }
             }
@@ -1275,7 +1240,6 @@ internal class TextbookController(val library: TextbookLibrary, var structurePro
                     learningPath = restoredPath(book), learningPathSaved = pathSaved,
                     ladder = ladder, importing = current.importing, importNotice = current.importNotice,
                     initialized = true, indexing = current.indexing,
-                    pendingMultiDrop = current.pendingMultiDrop,
                     lastImportDurationMs = current.lastImportDurationMs,
                     activePracticeDraft = draft,
                     focusRecommendation = focusRec,

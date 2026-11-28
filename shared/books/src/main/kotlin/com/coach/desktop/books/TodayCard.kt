@@ -62,9 +62,9 @@ internal fun TodayCard(
                     var pref by remember(library, focus.id) {
                         mutableStateOf(StudyModeStore.loadOrResolve(library, focus.id, focus.title, focus.pageCount))
                     }
-                    StudyModeSelectorButton(pref, onUpdatePreference = { next, changed ->
+                    StudyModeSelectorButton(pref, onUpdatePreference = { next, _ ->
+                        // Only the preference changes here; the reader opens from 「继续」.
                         pref = StudyModeStore.save(library, next)
-                        if (changed && !ui.busy) onRead(focus.id)
                     }, compact = true, tag = "home-mode-trigger")
                 }
                 PrimaryButton({ onRead(focus.id) }, enabled = !ui.busy, modifier = Modifier.testTag("home-read")) {
@@ -95,12 +95,30 @@ internal fun TodayCard(
 private fun ExamDayBlock(board: ExamDayBoard, busy: Boolean, onBudget: ((Int) -> Unit)?) {
     val colors = CoachTheme.colors
     val today = board.today
+    var expanded by remember { mutableStateOf(false) }
     Column(Modifier.testTag("home-exam-board"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            "几门课一起排 · 今天 ${today.totalMinutes}/${board.budgetMinutes} 分钟",
-            modifier = Modifier.testTag("home-exam-countdown"),
-            style = MaterialTheme.typography.titleMedium,
-        )
+        Row(
+            Modifier.fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .testTag("home-exam-summary"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "几门课一起排 · 今天 ${today.totalMinutes}/${board.budgetMinutes} 分钟",
+                modifier = Modifier.weight(1f).testTag("home-exam-countdown"),
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                if (expanded) "收起" else "展开",
+                modifier = Modifier.testTag("home-exam-toggle"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+            )
+        }
+        if (!expanded) return@Column
         today.courses.forEach { course ->
             Text(
                 "${course.title} · ${course.reason}",

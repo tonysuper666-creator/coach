@@ -6,6 +6,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.WindowsTextbookHost
@@ -249,15 +250,22 @@ class R1941IncidentExitMarkerTest {
                     onAllNodesWithTag("host-bar").fetchSemanticsNodes().isNotEmpty() &&
                         onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().size == 1
                 }
+                // 动作收在徽标后面：先点徽标，再看 查看 / 发送 / 不发。
+                onNodeWithTag("incident-exit-prompt").performClick()
                 onNodeWithTag("incident-decline").assertIsDisplayed()
+                // TON-1985：徽标缩在顶栏角落里（原来压在顶栏下面占一整行）。
                 val bar = onNodeWithTag("host-bar").fetchSemanticsNode().boundsInRoot
                 val prompt = onNodeWithTag("incident-exit-prompt").fetchSemanticsNode().boundsInRoot
-                assertTrue(prompt.top >= bar.bottom - 1f, "prompt=$prompt bar=$bar")
+                assertTrue(
+                    prompt.top >= bar.top && prompt.bottom <= bar.bottom && prompt.width < bar.width / 2,
+                    "prompt=$prompt bar=$bar",
+                )
             }
             runSkikoComposeUiTest(size = Size(800f, 600f), density = Density(1f)) {
                 // Owner content has no prompt host; the layer still shows the prompt.
                 setContent { IncidentPromptLayer(identity = null, darkTheme = true) { Text("owner course") } }
                 waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("incident-exit-prompt").fetchSemanticsNodes().size == 1 }
+                onNodeWithTag("incident-exit-prompt").performClick()
                 onNodeWithTag("incident-send").assertIsDisplayed()
             }
         } finally {

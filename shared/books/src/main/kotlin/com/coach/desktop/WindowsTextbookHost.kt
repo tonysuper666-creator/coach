@@ -99,13 +99,13 @@ internal fun WindowsTextbookHost(
     onRollback: (() -> Unit)? = null,
     rollbackStatus: String = "",
     rollbackBusy: Boolean = false,
-    updateBanner: (@Composable BoxScope.(idle: Boolean) -> Unit)? = null,
+    updateBanner: (@Composable (idle: Boolean) -> Unit)? = null,
     chooseBook: suspend () -> Path?,
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
     val openAccountSettings: (() -> Unit)? = if (LocalAccountSettings.current == null) null else ({ settings = true })
     var searchOpen by rememberSaveable { mutableStateOf(false) }
-    var creatingKind by remember { mutableStateOf<CollectionKind?>(null) }
+    var creatingRequest by remember { mutableStateOf<CreateCollectionRequest?>(null) }
     var activeCollection by remember { mutableStateOf<CollectionSummary?>(null) }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -210,15 +210,16 @@ internal fun WindowsTextbookHost(
         onDispose { incidentPromptHost?.onHostMounted(false) }
     }
     val homeIncidentBanner: (@Composable () -> Unit)? = if (!deskPage && incidentPromptHost != null) {
-        {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                incidentPromptHost.prompt()
-            }
-        }
+        { incidentPromptHost.prompt() }
     } else null
     val systemDark = isSystemInDarkTheme()
     val dark = remember { bookWorkspaceThemeOverride() }
     val preferences = remember(controller.library) { ReadingSettings(controller.library.directory) }
+    val updateIdle = !settings && !tasteExpanded &&
+        ui.screen != BookScreen.READER &&
+        ui.screen != BookScreen.LEARNING &&
+        ui.screen != BookScreen.REVIEWING &&
+        ui.screen != BookScreen.COURSE_MOCK
 
     CoachTheme(dark ?: preferences.paper.dark ?: systemDark, initialTextScale = preferences.size.scale) {
         val textScale = LocalV7TextScale.current
@@ -315,8 +316,8 @@ internal fun WindowsTextbookHost(
                             onExportNotes = onExportNotes,
                             releasePickedBook = releasePickedBook,
                             retryState = retryState,
-                            onNewCourse = { creatingKind = CollectionKind.COURSE },
-                            onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
+                            onNewCourse = { creatingRequest = CreateCollectionRequest(CollectionKind.COURSE) },
+                            onNewBooklist = { creatingRequest = CreateCollectionRequest(CollectionKind.BOOKLIST) },
                             onOpenCollection = { col ->
                                 when (col.record.kind) {
                                     CollectionKind.COURSE -> scope.launch { controller.openCourse(col.record.id) }
@@ -358,11 +359,12 @@ internal fun WindowsTextbookHost(
                                         offline = connectivity == CoachConnectivityStatus.OFFLINE,
                                         onSearch = { searchOpen = true },
                                         onImport = ::importFromPicker,
-                                        onNewCourse = { creatingKind = CollectionKind.COURSE },
-                                        onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
+                                        onNewCourse = { creatingRequest = CreateCollectionRequest(CollectionKind.COURSE) },
+                                        onNewBooklist = { creatingRequest = CreateCollectionRequest(CollectionKind.BOOKLIST) },
                                         onSettings = { settings = true },
+                                        badge = homeIncidentBanner,
                                     )
-                                    homeIncidentBanner?.invoke()
+                                    updateBanner?.invoke(updateIdle)
                                     Box(Modifier.weight(1f).fillMaxWidth()) { workspaceContent() }
                                 }
                                 Spacer(Modifier.height(hostTabletop.gapDp.dp).fillMaxWidth().testTag("book-host-tabletop-hinge"))
@@ -390,12 +392,13 @@ internal fun WindowsTextbookHost(
                                         offline = connectivity == CoachConnectivityStatus.OFFLINE,
                                         onSearch = { searchOpen = true },
                                         onImport = ::importFromPicker,
-                                        onNewCourse = { creatingKind = CollectionKind.COURSE },
-                                        onNewBooklist = { creatingKind = CollectionKind.BOOKLIST },
+                                        onNewCourse = { creatingRequest = CreateCollectionRequest(CollectionKind.COURSE) },
+                                        onNewBooklist = { creatingRequest = CreateCollectionRequest(CollectionKind.BOOKLIST) },
                                         onSettings = { settings = true },
+                                        badge = homeIncidentBanner,
                                     )
-                                    homeIncidentBanner?.invoke()
                                 }
+                                updateBanner?.invoke(updateIdle)
                                 Box(Modifier.weight(1f).fillMaxWidth()) { workspaceContent() }
                                 val tasteBook = ui.book
                                 if (tasteBook != null && ui.screen == BookScreen.READER) {
@@ -437,18 +440,21 @@ internal fun WindowsTextbookHost(
                         }
                     }
                 }
+                val importNotice = ui.importNotice
                 BookImportToast(
-                    ui.importNotice,
+                    importNotice,
                     controller::dismissImportNotice,
                     Modifier.align(Alignment.BottomStart)
                         .padding(start = 16.dp, bottom = if (ui.screen == BookScreen.READER) 56.dp else 16.dp),
+                    onMergeIntoCourse = { bookIds ->
+                        importNotice?.let { controller.dismissImportNotice(it.id) }
+                        creatingRequest = CreateCollectionRequest(CollectionKind.COURSE, bookIds)
+                    },
+                    onBuildBooklist = { bookIds ->
+                        importNotice?.let { controller.dismissImportNotice(it.id) }
+                        creatingRequest = CreateCollectionRequest(CollectionKind.BOOKLIST, bookIds)
+                    },
                 )
-                val updateIdle = !settings && !tasteExpanded &&
-                    ui.screen != BookScreen.READER &&
-                    ui.screen != BookScreen.LEARNING &&
-                    ui.screen != BookScreen.REVIEWING &&
-                    ui.screen != BookScreen.COURSE_MOCK
-                updateBanner?.invoke(this, updateIdle)
             }
 
             if (settings) {
@@ -487,15 +493,16 @@ internal fun WindowsTextbookHost(
                     },
                 )
             }
-            creatingKind?.let { kind ->
+            creatingRequest?.let { request ->
                 CreateCollectionDialog(
-                    kind = kind,
+                    kind = request.kind,
                     existingBooks = ui.catalog,
+                    initialSelectedBookIds = request.bookIds,
                     onPickFiles = pickMultiple,
                     onConfirm = { title, examDate, existingIds, newFiles ->
-                        creatingKind = null
+                        creatingRequest = null
                         controller.createCollection(
-                            kind = kind,
+                            kind = request.kind,
                             title = title,
                             examDate = examDate,
                             existingBookIds = existingIds,
@@ -503,7 +510,7 @@ internal fun WindowsTextbookHost(
                             onStaged = { newFiles.forEach(releasePickedBook) },
                         )
                     },
-                    onClose = { creatingKind = null },
+                    onClose = { creatingRequest = null },
                 )
             }
             activeCollection?.let { col ->
@@ -525,6 +532,9 @@ internal fun WindowsTextbookHost(
 
 private val HostBarHeight = 48.dp
 
+/** 新建课程 / 新建书单对话框的一次请求；从导入提示条进入时带上刚导入的书。 */
+private data class CreateCollectionRequest(val kind: CollectionKind, val bookIds: List<String> = emptyList())
+
 /** 单栏总枢纽顶栏：左侧 LearningCoach，右侧仅「搜索（非空时）/ ＋（导入文件…/新建课程/新建书单）/ 设置」。 */
 @Composable
 private fun HostTopBar(
@@ -535,6 +545,7 @@ private fun HostTopBar(
     onNewCourse: () -> Unit,
     onNewBooklist: () -> Unit,
     onSettings: () -> Unit,
+    badge: (@Composable () -> Unit)? = null,
 ) {
     val colors = com.coach.ui.theme.CoachTheme.colors
     var addMenuOpen by remember { mutableStateOf(false) }
@@ -554,6 +565,8 @@ private fun HostTopBar(
             HostOfflineBadge()
         }
         Spacer(Modifier.weight(1f))
+        badge?.invoke()
+        Spacer(Modifier.width(8.dp))
         Row(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,

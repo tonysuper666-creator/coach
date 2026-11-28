@@ -291,7 +291,7 @@ internal fun runWindowsTextbooks() {
                     val controller = remember(profile.directory) {
                         WindowsRollback.prepareLaunch(profile.directory, runningAppVersion())
                         windowsBookController(profile.directory).also {
-                            WindowsRollback.mergeParked(profile.directory)
+                            WindowsRollback.mergeParked(profile.directory, runningAppVersion())
                         }
                     }
                     val drafts = rememberAnswerDrafts(controller)

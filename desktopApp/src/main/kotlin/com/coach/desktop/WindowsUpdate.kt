@@ -186,6 +186,12 @@ internal class WindowsUpdate(private val manifest: URI, private val installed: S
         }
     }
 
+    /** Same SHA-256 and MSI header check as [download], for the rollback click path. */
+    internal fun fetchVerified(release: WindowsRelease, directory: Path): Path =
+        read(manifest.resolve(release.file)) { stream ->
+            stage(release, directory, stream) {}
+        }
+
     internal fun stage(
         release: WindowsRelease,
         directory: Path,

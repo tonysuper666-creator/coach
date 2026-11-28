@@ -4,6 +4,11 @@ Windows MSIs and the Android APK share one manifest, so both platforms are offer
 Each package is one entry keyed by `arch`; a release may ship a subset, and devices whose arch has no
 entry simply see no update instead of a broken one. Android entries also carry `versionCode` because
 the installer compares it — a package that does not advance it would be refused by the system.
+
+An older `LearningCoach-<version>-<arch>.msi` staged in the same directory is written into `previous`
+automatically: for each arch, the newest version that is still older than this release. That entry
+carries the file name (resolved next to latest.json) and the SHA-256 already used to verify installs.
+`--previous-version` overrides the automatic choice.
 """
 
 import argparse
@@ -14,6 +19,9 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 VERSION = re.compile(r"[1-9][0-9]{0,2}\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,4})")
+PACKAGE_NAME = re.compile(
+    r"LearningCoach-(?P<version>[1-9][0-9]{0,2}\.(?:0|[1-9][0-9]{0,2})\.(?:0|[1-9][0-9]{0,4}))-(?P<arch>x64|arm64)\.msi"
+)
 
 
 def package(path: Path, limit: int):
@@ -28,12 +36,59 @@ def package(path: Path, limit: int):
     return path.name, size, digest.hexdigest()
 
 
+def version_tuple(text: str):
+    return tuple(map(int, text.split(".")))
+
+
+def previous_entries(directory: Path, version: str, explicit):
+    if explicit:
+        if not VERSION.fullmatch(explicit):
+            raise SystemExit("expected a three-part previous version")
+        if version_tuple(explicit) >= version_tuple(version):
+            raise SystemExit("previous version must be older than the release")
+        found = []
+        for arch in ("x64", "arm64"):
+            path = directory / f"LearningCoach-{explicit}-{arch}.msi"
+            if not path.exists():
+                continue
+            name, size, sha256 = package(path, 2 * 1024**3)
+            found.append(dict(version=explicit, arch=arch, file=name, size=size, sha256=sha256))
+        if not found:
+            raise SystemExit(f"no LearningCoach-{explicit}-<arch>.msi in {directory}")
+        return found
+
+    chosen = {}
+    for path in directory.iterdir():
+        match = PACKAGE_NAME.fullmatch(path.name)
+        if not match:
+            continue
+        older = match.group("version")
+        if version_tuple(older) >= version_tuple(version):
+            continue
+        arch = match.group("arch")
+        current = chosen.get(arch)
+        if current is None or version_tuple(older) > version_tuple(current[0]):
+            chosen[arch] = (older, path)
+    found = []
+    for arch in ("x64", "arm64"):
+        picked = chosen.get(arch)
+        if picked is None:
+            continue
+        older, path = picked
+        name, size, sha256 = package(path, 2 * 1024**3)
+        found.append(dict(version=older, arch=arch, file=name, size=size, sha256=sha256))
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("version")
     parser.add_argument("--version-code", type=int, help="Android versionCode paired with the APK")
-    parser.add_argument("--previous-version", help="also publish this older version as the one-step rollback package")
+    parser.add_argument(
+        "--previous-version",
+        help="publish this older version instead of the newest older installer staged beside the release",
+    )
     args = parser.parse_args()
     if not VERSION.fullmatch(args.version):
         parser.error("expected a three-part release version")
@@ -62,20 +117,10 @@ def main():
     if not packages:
         parser.error(f"no LearningCoach-{args.version}-<arch>.msi or -android.apk in {args.directory}")
 
-    previous = []
-    if args.previous_version:
-        if not VERSION.fullmatch(args.previous_version):
-            parser.error("expected a three-part previous version")
-        if tuple(map(int, args.previous_version.split("."))) >= tuple(map(int, args.version.split("."))):
-            parser.error("previous version must be older than the release")
-        for arch in ("x64", "arm64"):
-            path = args.directory / f"LearningCoach-{args.previous_version}-{arch}.msi"
-            if not path.exists():
-                continue
-            name, size, sha256 = package(path, 2 * 1024**3)
-            previous.append(dict(version=args.previous_version, arch=arch, file=name, size=size, sha256=sha256))
-        if not previous:
-            parser.error(f"no LearningCoach-{args.previous_version}-<arch>.msi in {args.directory}")
+    try:
+        previous = previous_entries(args.directory, args.version, args.previous_version)
+    except SystemExit as error:
+        parser.error(str(error))
 
     payload = {"packages": packages}
     if previous:

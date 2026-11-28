@@ -2467,9 +2467,12 @@ fun Application.unifiedBookRoutes(
     unifiedBooks: UnifiedBookPipeline? = null,
     friends: FriendAccess? = null,
     learningSync: Boolean = System.getenv("COACH_LEARNING_SYNC") == "1",
+    allowOwnerLearningSync: Boolean = false,
 ) {
     unifiedBooks?.installAccountDataFinalizer(actor, friends)
-    if (learningSync && unifiedBooks?.enabled == true) learningSyncRoutes(actor, unifiedBooks)
+    if (learningSync && unifiedBooks?.enabled == true) {
+        learningSyncRoutes(actor, unifiedBooks, allowOwner = allowOwnerLearningSync)
+    }
     if (unifiedBooks != null && unifiedBooks.enabled && unifiedBooks.config.autoProcess) {
         unifiedBooks.startWorkerIfNeeded(this)
         monitor.subscribe(ApplicationStopping) {

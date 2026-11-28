@@ -10,12 +10,16 @@ import java.sql.DriverManager
 import java.util.UUID
 import kotlinx.serialization.json.*
 
-/** All storage paths are obtained from the authenticated Sable scope. Cursors belong to one database. */
-internal class LearningSyncStore(private val accounts: Path, private val backup: LearningBackup? = null,
-                                 private val now: () -> Long = System::currentTimeMillis) {
+/** All storage paths are obtained from the authenticated account scope. Cursors belong to one database. */
+internal class LearningSyncStore(
+    private val accounts: Path,
+    private val backup: LearningBackup? = null,
+    private val allowOwner: Boolean = false,
+    private val now: () -> Long = System::currentTimeMillis,
+) {
     private val tables = (learningTables + draftVersion).associateBy { it.kind }
     private fun <T> transaction(scope: UnifiedBookScope, upload: Boolean = false, body: (Connection, String) -> T): T {
-        require(scope.isSableAccount)
+        require(scope.isSableAccount || allowOwner)
         val directory = privateFiles.directory(accounts.resolve(scope.scopeKey))
         val file = directory.resolve("learning.sqlite")
         backup?.recoverMissing(file,scope.scopeKey)

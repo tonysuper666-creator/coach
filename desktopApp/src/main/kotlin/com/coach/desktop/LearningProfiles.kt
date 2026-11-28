@@ -16,31 +16,50 @@ internal class LearningProfiles(private val legacy: Path) {
     private val profiles = legacy.resolveSibling("${legacy.fileName}-learning-profiles")
     val hasProfiles get() = Files.isRegularFile(profiles.resolve("profiles.sqlite"))
 
-    suspend fun open(identity: DesktopIdentity, online: Boolean): LearningProfile = withContext(Dispatchers.IO) {
+    suspend fun open(
+        identity: DesktopIdentity,
+        online: Boolean,
+        allowOwner: Boolean = false,
+    ): LearningProfile = withContext(Dispatchers.IO) {
         val credential = identity.credentials
         val session = "local-" + MessageDigest.getInstance("SHA-256").digest(
             "${identity.serverUrl}\u0000${credential.role}\u0000${credential.deviceId}".encodeToByteArray()
         ).let(java.util.HexFormat.of()::formatHex)
-        if (!online) return@withContext select(session,null,true)
-        val http = CourseHttp(identity.serverUrl,credential.deviceId,credential.token,"library")
+        if (credential.role == "owner" && !allowOwner) {
+            return@withContext select(session, null, false, allowOwner = false)
+        }
+        if (!online) return@withContext select(session, null, true, allowOwner = allowOwner)
+        val http = CourseHttp(identity.serverUrl, credential.deviceId, credential.token, "library")
         try {
-            val profile = http.learningProfile() ?: return@withContext select(session,null,false)
+            val profile = http.learningProfile() ?: return@withContext select(session, null, false, allowOwner = allowOwner)
             val scope = (profile["scope"] as? JsonPrimitive)?.content
             val epoch = (profile["epoch"] as? JsonPrimitive)?.content
-            if (scope == null || !scope.matches(scopePattern) || epoch == null || !validEpoch(epoch)) {
-                return@withContext select(session,null,false)
+            val validScope = when {
+                scope == null -> false
+                credential.role == "friend" -> scope.matches(sableScopePattern)
+                credential.role == "owner" -> allowOwner && scope.matches(ownerScopePattern)
+                else -> false
             }
-            select(session,scope,false,epoch)
+            if (!validScope || epoch == null || !validEpoch(epoch)) {
+                return@withContext select(session, null, false, allowOwner = allowOwner)
+            }
+            select(session, scope, false, epoch, allowOwner = allowOwner)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (_: java.io.IOException) {
-            select(session,null,true)
+            select(session, null, true, allowOwner = allowOwner)
         } finally { http.close() }
     }
 
-    internal fun select(session: String, verified: String?, allowCached: Boolean, epoch: String? = null): LearningProfile {
+    internal fun select(
+        session: String,
+        verified: String?,
+        allowCached: Boolean,
+        epoch: String? = null,
+        allowOwner: Boolean = false,
+    ): LearningProfile {
         require(session.matches(Regex("local-[0-9a-f]{64}")))
-        require(verified == null || verified.matches(scopePattern))
+        require(verified == null || verified.matches(if (allowOwner) anyScopePattern else sableScopePattern))
         require(epoch == null || validEpoch(epoch))
         Files.createDirectories(profiles)
         return DriverManager.getConnection("jdbc:sqlite:${profiles.resolve("profiles.sqlite")}").use { db ->
@@ -95,7 +114,7 @@ internal class LearningProfiles(private val legacy: Path) {
                         q.setString(1,session)
                         q.executeQuery().use { if (it.next()) it.getString(1) else null }
                     }
-                    val scope = verified ?: cached?.takeIf { allowCached }
+                    val scope = verified ?: cached?.takeIf { allowCached && (allowOwner || it.matches(sableScopePattern)) }
                     val result = if (scope == null) {
                         val folder = if (cached == null) session else "unverified-$session"
                         LearningProfile(profiles.resolve(folder),null)
@@ -175,7 +194,9 @@ internal class LearningProfiles(private val legacy: Path) {
     }
 
     private companion object {
-        val scopePattern = Regex("sable-[0-9a-f]{64}")
+        val sableScopePattern = Regex("sable-[0-9a-f]{64}")
+        val ownerScopePattern = Regex("device-[0-9a-f]{64}")
+        val anyScopePattern = Regex("(?:sable|device)-[0-9a-f]{64}")
         fun validEpoch(epoch: String) = try {
             java.util.UUID.fromString(epoch).toString() == epoch
         } catch (_: IllegalArgumentException) {

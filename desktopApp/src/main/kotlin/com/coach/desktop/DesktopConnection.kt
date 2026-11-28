@@ -45,6 +45,23 @@ internal class DesktopConnectionSettings(
     private fun configuredFriendUrl(): String? = (environment("COACH_FRIEND_URL") ?: properties().getProperty("coach.friendUrl") ?: property("coach.friendUrl"))
         ?.takeIf(String::isNotBlank)?.let(::desktopServerUrl)
 
+    private fun configuredDesktopUrl(): String? = properties().getProperty("coach.desktopUrl")
+        ?.takeIf(String::isNotBlank)?.let { runCatching { desktopServerUrl(it) }.getOrNull() }
+
+    /**
+     * Production addresses: loopback/Tailnet on production ports (18791/8791/8790),
+     * the configured friend Funnel URL (`coach.friendUrl`), or `coach.desktopUrl`.
+     * Malformed URLs fail closed as production so they never enable owner sync.
+     */
+    fun isProductionServerUrl(serverUrl: String): Boolean {
+        val normalized = runCatching { desktopServerUrl(serverUrl) }.getOrNull() ?: return true
+        val port = runCatching { java.net.URI(normalized).port }.getOrNull() ?: return true
+        if (port in productionPorts) return true
+        if (runCatching { configuredFriendUrl() }.getOrNull() == normalized) return true
+        if (configuredDesktopUrl() == normalized) return true
+        return false
+    }
+
     fun hasBuiltInFriendUrl(): Boolean = configuredFriendUrl() != null
 
     /**
@@ -137,4 +154,23 @@ internal fun desktopAcceptanceRun(environment: (String) -> String?): String? {
         "Acceptance replay requires an isolated COACH_URL, COACH_TOKEN_FILE and COACH_CLIENT_DIR"
     }
     return run
+}
+
+/**
+ * Owner-identity learning sync is a staging/test-only path:
+ * - Production URLs keep owner sync off unless `COACH_OWNER_LEARNING_SYNC=1` / `-Dcoach.ownerLearningSync=true`
+ *   is explicitly enabled (and the production server independently rejects owner `/learning-sync` calls).
+ * - Friend identities never use owner sync; they sync only with a verified Sable scope.
+ */
+internal fun ownerLearningSyncAllowed(
+    identity: DesktopIdentity,
+    settings: DesktopConnectionSettings,
+    environment: (String) -> String? = System::getenv,
+    property: (String) -> String? = System::getProperty,
+): Boolean {
+    if (identity.credentials.role != "owner") return false
+    val explicit = environment("COACH_OWNER_LEARNING_SYNC")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        ?: property("coach.ownerLearningSync")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+    if (explicit != null) return explicit == "1" || explicit == "true"
+    return !settings.isProductionServerUrl(identity.serverUrl)
 }

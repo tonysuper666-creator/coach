@@ -276,17 +276,19 @@ internal fun runWindowsTextbooks() {
                 offerReports = offerReports,
                 onDisableOffers = { setReportOffers(false) },
             ) { identity ->
+                val allowOwnerSync = remember(identity, settings) { ownerLearningSyncAllowed(identity, settings) }
                 val profiles = remember(directory) { LearningProfiles(directory) }
                 val profile = if (LearningJournal.enabled || profiles.hasProfiles) {
-                    val selected by produceState<LearningProfile?>(null,identity) {
+                    val selected by produceState<LearningProfile?>(null, identity, allowOwnerSync) {
                         while (isActive) {
-                            value = profiles.open(identity,LearningJournal.enabled)
-                            if (!LearningJournal.enabled || value?.scope != null || identity.credentials.role != "friend") break
+                            value = profiles.open(identity, LearningJournal.enabled, allowOwner = allowOwnerSync)
+                            val canExpectScope = identity.credentials.role == "friend" || allowOwnerSync
+                            if (!LearningJournal.enabled || value?.scope != null || !canExpectScope) break
                             delay(30_000)
                         }
                     }
                     selected ?: return@WindowsTextbookGate
-                } else LearningProfile(directory,null)
+                } else LearningProfile(directory, null)
                 key(profile.directory) {
                     val controller = remember(profile.directory) {
                         WindowsRollback.prepareLaunch(profile.directory, runningAppVersion())
@@ -304,7 +306,7 @@ internal fun runWindowsTextbooks() {
                         onDispose { saveDrafts = { true } }
                     }
                     val sync = remember(profile) { SyncDisplay(profile.directory) }
-                    LearningSyncEffect(identity, profile, sync)
+                    LearningSyncEffect(identity, profile, sync, allowOwner = allowOwnerSync)
                     var updateRequest by remember { mutableIntStateOf(0) }
                     var updateResult by remember { mutableStateOf("") }
                     val updates = rememberWindowsUpdateSession(
@@ -461,9 +463,16 @@ private fun windowsBookController(directory: Path): TextbookController {
 }
 
 @Composable
-private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfile, status: SyncDisplay) {
-    profile.scope?.takeIf { LearningJournal.enabled }?.let { account ->
-        LaunchedEffect(identity,profile) {
+private fun LearningSyncEffect(
+    identity: DesktopIdentity,
+    profile: LearningProfile,
+    status: SyncDisplay,
+    allowOwner: Boolean = false,
+) {
+    profile.scope?.takeIf {
+        LearningJournal.enabled && (identity.credentials.role == "friend" || allowOwner)
+    }?.let { account ->
+        LaunchedEffect(identity, profile, allowOwner) {
             val credentials = identity.credentials
             val http = CourseHttp(identity.serverUrl,credentials.deviceId,credentials.token,"library")
             val remote = HttpLearningRemote(http)
@@ -471,8 +480,10 @@ private fun LearningSyncEffect(identity: DesktopIdentity, profile: LearningProfi
                 while (isActive) {
                     try {
                         val confirmed = withContext(Dispatchers.IO) {
-                            val library = LearningTransfer(profile.directory.resolve("library.sqlite"),false).sync(account,remote,profile.epoch) { isActive }
-                            val exams = LearningTransfer(profile.directory.resolve("exams.sqlite"),true).sync(account,remote,profile.epoch) { isActive }
+                            val library = LearningTransfer(profile.directory.resolve("library.sqlite"), false)
+                                .sync(account, remote, profile.epoch, allowOwner = allowOwner) { isActive }
+                            val exams = LearningTransfer(profile.directory.resolve("exams.sqlite"), true)
+                                .sync(account, remote, profile.epoch, allowOwner = allowOwner) { isActive }
                             if (library && exams) status.confirm() else null
                         }
                         status.record(confirmed)

@@ -95,8 +95,15 @@ internal class LearningTransfer(private val path: Path, private val exam: Boolea
         }
     }
 
-    suspend fun sync(scope: String, remote: LearningRemote, profileEpoch: String? = null, current: () -> Boolean): Boolean {
-        require(scope.matches(Regex("sable-[0-9a-f]{64}")))
+    suspend fun sync(
+        scope: String,
+        remote: LearningRemote,
+        profileEpoch: String? = null,
+        allowOwner: Boolean = false,
+        current: () -> Boolean,
+    ): Boolean {
+        val pattern = if (allowOwner) Regex("(?:sable|device)-[0-9a-f]{64}") else Regex("sable-[0-9a-f]{64}")
+        require(scope.matches(pattern))
         if (!current()) return false
         val state = write { db ->
             val owner = meta(db,"owner")

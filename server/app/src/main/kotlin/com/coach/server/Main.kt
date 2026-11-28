@@ -21,6 +21,17 @@ import java.security.SecureRandom
 import java.util.Base64
 
 
+internal fun isProductionCoachServer(
+    env: Map<String, String>,
+    managed: Boolean,
+    data: Path,
+    port: Int,
+): Boolean {
+    val productionData = Path.of(System.getProperty("user.home"), "Coach/data").toAbsolutePath().normalize()
+    val traffic = env["COACH_TRAFFIC"] ?: if (managed) "user" else "test"
+    return managed && traffic == "user" && port == 18791 && data.toAbsolutePath().normalize() == productionData
+}
+
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
@@ -198,6 +209,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val publicPort = System.getenv("COACH_PUBLIC_PORT")?.toInt()?.also {
         require(it in 1..65535 && it != 18791 && it != port) { "COACH_PUBLIC_PORT must be a distinct non-production port" }
     }
+    val allowOwnerLearningSync = !isProductionCoachServer(System.getenv(), managed, data, port)
     val sable = publicPort?.let { SableSessions(actor, data.resolveSibling("${data.fileName}-sable-credentials")) }
     val friends = FriendAccess(data.resolve("friends"), sableSessions = sable)
     friends.eraseOnAccountDeletion(courseVisionService::eraseAccount)
@@ -220,7 +232,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         actor.execute { pairedDevices() }
     }
     val incidentDir = data.resolve("incident-reports")
-    val module: Application.() -> Unit = { attributes.put(reliabilityCounts, counts); ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); incidentReportRoutes(incidentDir); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks,literatureGuide,literatureComparison,examPointDrillPipeline); unifiedBookRoutes(actor,unifiedBooks,friends); unifiedBookMigrationRoutes(unifiedBookMigration,unifiedBooks,adminDevice=device); booklistAlignmentRoutes(actor,friends,booklistAligner,conceptSayings); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
+    val module: Application.() -> Unit = { attributes.put(reliabilityCounts, counts); ledgerRoutes(actor,pushes,chat,device,observation,friends,unifiedBooks=unifiedBooks); incidentReportRoutes(incidentDir); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); libraryExplainRoutes(actor,chat.reader,reader,imports,friends,companionPipeline,tokenLedger,courseAlignPipeline,courseTopicPipeline,courseVisionService,unifiedBooks,literatureGuide,literatureComparison,examPointDrillPipeline); unifiedBookRoutes(actor,unifiedBooks,friends,allowOwnerLearningSync=allowOwnerLearningSync); unifiedBookMigrationRoutes(unifiedBookMigration,unifiedBooks,adminDevice=device); booklistAlignmentRoutes(actor,friends,booklistAligner,conceptSayings); practiceGradeRoutes(actor,friends,practiceGradeService); collectionQaRoutes(actor,friends,collectionQaService); courseMockRoutes(actor,friends,courseMockService); studyModeRoutes(actor,reader,friends,studyModeService,unifiedBooks); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

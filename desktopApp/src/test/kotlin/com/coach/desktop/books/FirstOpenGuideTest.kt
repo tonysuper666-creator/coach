@@ -356,6 +356,7 @@ class FirstOpenGuideTest {
                 waitForIdle()
                 onAllNodesWithTag("first-taste-strip").assertCountEquals(0)
                 onAllNodesWithTag("first-taste").assertCountEquals(0)
+                revealReaderHud()
                 onNodeWithTag("immersive-companion-toggle").performClick()
                 waitUntil(timeoutMillis = 10_000) {
                     onAllNodesWithTag("companion-taste-quiz").fetchSemanticsNodes().isNotEmpty()

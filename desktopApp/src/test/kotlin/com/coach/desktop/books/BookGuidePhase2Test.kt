@@ -529,6 +529,7 @@ class BookGuidePhase2Test {
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
                 waitForIdle()
                 if (onAllNodesWithTag("single-book-companion").fetchSemanticsNodes().isEmpty()) {
+                    revealReaderHud()
                     onNodeWithTag("immersive-companion-toggle").performClick()
                 }
                 onNodeWithTag("single-book-companion").assertExists()
@@ -538,6 +539,7 @@ class BookGuidePhase2Test {
                 // 翻到节末页
                 var turns = 0
                 while (turns < 20 && onAllNodesWithTag("section-end-summary-card").fetchSemanticsNodes().isEmpty()) {
+                    revealReaderHud()
                     onNodeWithTag("next-page").performClick()
                     waitForIdle()
                     turns++

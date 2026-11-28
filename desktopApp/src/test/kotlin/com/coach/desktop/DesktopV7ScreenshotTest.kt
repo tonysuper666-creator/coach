@@ -155,6 +155,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             shot("home-empty")
             onNodeWithTag("upload-textbook").performClick()
             ready(controller) { it.screen == BookScreen.READER }
+            revealReaderHud()
             onNodeWithTag("immersive-back").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
             onNodeWithTag("home-focus-card").assertIsDisplayed()

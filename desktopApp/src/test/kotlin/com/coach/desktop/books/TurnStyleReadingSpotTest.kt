@@ -52,6 +52,7 @@ class TurnStyleReadingSpotTest {
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.initialized && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
+                revealReaderHud()
                 mainClock.autoAdvance = false
                 assertSpread("initially")
                 val start = visibleSentences()

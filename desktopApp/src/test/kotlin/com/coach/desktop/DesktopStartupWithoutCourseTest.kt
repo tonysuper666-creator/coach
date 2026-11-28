@@ -47,6 +47,7 @@ class DesktopStartupWithoutCourseTest {
             val id = controller.state.value.book!!.id
             onNodeWithTag("reader-text").assertTextContains("Orbit is the path", substring = true)
             onNodeWithTag("choice-0").assertDoesNotExist()
+            revealReaderHud()
             onNodeWithTag("next-page").performClick()
             ready(controller) { it.page == 2 && it.book?.readingPage == 2 }
             assertFalse(controller.state.value.book!!.learning)

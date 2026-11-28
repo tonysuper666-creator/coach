@@ -46,6 +46,7 @@ class ReaderR2FixesTest {
             !controller.state.value.busy && controller.state.value.screen == BookScreen.READER
         }
         waitForIdle()
+        revealReaderHud()
     }
 
     private fun writeGutenbergCopiedParagraphEpub(path: Path, withCover: Boolean = false) {

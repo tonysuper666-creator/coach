@@ -916,4 +916,77 @@ class CourseExamPointsTest {
         assertTrue("Ex post moral hazard" in titles)
         assertTrue("Technology and the price of grid services" in titles)
     }
+
+    @Test
+    fun retainsStandaloneConceptsSharingPrefixWithLongerTocTitlesAndFiltersShortClauses() {
+        val textbookPages = listOf(
+            ExamTeachingPage("tb", 80, CourseMaterialRole.CORE_TEXTBOOK, """
+                1.2 Health is uncertain and contagious
+                Uncertainty motivates shared coverage across groups.
+                Box 4.1 Recent trends in regional hospitals
+                Consolidation and outpatient migration reshaped regional hospital networks over two decades.
+                Figure 4.2
+                Heterogeneous customers
+                Buyers differ in hidden risk levels across policy tiers.
+                • Customers are risk-neutral. Suppose insurers compete in an idealized market with zero loading.
+                • This leaves region F. All profitable contracts lie below the zero-profit line.
+                Adverse selection: Higher-risk buyers selectively purchase fuller coverage when insurers cannot observe risk.
+                Information asymmetry: One side of a transaction holds relevant private knowledge unknown to the other.
+                The Thermal Model: Household energy stock depreciates over time and can be replenished through investment.
+                Socioeconomic disparities: Systematic differences in outcomes across income and education groups.
+            """.trimIndent()),
+            ExamTeachingPage("tb", 286, CourseMaterialRole.CORE_TEXTBOOK, """
+                13 Technology and the price
+                of grid services
+                Technology and the price of grid services: Innovation shifts both quality and spending.
+            """.trimIndent()),
+        )
+        val slidePages = listOf(
+            ExamTeachingPage("slides-w4", 1, CourseMaterialRole.LECTURE_SLIDES, """
+                Recent trends in regional hospitals
+                Heterogeneous customers: Risk types
+                Adverse selection and Information asymmetry in insurance markets.
+            """.trimIndent()),
+        )
+
+        val identified = CourseExamPoints.identifyFromPages(
+            courseId = "r8-prefix-and-short-clauses",
+            pages = textbookPages + slidePages,
+            chapterStartPagesByBook = mapOf("tb" to setOf(80, 286)),
+            sectionSpansByBook = mapOf(
+                "tb" to listOf(
+                    ExamSectionSpan("Health is uncertain and contagious", "health is uncertain and contagious", 80..80),
+                ),
+            ),
+            fullTocTitlesByBook = mapOf(
+                "tb" to setOf(
+                    "adverse selection in synthetic markets",
+                    "information asymmetry and screening",
+                    "the thermal model and regional disparities",
+                    "socioeconomic disparities in outcomes",
+                    "technology and the price of grid services",
+                ),
+            ),
+        )
+        val titles = identified.map { it.title }.toSet()
+
+        // Standalone concepts that share a prefix with a longer TOC title MUST NOT be dropped!
+        for (expected in listOf(
+            "Adverse selection",
+            "Information asymmetry",
+            "The Thermal Model",
+            "Socioeconomic disparities",
+            "Recent trends in regional hospitals",
+            "Heterogeneous customers",
+            "Health is uncertain and contagious",
+            "Technology and the price of grid services",
+        )) {
+            assertTrue(expected in titles, "Expected real exam point '$expected' to be retained: $titles")
+        }
+
+        // Actual 2-line wrapped TOC prefix + 3-4 word short sentences MUST be filtered!
+        for (bad in listOf("Technology and the price", "Customers are risk-neutral", "This leaves region F")) {
+            assertFalse(bad in titles, "Wrapped prefix or short clause '$bad' must be filtered: $titles")
+        }
+    }
 }

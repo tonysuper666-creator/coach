@@ -31,6 +31,8 @@ import kotlin.test.*
  * 2. 服务端一次尝试断掉（无首字、中途停、桥接失败、格式无法核对、排队已满）时，客户端换新请求号自动再问一次；
  *    总时长上限不重试。
  * 3. 取消（关面板、超时）时取消通知真的发到服务端，不让被丢下的回答继续占着讲解通道。
+ * 4. 选区所在页不在任何小节里（目录只切到前面几章），或给的小节里没有这段选区时，
+ *    不再只发选区本身，而是带上本页和前后页；跨段选区替换掉它压住的那几段。
  */
 class ExplainAnchorRecoveryTest {
     @get:Rule val folder = TemporaryFolder()
@@ -120,7 +122,8 @@ class ExplainAnchorRecoveryTest {
                 val blocks = book.lessons.flatMap { it.blocks }.filterNot { it.heading }
                 assertTrue(blocks.size >= 2, "${book.format} 有两段以上正文")
                 for (block in blocks) {
-                    val context = ExplainWire.selectionBlocks(block, null)
+                    // With no section given, the block now goes out with its page and the pages either side.
+                    val context = ExplainWire.selectionBlocks(block, ExplainWire.pageContext(book, block))
                     assertQuotesOnTheirPages(book, context, explainer.explainSelection("explain", block))
                     assertQuotesOnTheirPages(book, context,
                         explainer.explainSelection("ask", block, question = "What does this sentence claim?"))
@@ -242,5 +245,86 @@ class ExplainAnchorRecoveryTest {
             assertNull(outcome, "调用方已放弃等待")
             assertEquals(listOf("abandoned"), cancelled, "放弃时把取消通知发给服务端")
         } finally { release.countDown(); http.stop(0) }
+    }
+
+    private fun threePagePdf(root: Path, library: TextbookLibrary): Textbook {
+        val file = root.resolve("outline-gap.pdf")
+        PDDocument().use { pdf ->
+            repeat(3) { n ->
+                val sheet = PDPage(); pdf.addPage(sheet)
+                PDPageContentStream(pdf, sheet).use { out ->
+                    out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
+                    out.newLineAtOffset(50f, 700f); out.showText("Page ${n + 1} opens with a short claim about heat.")
+                    out.newLineAtOffset(0f, -200f); out.showText("Page ${n + 1} closes with how the claim is measured.")
+                    out.endText()
+                }
+            }
+            pdf.save(file.toFile())
+        }
+        return library.importBook(file).also { ExplainConsent(library.directory).allow(it.id) }
+    }
+
+    @Test fun selectionOnAPageNoSectionCoversIsSentWithItsPageAndNeighbours() = runBlocking {
+        val root = folder.root.toPath()
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = threePagePdf(root, library)
+        val text = book.pages.single { it.number == 2 }.text
+        val start = text.indexOf("short claim")
+        // The p335 shape: a few words picked out of one paragraph, on a page the outline never reached.
+        val chosen = SourceBlock("${book.id}:p2:$start", 2, start, start + "short claim".length, false, "short claim")
+        val sent = CopyOnWriteArrayList<JsonObject>()
+        val http = server { path, body ->
+            if (path != "/v1/library/explain") return@server null
+            sent += body!!
+            val blocks = body.getValue("blocks").jsonArray
+            // A lone selection is what came back 「依据不足」 on every try.
+            if (blocks.size <= 1) """{"text":"${ReaderTransientReply.INSUFFICIENT}","sources":[],"elapsedMs":900}"""
+            else answer(blocks, ::pageOf)
+        }
+        try {
+            val explainer = explainer(root, library, "http://127.0.0.1:${http.address.port}")
+            val firstPage = book.sourceBlocks().filter { it.page == 1 && !it.heading }
+            val elsewhere = ExplainSectionContext("Page 1", null, null, firstPage)
+            for (context in listOf(null, elsewhere)) {
+                sent.clear()
+                val expected = assertNotNull(ExplainWire.pageContext(book, chosen)).sectionBlocks
+                val result = explainer.explainSelection("explain", chosen, context)
+                assertQuotesOnTheirPages(book, expected, result)
+                assertEquals(1, sent.size, "第一次就答上，不靠重试")
+                val request = sent.single()
+                assertNotNull(request["sectionContext"]?.takeIf { it !is JsonNull }, "带小节上下文，服务端整页保留")
+                val ids = request.getValue("blocks").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content }
+                assertEquals(expected.map { it.id }, ids)
+                assertEquals(setOf(1, 2, 3), ids.map(::pageOf).toSet(), "本页和前后页都在")
+                assertTrue(request.getValue("blocks").jsonArray.any {
+                    pageOf(it.jsonObject.getValue("id").jsonPrimitive.content) == 2 && "short claim" in it.jsonObject.getValue("text").jsonPrimitive.content
+                }, "选区所在那段在里面")
+                assertTrue(ids.size > 1)
+                val ask = explainer.explainSelection("ask", chosen, context, question = "How is it measured?")
+                assertQuotesOnTheirPages(book, expected, ask)
+            }
+        } finally { http.stop(0) }
+    }
+
+    @Test fun selectionAcrossTwoParagraphsStandsInForBoth() {
+        val root = folder.root.toPath()
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = threePagePdf(root, library)
+        val onPage = book.sourceBlocks().filter { it.page == 2 && !it.heading && it.text.isNotBlank() }
+        assertTrue(onPage.size >= 2, "第 2 页有两段")
+        val (a, b) = onPage.take(2)
+        val start = a.start + a.text.length / 2
+        val end = b.start + b.text.length / 2
+        val span = SourceBlock("${book.id}:p2:$start", 2, start, end, false,
+            book.pages.single { it.number == 2 }.text.substring(start, end))
+        val blocks = assertNotNull(ExplainWire.pageContext(book, span)).sectionBlocks
+        assertFalse(blocks.any { it.id == a.id || it.id == b.id }, "被选区压住的两段换成选区")
+        assertEquals(1, blocks.count { it.id == span.id })
+        assertEquals(blocks.sortedWith(compareBy({ it.page }, { it.start })), blocks, "按页、按位置排好")
+        assertTrue(blocks.any { it.page == 1 } && blocks.any { it.page == 3 })
+
+        val whole = ExplainWire.pageContext(book, a)!!.sectionBlocks
+        assertEquals(1, whole.count { it.id == a.id }, "整段选中时不重复")
+        assertNull(ExplainWire.pageContext(book, a.copy(text = " ")), "空选区不造上下文")
     }
 }

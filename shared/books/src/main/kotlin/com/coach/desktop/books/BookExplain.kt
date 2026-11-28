@@ -154,6 +154,24 @@ internal object ExplainWire {
         return sectionWindow(blocks, at) ?: listOf(chosen)
     }
 
+    /**
+     * TON-1963: a selection on a page that no section covers (the book's outline stops before it) used to go out
+     * alone, and a short passage with nothing around it came back 「依据不足」 on every try. It now carries its own
+     * page and the pages either side, with the selection standing in for the blocks it overlaps.
+     */
+    fun pageContext(book: Textbook, chosen: SourceBlock): ExplainSectionContext? {
+        if (chosen.text.isBlank()) return null
+        val pages = book.pages.filter { it.number in chosen.page - 1..chosen.page + 1 }
+        val around = StudyCoachCourse.blocks(book.id, pages, snapSentences = book.structure != null)
+            .filter { !it.heading && it.text.isNotBlank() }
+        if (around.none { it.page == chosen.page }) return null
+        val inside = around.any { it.id == chosen.id || (it.page == chosen.page && chosen.text.trim() in it.text) }
+        val blocks = if (inside) around else
+            (around.filterNot { it.page == chosen.page && it.start < chosen.end && chosen.start < it.end } + chosen)
+                .sortedWith(compareBy({ it.page }, { it.start }))
+        return ExplainSectionContext("${book.title} · ${book.pageLabel(chosen.page)}", null, null, blocks)
+    }
+
     /** The widest run of consecutive section blocks around [at] that still fits one section request. */
     internal fun sectionWindow(blocks: List<SourceBlock>, at: Int): List<SourceBlock>? {
         fun usable(b: SourceBlock) = !b.heading && b.text.isNotBlank() && b.text.length <= 8_000

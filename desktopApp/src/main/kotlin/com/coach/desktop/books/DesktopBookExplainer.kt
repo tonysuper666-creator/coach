@@ -176,8 +176,9 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
             }
         }
-        val blocks = ExplainWire.selectionBlocks(chosen, context)
-        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history)
+        val sectionContext = selectionContext(chosen, context)
+        val blocks = ExplainWire.selectionBlocks(chosen, sectionContext)
+        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, sectionContext, question, history)
         return send(wire, blocks, requestId)
     }
 
@@ -199,9 +200,30 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(bookId, question) } }
             }
         }
-        val blocks = ExplainWire.selectionBlocks(chosen, context)
-        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, context, question, history, stanceRequest)
+        val sectionContext = selectionContext(chosen, context)
+        val blocks = ExplainWire.selectionBlocks(chosen, sectionContext)
+        val wire = ExplainWire.selectionRequest(requestId, kind, chosen, blocks, sectionContext, question, history, stanceRequest)
         return send(wire, blocks, requestId)
+    }
+
+    // TON-1963: a selection its section does not hold (or no section at all) is never sent on its own.
+    private suspend fun selectionContext(chosen: SourceBlock, context: ExplainSectionContext?): ExplainSectionContext? {
+        val alone = ExplainWire.selectionBlocks(chosen, context).singleOrNull()?.id == chosen.id
+        if (!alone) return context
+        return pageContext(chosen)?.copy(annotationContext = context?.annotationContext) ?: context
+    }
+
+    private suspend fun pageContext(chosen: SourceBlock): ExplainSectionContext? {
+        val books = library ?: return null
+        val bookId = chosen.id.substringBefore(":p").takeIf { it.isNotBlank() && it != chosen.id } ?: return null
+        // Only the three pages, read straight from the page table: loading the whole book can refresh its structure.
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val meta = books.bookSnapshotMeta(bookId, listOf(chosen.page - 1, chosen.page, chosen.page + 1)) ?: return@runCatching null
+                val pages = meta.pages.values.sortedBy { it.number }.map { BookPage(it.number, it.text, it.ocr) }
+                ExplainWire.pageContext(Textbook(bookId, meta.title, meta.format, pages), chosen)
+            }.getOrNull()
+        }
     }
 
     open suspend fun structureUnstructuredBook(

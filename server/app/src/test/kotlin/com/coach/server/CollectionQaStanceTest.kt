@@ -731,4 +731,69 @@ class CollectionQaStanceTest {
         val rejects = res.getValue("gate").jsonObject.getValue("rejects").jsonArray.map { it.jsonPrimitive.content }
         assertEquals(listOf("PARAGRAPH_FIELDS", "JSON"), rejects)
     }
+
+    @Test
+    fun c2aUnescapedQuotesRejectedAsJsonThenRetriesIntoOutsideCommentatorLayer() = runBlocking {
+        val lunyuPage = "學而時習之，不亦說乎？有朋自遠方來，不亦樂乎？"
+        val daodePage = "道可道，非常道。名可名，非常名。"
+        val classicBooks = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-daode")
+                put("title", "道德经（王弼注）")
+                put("defaultStance", "classic")
+                put("guards", JsonArray(emptyList()))
+            })
+            add(buildJsonObject {
+                put("bookId", "book-lunyu")
+                put("title", "論語")
+                put("defaultStance", "classic")
+                put("guards", JsonArray(emptyList()))
+            })
+        }
+        var call = 0
+        var seenSystemPrompt = ""
+        var seenRetryUserPrompt = ""
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                call++
+                seenSystemPrompt = systemPrompt
+                if (call == 2) seenRetryUserPrompt = userPrompt
+                val payload = if (call == 1) {
+                    """{"paragraphs":[{"layer":"outside","bookId":"book-lunyu","kind":"注家读法","text":"朱熹在《论语集注》中把"习"解释为"鸟数飞也"，指反复练习以至于熟。"}],"boundary":null}"""
+                } else {
+                    """{"paragraphs":[{"layer":"outside","bookId":"book-lunyu","kind":"注家读法","text":"朱熹在《论语集注》中把「習」解释为「鸟数飞也」，强调反复练习直到熟练。"}],"boundary":null}"""
+                }
+                return CollectionQaTransportReply(payload, "stub", 10, 10, 1, 2)
+            }
+        }
+        val req = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "classic")
+            put("question", "在《論語》（學而時習之）里，朱熹怎么解释「習」？")
+            put("bookStances", classicBooks)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-daode"); put("docLabel", "道德经（王弼注）"); put("page", 1); put("text", daodePage)
+                })
+                add(buildJsonObject {
+                    put("blockId", "B2"); put("bookId", "book-lunyu"); put("docLabel", "論語"); put("page", 1); put("text", lunyuPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(req)
+        assertEquals(2, call)
+        assertTrue(seenSystemPrompt.contains("Outside-only 注家读法 example:"))
+        assertTrue(seenSystemPrompt.contains("「」"))
+        assertTrue(seenRetryUserPrompt.contains("wrap quoted Chinese terms or commentary words in 「」"))
+        assertFalse(res.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        val rejects = res.getValue("gate").jsonObject.getValue("rejects").jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(listOf("JSON"), rejects)
+        val layers = res.getValue("layers").jsonArray
+        assertEquals(1, layers.size)
+        val outside = layers.first().jsonObject
+        assertEquals("outside", outside.getValue("layer").jsonPrimitive.content)
+        assertEquals("书外 · 未对照原文 · 注家读法", outside.getValue("label").jsonPrimitive.content)
+        assertTrue(outside.getValue("text").jsonPrimitive.content.contains("鸟数飞也"))
+    }
 }

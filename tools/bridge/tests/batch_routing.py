@@ -442,6 +442,34 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(c.x_coach(legacy)["fallback"])
         self.assertEqual(["/v1/messages"], paths)
 
+    async def test_book_map_batch_routes_to_haiku_enforces_95_guard_and_never_logs_prose(self):
+        from api_batch import BOOK_MAP_TASK
+        canary = "CANARY_BOOK_PROSE_TON1889_BRIDGE_NO_LOG"
+        body = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": canary}]}
+        headers = {"x-coach-task": BOOK_MAP_TASK, "x-coach-background": "1", "x-coach-batch-key": self.key("map")}
+        with self.assertRaises(bridge.BridgeError):
+            bridge.build_req(dict(body, stream=True), headers)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.build_req(dict(body, model="claude-sonnet-5-5"), headers)
+        request = bridge.build_req(body, headers)
+        logged = []
+        with patch.object(bridge, "API_BATCH", self.router), patch.object(bridge, "write_log", side_effect=lambda **kw: logged.append(kw)):
+            with self.assertRaises(BatchPending):
+                await bridge.dispatch_batch(request, request.model, None)
+        self.assertEqual("/v1/messages/batches", self.calls[0].url.path)
+        self.assertEqual("claude-haiku-5-5", json.loads(self.calls[0].content)["requests"][0]["params"]["model"])
+
+        friend = bridge.build_req(body, dict(headers, **{"x-coach-friend": "a" * 64, "x-coach-friend-device": "winbox"}))
+        denied = AsyncMock(side_effect=Denied("credit_limit_95_percent"))
+        with patch.object(bridge.API_BATCH, "run", denied), \
+                patch.object(bridge, "write_log", side_effect=lambda **kw: logged.append(kw)), \
+                patch.object(bridge, "dispatch_cli", side_effect=AssertionError("book_map_batch fell through to CLI")):
+            result = await bridge.dispatch_batch(friend, friend.model, None)
+        self.assertEqual(("failed", "credit_limit_95_percent"), (result.status, result.reason))
+        self.assertEqual("a" * 64, denied.await_args.kwargs["friend"])
+        self.assertEqual("winbox", denied.await_args.kwargs["device"])
+        self.assertFalse(any(canary in json.dumps(entry) for entry in logged), "Book prose must never enter bridge logs")
+
 
 if __name__ == "__main__":
     unittest.main()

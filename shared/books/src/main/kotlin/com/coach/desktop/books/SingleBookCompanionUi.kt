@@ -123,9 +123,6 @@ internal fun SingleBookCompanionPanel(
         mutableStateOf<String?>(null)
     }
     var modeFetchNonce by remember(edition, chapterGroup?.chapterId, studyPreference.mode) { mutableIntStateOf(0) }
-    var bookMapMeta by remember(edition) { mutableStateOf<WholeBookMapMeta?>(null) }
-    var bookMapBatchBusy by remember(edition) { mutableStateOf(false) }
-    var bookMapBatchStatus by remember(edition) { mutableStateOf<String?>(null) }
     var sectionMastery by remember(edition, currentSection?.id, chapterGroup?.chapterId) { mutableStateOf<ConceptMasteryRecord?>(null) }
     var gradeResponsesByQuestion by remember(edition) { mutableStateOf<Map<String, PracticeGradeDiagnoseResponse>>(emptyMap()) }
     val activeModule = CompanionModuleTab.fromWire(draft.activeModule)
@@ -174,10 +171,6 @@ internal fun SingleBookCompanionPanel(
     }
     val scroll = rememberScrollState()
 
-    LaunchedEffect(edition, modePackJson) {
-        bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
-    }
-
     LaunchedEffect(edition, chapterGroup?.chapterId, chapterNum, studyPreference.mode, studyPreference.detailLevel, studyPreference.explainLang, studyPreference.inquiryQuestion, explainer.loaded, explainer.identity, aiEnabled, modeFetchNonce) {
         val group = chapterGroup ?: return@LaunchedEffect
         val fallbackAny = studyPreference.detailLevel == ExplainDetailLevel.DETAILED &&
@@ -197,6 +190,14 @@ internal fun SingleBookCompanionPanel(
         }
         if (cached != null) {
             modePackJson = cached
+            modeStreamingText = ""
+            modeLoading = false
+            modeError = null
+            return@LaunchedEffect
+        }
+        if (studyPreference.mode == BookStudyMode.BOOK_MAP) {
+            // Whole-book map generation is user-triggered via Haiku 5.5 Batch and cached locally in BookMapStore.
+            modePackJson = null
             modeStreamingText = ""
             modeLoading = false
             modeError = null
@@ -265,46 +266,6 @@ internal fun SingleBookCompanionPanel(
         } catch (_: Exception) {
             modeLoading = false
             modeError = "当前离线，已显示本地章节结构。"
-        }
-    }
-
-    fun triggerBookMapBatch() {
-        if (bookMapBatchBusy || !aiEnabled || explainer.identity == null) return
-        bookMapBatchBusy = true
-        modeError = null
-        bookMapBatchStatus = "正在整理整本书全章一页纸与速览地图…"
-        scope.launch {
-            try {
-                val wire = withContext(Dispatchers.IO) {
-                    StudyModeWireBuilder.buildBookMapBatchRequestJson(library, book, studyPreference)
-                }
-                val res = explainer.fetchBookMapBatch(book.id, wire, onBusy = { bookMapBatchStatus = it })
-                val body = res.body
-                if (body != null) {
-                    withContext(Dispatchers.IO) {
-                        StudyModeStore.saveBookMapBatchResult(
-                            library = library,
-                            bookId = book.id,
-                            batchJson = body,
-                            expected = book,
-                            detailLevel = studyPreference.detailLevel,
-                            explainLang = studyPreference.explainLang,
-                        )
-                    }
-                    bookMapMeta = withContext(Dispatchers.IO) { StudyModeStore.loadBookMapMeta(library, book.id) }
-                    modeError = null
-                    modeFetchNonce += 1
-                } else {
-                    modeError = res.error ?: "整本全书地图暂无法更新。"
-                }
-            } catch (c: CancellationException) {
-                throw c
-            } catch (_: Exception) {
-                modeError = "连不上学习服务，保留本地章节地图。"
-            } finally {
-                bookMapBatchBusy = false
-                bookMapBatchStatus = null
-            }
         }
     }
 
@@ -715,10 +676,25 @@ internal fun SingleBookCompanionPanel(
                     }
                 }
                 if (chapterGroup == null) {
-                    if (pageOnly) bottomContent?.invoke() else CoachEmptyState(
-                        title = "当前页暂未归入正文小节。",
-                        hint = "翻到正文第 1 章后，这里会自动呈现本章伴读与练习。",
-                    )
+                    if (studyPreference.mode == BookStudyMode.BOOK_MAP && !originalOnly) {
+                        BookWhatAboutMapPanel(
+                            book = book,
+                            library = library,
+                            currentPage = currentPage,
+                            explainLang = studyPreference.explainLang,
+                            aiAvailable = aiEnabled && explainer.loaded && explainer.identity != null,
+                            fetchBatch = { req -> explainer.fetchBookMapBatch(book.id, req) },
+                            onOpenAnchor = onOpenAnchor,
+                            onJumpPage = onJumpPage,
+                        )
+                    } else if (pageOnly) {
+                        bottomContent?.invoke()
+                    } else {
+                        CoachEmptyState(
+                            title = "当前页暂未归入正文小节。",
+                            hint = "翻到正文第 1 章后，这里会自动呈现本章伴读与练习。",
+                        )
+                    }
                     return@Column
                 }
 
@@ -776,10 +752,8 @@ internal fun SingleBookCompanionPanel(
                         modeStreamingText = modeStreamingText,
                         modeLoading = modeLoading,
                         modeError = modeError,
-                        bookMapMeta = bookMapMeta,
-                        bookMapBatchLoading = bookMapBatchBusy,
-                        bookMapBatchStatus = bookMapBatchStatus,
-                        onRequestBookMapBatch = if (aiEnabled && explainer.identity != null) { { triggerBookMapBatch() } } else null,
+                        bookMapAiAvailable = aiEnabled && explainer.loaded && explainer.identity != null,
+                        bookMapFetchBatch = { req -> explainer.fetchBookMapBatch(book.id, req) },
                         onRetryModePack = { modeFetchNonce += 1 },
                     )
                 } else {

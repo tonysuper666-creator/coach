@@ -52,6 +52,7 @@
     "STUDY_MODE_MATH_REPAIR": "study_mode",
     "BOOK_MAP_BATCH_CHUNK": "study_mode",
     "BOOK_MAP_BATCH_GRAPH": "study_mode",
+    "book_map_batch": "friend_batch",
     "BOOK_STRUCTURE_DETECT": "book_structure",
     "BOOK_MATH_VERIFY": "math_verify",
     "BOOK_MATH_REPAIR": "math_verify",

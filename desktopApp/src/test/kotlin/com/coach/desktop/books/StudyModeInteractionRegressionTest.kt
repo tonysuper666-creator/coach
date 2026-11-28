@@ -176,8 +176,12 @@ class StudyModeInteractionRegressionTest {
                 onNodeWithTag("mode-surface-BOOK_MAP").assertExists()
                 assertTrue(calls.isEmpty(), calls.toString())
                 pref = pref.copy(detailLevel = ExplainDetailLevel.BRIEF)
-                waitUntil(timeoutMillis = 5_000) { "mode" in calls && "page" in calls && "load" in calls }
+                waitUntil(timeoutMillis = 5_000) { "page" in calls && "load" in calls }
+                assertTrue("mode" !in calls, "BOOK_MAP must not auto-spend streaming mode quota: $calls")
+                onNodeWithTag("book-map-v2-generate").assertExists()
                 onNodeWithTag("page-explanation-error").assertTextContains("段落位置无法核对", substring = true)
+                pref = pref.copy(mode = BookStudyMode.DIAGNOSTIC_SKIP)
+                waitUntil(timeoutMillis = 5_000) { "mode" in calls }
                 val before = calls.toList()
                 pref = pref.copy(detailLevel = ExplainDetailLevel.ORIGINAL_ONLY)
                 waitForIdle()

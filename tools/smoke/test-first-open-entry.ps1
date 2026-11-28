@@ -147,7 +147,7 @@ function Shot($step,$tag) {
         hold { Row '再 试 一 次' 120 }
         importFailed { Row '再放一次' 200 }
         readOnly { Row '先翻开这本书' 200 }
-        reader { Row '书架' 60 }
+        reader { Row '书架' 60; Row '目录' 60 300 }
         readerWithBanner {
             Row '正在读取教材 · 第 620 / 620 页' 60 60
             Row '书架' 175 60
@@ -263,10 +263,36 @@ $bannerBackLines = @(
 )
 $bannerHit = Find-Step2ReaderBack $bannerBackLines 800 600
 if (-not $bannerHit -or $bannerHit.Y -ne 185) { throw "Expected banner-shifted back at Y=185, got $($bannerHit.Y)" }
-$noBannerBodyBack = @((Row '书架' 180 60))
+$proseUnderBanner = @(
+    (Row '正在读取教材' 60 60),
+    (Row '把书放回书架后继续阅读' 175 60)
+)
+if ($null -ne (Find-Step2ReaderBack $proseUnderBanner 800 600)) { throw 'Accepted body prose containing 书架 without toolbar' }
+$noBannerBodyBack = @((Row '书架' 180 60), (Row '目录' 180 200))
 if ($null -ne (Find-Step2ReaderBack $noBannerBodyBack 800 600)) { throw 'Accepted body 书架 without import banner' }
-$farBelowBannerBack = @((Row '正在读取教材 · 第 620 / 620 页' 60 60), (Row '书架' 310 60))
+$farBelowBannerBack = @((Row '正在读取教材 · 第 620 / 620 页' 60 60), (Row '书架' 310 60), (Row '目录' 310 200))
 if ($null -ne (Find-Step2ReaderBack $farBelowBannerBack 800 600)) { throw 'Accepted body 书架 far below import banner' }
+
+# Show-ReaderTop shares toolbar detection and skips prose containing 书架 to hover below the banner
+$origHover = ${function:Hover}
+$origShot = ${function:Shot}
+try {
+    $script:hoverYs = New-Object Collections.ArrayList
+    $script:topCalls = 0
+    function Hover($x, $y) { [void]$script:hoverYs.Add($y) }
+    function Shot($step, $tag) {
+        $script:topCalls++
+        if ($script:topCalls -eq 1) { return , $proseUnderBanner }
+        return , $bannerBackLines
+    }
+    $topResult = Show-ReaderTop 2 'toolbar-check' 3
+    if (-not $topResult -or $script:topCalls -ne 2 -or $script:hoverYs.Count -ne 2 -or $script:hoverYs[1] -le 80) {
+        throw "Show-ReaderTop failed to skip prose and hover below banner: calls=$($script:topCalls) ys=$($script:hoverYs -join ',')"
+    }
+} finally {
+    Set-Item Function:\Hover $origHover
+    Set-Item Function:\Shot $origShot
+}
 'PASS heading-only, login, marked option, compact-card, banner-back'
 
 

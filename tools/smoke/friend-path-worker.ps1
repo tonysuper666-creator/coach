@@ -577,15 +577,18 @@ function Hover([int]$x, [int]$y) {
 # 要顶栏上的按钮，先沿着顶边挪两下把它叫回来，认到「书架」或「目录」再把这一帧交出去。
 function Show-ReaderTop([int]$n, [string]$tag, [int]$Tries = 6) {
     $r = Get-Rect
-    $w = [int]($r.R - $r.L)
+    $w = [int]($r.R - $r.L); $h = [int]($r.B - $r.T)
     $x = [int]($w / 2)
     $baseY = 36
     for ($k = 0; $k -lt $Tries; $k++) {
         Hover $x ($baseY + 8 * $k)
         Start-Sleep -Milliseconds 500
         $lines = Shot $n "$tag-top$k"
-        if (Find-Text $lines '书架') { return $lines }
-        if (Find-Text $lines '目录') { return $lines }
+        if (Find-Step2ReaderBack $lines $w $h) { return $lines }
+        $toc = Find-Text $lines '目录'
+        if ($toc -and $toc.X -le ($w / 2) -and $toc.Y -le 280 -and ((Find-OnRow $lines '伴读' $toc 22) -or (Find-OnRow $lines '收起' $toc 22))) {
+            return $lines
+        }
         foreach ($needle in @('正在读取教材', '正在准备教材', '取消导入')) {
             $b = Find-Text $lines $needle
             if ($b -and $b.Y2 -ge $baseY -and $b.Y2 -lt 220) {
@@ -620,14 +623,19 @@ function Find-Step2ReaderBack($lines, [int]$winW, [int]$winH = 0) {
         if ($m.X -gt ($winW / 3)) { continue }
         if ($m.Y -gt $maxY) { continue }
         if ($banner -and $m.Y -le $banner.Y1) { continue }
+        $compact = ($l.Text -replace '\s', '')
+        $isToolbarLabel = ($compact -match '^(?:[←<+\-·•]*)?书架$') -or ($compact -match '书架.*(?:目录|伴读|收起)')
+        if (-not $isToolbarLabel) { continue }
         $cands += $m
     }
     if (-not $cands.Count) { return $null }
     foreach ($c in ($cands | Sort-Object Y)) {
-        $toc = Find-OnRow $lines '目录' $c 20
-        if ($toc -and $toc.X -gt $c.X) { return $c }
+        foreach ($peer in @('目录', '伴读', '收起')) {
+            $hit = Find-OnRow $lines $peer $c 22
+            if ($hit -and $hit.X -gt $c.X) { return $c }
+        }
     }
-    return ($cands | Sort-Object Y | Select-Object -First 1)
+    return $null
 }
 # Locate controls inside the open question-mode dialog, ignoring the background toolbar button and hint copy.
 function Get-QuestionSettingsControls($lines) {

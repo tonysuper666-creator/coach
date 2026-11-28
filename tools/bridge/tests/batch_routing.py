@@ -83,6 +83,37 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     def summary(self):
         return self.ledger.read()["months"]["2026-11"][self.provider]
 
+    async def test_truncated_batch_preserves_internal_reason(self):
+        await self.submit()
+        self.now += 61
+        def truncate(row):
+            row["result"]["message"]["stop_reason"] = "max_tokens"
+            return row
+        self.result_change = truncate
+        with self.assertRaisesRegex(ApiFailure, "^batch_result_unavailable$"):
+            await self.run_batch()
+        state = self.router.read(self.router.path(self.key()))
+        self.assertEqual(("fallback", "batch_incomplete"), (state["phase"], state["reason"]))
+        with self.assertRaisesRegex(ApiFailure, "^batch_result_unavailable$"):
+            await self.run_batch(self.make_router())
+        self.assertEqual(0, self.summary()["reserved_microusd"])
+        self.assertGreater(self.summary()["spent_microusd"], 0)
+
+    async def test_non_api_failure_stores_only_exception_type(self):
+        await self.submit()
+        self.now += 61
+        with patch.object(self.router, "poll", side_effect=ValueError("private detail")):
+            with self.assertRaisesRegex(ApiFailure, "^batch_result_unavailable$"):
+                await self.run_batch()
+        state = self.router.read(self.router.path(self.key()))
+        self.assertEqual("ValueError", state["reason"])
+
+    async def test_batch_accepts_maximum_output_tokens(self):
+        with self.assertRaises(BatchPending):
+            await self.router.run(self.key(), "exam_point_drill", "claude-haiku-5-5", "system", "prompt", 16_000)
+        self.assertEqual("pending", self.router.read(self.router.path(self.key()))["phase"])
+        self.assertEqual(16_000, json.loads(self.calls[0].content)["requests"][0]["params"]["max_tokens"])
+
     async def test_both_official_batch_contracts_restart_and_exactly_once_settlement(self):
         for provider in ("anthropic", "openai"):
             with self.subTest(provider=provider):

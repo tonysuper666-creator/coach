@@ -400,7 +400,7 @@ class CourseTopicSynthesisPipeline(
                         userPrompt = mapPrompt,
                         task = "course_topic_map",
                         batchKey = "course-map-$topicId-$chunkIdx",
-                        maxTokens = 8_000,
+                        maxTokens = 16_000,
                     )
                     ownerLedger?.record(
                         TokenLedgerEntry(
@@ -461,7 +461,7 @@ class CourseTopicSynthesisPipeline(
             userPrompt = reducePrompt,
             task = "course_topic_reduce",
             batchKey = "course-reduce-$topicId",
-            maxTokens = 8_000,
+            maxTokens = 16_000,
         )
         ownerLedger?.record(
             TokenLedgerEntry(

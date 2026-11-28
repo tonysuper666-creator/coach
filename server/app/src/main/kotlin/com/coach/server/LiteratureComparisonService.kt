@@ -37,7 +37,7 @@ class LiteratureComparisonService(private val bridge: BridgeClient) {
                     user = prompt,
                     stream = false,
                     background = true,
-                    maxTokens = 8000,
+                    maxTokens = 16_000,
                     friendId = friend?.let(::friendId),
                     friendDevice = device.takeIf { friend != null },
                 ))) {

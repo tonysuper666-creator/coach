@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -122,6 +123,8 @@ internal fun IncidentExitPrompt(
     val sending = state.sending
     val notice = state.notice
     var actionsOpen by remember { mutableStateOf(false) }
+    // 发出去了就把菜单收起，让阅读区恢复可点；发失败再把菜单打开，说清为什么没发出去。
+    LaunchedEffect(notice) { if (notice != null) actionsOpen = true }
     CoachTheme(darkTheme) {
     val colors = CoachTheme.colors
     // 顶栏角落的小徽标：不占一整行、不盖阅读区。点开才有 查看 / 发送 / 不发。
@@ -155,7 +158,11 @@ internal fun IncidentExitPrompt(
             DropdownMenuItem(
                 text = { Text(if (sending) "正在发送" else "发送") },
                 enabled = !sending,
-                onClick = { state.send(identity) },
+                onClick = {
+                    // 已登录时立刻收起菜单；没登录就留着菜单，让「登录后才能发送」看得见。
+                    if (identity != null) actionsOpen = false
+                    state.send(identity)
+                },
                 modifier = Modifier.testTag("incident-send"),
             )
             DropdownMenuItem(

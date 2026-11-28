@@ -187,6 +187,7 @@ internal typealias BookPdfName = com.tom_roush.pdfbox.cos.COSName
 internal typealias BookPdfPage = com.tom_roush.pdfbox.pdmodel.PDPage
 internal typealias BookPdfForm = com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 internal typealias BookPdfImage = com.tom_roush.pdfbox.pdmodel.graphics.image.PDImage
+internal typealias BookPdfImageObject = com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject
 internal typealias BookPdfPoint = android.graphics.PointF
 internal typealias BookPdfFillRule = android.graphics.Path.FillType
 internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = BookPdfPoint(x, y)

@@ -539,6 +539,7 @@ internal typealias BookPdfName = org.apache.pdfbox.cos.COSName
 internal typealias BookPdfPage = org.apache.pdfbox.pdmodel.PDPage
 internal typealias BookPdfForm = org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject
 internal typealias BookPdfImage = org.apache.pdfbox.pdmodel.graphics.image.PDImage
+internal typealias BookPdfImageObject = org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 internal typealias BookPdfPoint = java.awt.geom.Point2D
 internal typealias BookPdfFillRule = Int
 internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = java.awt.geom.Point2D.Float(x, y)

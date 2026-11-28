@@ -401,7 +401,10 @@ internal object LiteraturePassages {
     private data class Candidate(val page: BookPage, val region: GuideRegion, val offset: Int, val quote: String)
 
     /** Extract all clean, filtered body sentences for one book in reading order (no section grouping). */
-    fun extractCandidates(book: Textbook): List<GuideExcerpt> {
+    fun extractCandidates(book: Textbook): List<GuideExcerpt> = extractCandidates(book, null)
+
+    /** The local audit observes discarded spans in reader coordinates. Normal callers need no observer. */
+    fun extractCandidates(book: Textbook, discarded: ((BookPage, Int, Int, String) -> Unit)?): List<GuideExcerpt> {
         val edges = book.pages.flatMap { page ->
             page.guideRegions.flatMap { region ->
                 val lines = region.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
@@ -413,12 +416,18 @@ internal object LiteraturePassages {
         var backMatter = false
         val notesOpen = book.pages.size / 3
         for (page in book.pages) {
-            if (isFrontMatterCover(page)) continue
-            if (backMatter) continue
+            if (backMatter || isFrontMatterCover(page)) {
+                discarded?.invoke(page, 0, page.text.length, if (backMatter) "back_matter" else "cover")
+                continue
+            }
             val pageLines = page.guideRegions.flatMap { it.text.lines() }
-            if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) continue
+            if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) {
+                discarded?.invoke(page, 0, page.text.length, "scaffold_page")
+                continue
+            }
             if (page.number > notesOpen && page.guideRegions.none { it.measured && it.footnoteRanges.isNotEmpty() } && isEndnotePage(pageLines)) {
                 backMatter = true
+                discarded?.invoke(page, 0, page.text.length, "endnotes_page")
                 continue
             }
             val pageCandidates = mutableListOf<Candidate>()
@@ -430,6 +439,7 @@ internal object LiteraturePassages {
             for (region in page.guideRegions) {
                 val regionLines = region.text.lines()
                 if (!region.measured && isFootnoteBlock(regionLines)) {
+                    discarded?.invoke(page, base, base + region.text.length, "note_block")
                     base += region.text.length + 2
                     continue
                 }
@@ -462,14 +472,17 @@ internal object LiteraturePassages {
                             if (pageTopTail) dropPageTop = false
                             val blankTail = lead
                             lead = false
-                            if (!pageTopTail && !blankTail &&
-                                !rejectedFootnote(quote, page.text, at, region, localStart, localEnd) &&
-                                !region.overlapsWideGap(localStart, localEnd) &&
-                                bodySentence(quote, region.measured, localEnd in region.scannedStops) &&
-                                region.containsSentence(quote)
-                            ) {
-                                pageCandidates += Candidate(page, region, at, quote)
+                            val reason = when {
+                                pageTopTail -> "previous_page"
+                                blankTail -> "unfinished_paragraph"
+                                rejectedFootnote(quote, page.text, at, region, localStart, localEnd) -> "note"
+                                region.overlapsWideGap(localStart, localEnd) -> "wide_gap"
+                                !bodySentence(quote, region.measured, localEnd in region.scannedStops) -> "body_sentence"
+                                !region.containsSentence(quote) -> "source_order"
+                                else -> null
                             }
+                            if (reason == null) pageCandidates += Candidate(page, region, at, quote)
+                            else discarded?.invoke(page, at, at + quote.length, reason)
                         }
                     }
                     start = -1
@@ -484,10 +497,12 @@ internal object LiteraturePassages {
                     val line = raw.trim()
                     if (region.overlapsFootnote(offset, offset + raw.length)) {
                         finishParagraph()
+                        discarded?.invoke(page, base + offset, base + offset + raw.length, "note_line")
                         offset += raw.length + 1
                         continue
                     }
                     if (index < abstractLineIdx) {
+                        discarded?.invoke(page, base + offset, base + offset + raw.length, "before_abstract")
                         offset += raw.length + 1
                         continue
                     }
@@ -512,6 +527,7 @@ internal object LiteraturePassages {
                             }
                         } else {
                             prevCaptionEnded = endsSentence(line)
+                            discarded?.invoke(page, base + offset, base + offset + raw.length, "caption")
                             offset += raw.length + 1
                             continue
                         }
@@ -596,12 +612,18 @@ internal object LiteraturePassages {
                 finishParagraph()
                 base += region.text.length + 2
             }
-            if (footnoteLines >= 3 && footnoteLines * 2 >= footnoteLines + proseLines) continue
+            if (footnoteLines >= 3 && footnoteLines * 2 >= footnoteLines + proseLines) {
+                discarded?.invoke(page, 0, page.text.length, "note_page")
+                continue
+            }
             // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences
             // (or heavy copyright notice cover on page 1 with >= 4 copyright hits and <= 6 sentences).
             // Never drop the final body sentences on a page that transitions into back-matter References (ISBN citations).
             val copyrightHits = copyrightPageTerm.findAll(page.text).count()
-            if (!backMatter && copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
+            if (!backMatter && copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) {
+                discarded?.invoke(page, 0, page.text.length, "copyright_page")
+                continue
+            }
             candidates += pageCandidates
         }
         if (candidates.isEmpty()) return emptyList()

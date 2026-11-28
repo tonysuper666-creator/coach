@@ -10,6 +10,7 @@ These are page excerpts from the public test library. The three PDFs retain the 
 | liberty | Two paragraphs of the introduction and notes 6–7, with the original XHTML markup. The three discontiguous samples occupy separate spine members. | John Stuart Mill, *On Liberty*, introduction by W. L. Courtney, [Project Gutenberg 34901](https://www.gutenberg.org/ebooks/34901) |
 | pollock | Entire source PDF pages 48 and 49 (printed 3 and 4). Original scans with a frozen invisible 300 dpi Tesseract 5.5.2 English text layer. | F. Pollock and F. W. Maitland, *The History of English Law before the Time of Edward I*, volume I (1895), public domain. [University of California copy, Google / Internet Archive](https://archive.org/details/historyenglishl03maitgoog) |
 | ocr-bands | A measured OCR layer with a compact footnote followed by normal body spacing, and small notes to either side of the prose. One body sentence continues across two shared baselines. | Original test material |
+| covered-ocr | A grayscale facsimile painted over fill-mode OCR. Prose resumes after both a hanging footnote and an unnumbered block of dense notes. The marginal note and one unnumbered note share baselines with body text. | Original test material |
 | raised-words | An inline quotation with abbreviated names, an editorial superscript between words, a closing quote and a raised numeric callout before the following sentence. | Original test material |
 | shape | Two synthetic pages with an indented small-type quotation, repeated body sentence, and hanging footnote in smaller type. Only the second page has a drawn separator. | Original test material |
 
@@ -32,3 +33,5 @@ tools/dev/heavy --local ./gradlew :desktopApp:literatureGoldAudit --args='"<labe
 ```
 
 The check first validates every labeled span against the current page. A stale offset or wrong hash stops the run. Any candidate overlapping a note on a labeled page counts as leakage. A recovered body sentence must match both endpoints. The report gives counts and missing locations, and also fails on an unclassified candidate on a labeled page.
+
+To inspect a missed span locally, run the same task with `--args='--explain 5,13,25,29,33 "first.pdf" 11 "second.pdf"'`. Each output row contains the book hash prefix, page, UTF-16 start and exclusive end, stage, and the first 12 hex digits of the SHA-256 of the exact UTF-8 span. Compare offsets to tell whether the target overlaps a marked note line, crosses a region boundary, or reached sentence checks such as `wide_gap`, `body_sentence` and `source_order`. The `candidate` rows show the final selection.

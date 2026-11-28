@@ -314,7 +314,7 @@ internal fun TextbookReader(
             val existing = inlineThread?.takeIf { it.selection == target } ?: InlineExplainThread(target, secCtx)
             inlineThread = existing.copy(
                 loading = false,
-                error = ("连接已断开，请重新登录后继续使用 AI 功能。" to ExplainTrouble.Revoked),
+                error = ("连接已断开，阅读照常；请重新登录后继续使用讲解与提问。" to ExplainTrouble.Revoked),
                 fallbackBlocks = listOf(target),
                 askingOpen = true,
             )

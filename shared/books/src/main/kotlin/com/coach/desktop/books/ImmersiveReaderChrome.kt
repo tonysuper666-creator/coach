@@ -1466,7 +1466,7 @@ internal fun CompanionAskPane(
                                     color = if (trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
                                     modifier = Modifier.weight(1f).testTag("inline-explain-error"),
                                 )
-                                if (trouble.needsPairing) TextButton(onClick = onOpenLogin) { Text("重新登录", maxLines = 1, softWrap = false) }
+                                if (trouble.needsPairing) TextButton(onClick = onOpenLogin, modifier = Modifier.testTag("inline-explain-relogin")) { Text("重新登录", maxLines = 1, softWrap = false) }
                                 else TextButton(onClick = onRetry, modifier = Modifier.testTag("inline-explain-retry")) { Text("重试", maxLines = 1, softWrap = false) }
                             }
                         }

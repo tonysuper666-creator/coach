@@ -135,6 +135,7 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
     fun chooseAiExplain(enabled: Boolean) {
         save("aiExplain", enabled.toString())
         aiExplain = enabled
+        syncForDirectory(dirKey) { it.aiExplain = enabled }
     }
 
     fun chooseProactiveWhispers(enabled: Boolean) {

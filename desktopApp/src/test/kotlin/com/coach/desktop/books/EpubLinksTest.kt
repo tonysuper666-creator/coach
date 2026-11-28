@@ -38,7 +38,8 @@ class EpubLinksTest {
             ),
             "notes.xhtml" to document(
                 "<h1>Notes</h1><ol><li id='note-1'><p>First note <a href='chapter.xhtml#ref-1'>\u21a9</a></p></li>" +
-                    "<li id='note-2'><p>Second note <a href='chapter.xhtml#ref-2'>\u21a9</a> <a href='https://example.com/x'>web</a></p></li></ol>",
+                    "<li id='note-2'><p>Second note <a href='notes.xhtml#note-1'>previous note</a> " +
+                    "<a href='chapter.xhtml#ref-2'>\u21a9</a> <a href='https://example.com/x'>web</a></p></li></ol>",
             ),
         ))
         return file
@@ -48,7 +49,7 @@ class EpubLinksTest {
         val file = sample(root)
         val pages = TextbookExtraction.extract(file, "epub", "fallback").pages
         val links = assertNotNull(TextbookExtraction.epubLinks(file, pages))
-        assertEquals(4, links.count, "只有书内链接，外部网址不算")
+        assertEquals(5, links.count, "只有书内链接，外部网址不算")
         fun linkTexts(page: Int) = links.onPage(page).map { pages[page - 1].text.substring(it.start, it.end) }
         val bodyPage = pages.indexOfFirst { it.text.contains("Alpha beta") } + 1
         val notesPage = pages.indexOfFirst { it.text.contains("First note") } + 1
@@ -58,6 +59,8 @@ class EpubLinksTest {
         // 目标落在「First note」这一条的开头，而不是页首。
         assertTrue(pages[notesPage - 1].text.startsWith("First note", forward.target.offsetUtf16) ||
             pages[notesPage - 1].text.substring(forward.target.offsetUtf16).trimStart().startsWith("First note"))
+        val crossReference = pages[notesPage - 1].text.indexOf("previous note")
+        assertEquals(forward.target, links.at(notesPage, crossReference)?.target)
         val back = links.onPage(notesPage).first { pages[notesPage - 1].text.substring(it.start, it.end) == "\u21a9" }
         assertEquals(bodyPage, back.target.importPage)
         assertTrue(pages[bodyPage - 1].text.substring(back.target.offsetUtf16).startsWith("1"))
@@ -93,23 +96,61 @@ class EpubLinksTest {
         assumeCorpus(file)
         val pages = TextbookExtraction.extract(file, "epub", "x").pages
         val links = assertNotNull(TextbookExtraction.epubLinks(file, pages))
-        val noteRefs = pages.indices.flatMap { index ->
-            links.onPage(index + 1).filter { pages[index].text.substring(it.start, it.end).all(Char::isDigit) }
+        // The source orders the 156 numbered <li> elements by note number.
+        val notes = TextbookExtraction.epubSourceMapping(file, pages).elements.filter {
+            it.member == "epub/text/endnotes.xhtml" && it.localName == "li"
         }
-        assertTrue(noteRefs.size >= 150, "正向尾注链接应有 158 条，实得 ${noteRefs.size}")
-        val backArrows = pages.indices.flatMap { index ->
-            links.onPage(index + 1).filter { pages[index].text.substring(it.start, it.end).contains('\u21a9') }
+        assertEquals(156, notes.size)
+        val noteStarts = notes.map { note ->
+            val first = note.ranges.first()
+            BookPageAnchor(first.page, first.start)
         }
-        assertTrue(backArrows.size >= 150, "返回箭头应有 156 条，实得 ${backArrows.size}")
+        val noteNumberAt = noteStarts.withIndex().associate { (index, anchor) -> anchor to index + 1 }
+        val forwards = pages.sumOf { page -> links.onPage(page.number).count { it.target in noteNumberAt } }
+        assertEquals(158, forwards, "156 numbered references and two links between notes")
+
+        val crossReferences = mutableListOf<Pair<Int, Int>>()
+        for ((index, note) in notes.withIndex()) {
+            val number = index + 1
+            val outgoing = note.ranges.flatMap { range ->
+                links.onPage(range.page).filter { it.start in range.start until range.end }
+                    .map { link -> pages[range.page - 1].text.substring(link.start, link.end) to link.target }
+            }
+            val back = outgoing.single { (label, _) -> '\u21a9' in label }.second
+            val ref = assertNotNull(links.at(back.importPage, back.offsetUtf16), "return from note $number")
+            assertEquals(back.offsetUtf16, ref.start)
+            assertEquals(number.toString(), pages[back.importPage - 1].text.substring(ref.start, ref.end))
+            assertEquals(noteStarts[index], ref.target, "numbered reference $number")
+            for ((_, target) in outgoing) {
+                noteNumberAt[target]?.let { crossReferences += number to it }
+            }
+        }
+        assertEquals(listOf(62 to 61, 71 to 70), crossReferences)
     }
 
     @Test fun publicMeditationsHasNoBlankPage() {
         val file = Path.of("D:/agent/materials/public-corpus/nonfiction/meditations/meditations.epub")
         assumeCorpus(file)
         val book = TextbookExtraction.extract(file, "epub", "x")
-        val pages = book.pages
-        assertEquals(0, pages.count { it.text.isBlank() && book.illustrations.none { image -> image.page == it.number } })
-        assertEquals(138, pages.size, "封面外壳页不进阅读顺序，原 139 页变 138 页")
+        assertNoEmptyPages(book, "meditations")
+        assertEquals(138, book.pages.size, "封面外壳页不进阅读顺序，原 139 页变 138 页")
+    }
+
+    @Test fun otherPublicEpubsHaveNoEmptyPages() {
+        val books = listOf("seneca-dialogues", "emerson-essays-first-series", "walden",
+            "franklin-autobiography", "kybalion", "key-to-theosophy")
+        for (book in books) {
+            val file = Path.of("D:/agent/materials/public-corpus/nonfiction", book, "$book.epub")
+            assumeCorpus(file)
+            assertNoEmptyPages(TextbookExtraction.extract(file, "epub", book), book)
+        }
+    }
+
+    private fun assertNoEmptyPages(book: ExtractedBook, name: String) {
+        assertTrue(book.pages.isNotEmpty(), name)
+        val illustratedPages = book.illustrations.map { it.page }.toSet()
+        val emptyPages = book.pages.filter { it.text.isBlank() && it.number !in illustratedPages }
+        assertEquals(emptyList(), emptyPages.map { it.number }, name)
     }
 
     @Test fun meditationsTitlePageLinesShareOneSheetWithTheNextHeading() {

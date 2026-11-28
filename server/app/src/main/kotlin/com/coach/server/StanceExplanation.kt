@@ -1001,7 +1001,7 @@ internal fun checkedStancePayload(
                         continue
                     }
 
-                    // 规则 1：逐句核对陈述与该句所引原文是否内容相符，防止无关句借用另一句的真实引文冒充「本书」
+                    // 规则 1：词面粗筛，陈述与该句所引原句毫不相干就丢句；不判断语义蕴含（见 StanceClaimSupport 注释）
                     if (!StanceClaimSupport.isSupported(text, citations, blocks)) {
                         droppedSentences++
                         continue

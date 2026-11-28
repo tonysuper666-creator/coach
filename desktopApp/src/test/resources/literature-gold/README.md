@@ -12,7 +12,7 @@ These are page excerpts from the public test library. The three PDFs retain the 
 | ocr-bands | A measured OCR layer with a compact footnote followed by normal body spacing, and small notes to either side of the prose. One body sentence continues across two shared baselines. | Original test material |
 | covered-ocr | A grayscale facsimile painted over fill-mode OCR. Prose resumes after both a hanging footnote and an unnumbered block of dense notes. The marginal note and one unnumbered note share baselines with body text. | Original test material |
 | offset-crop | Two visually identical searchable scans with a translated CropBox. The second counter-rotates its contents under a 180° page rotation. Body lines occupy both ends of the crop, with two smaller notes below a rule and unrelated text outside the crop. | Original test material |
-| printed-notes | Four facsimiles share a uniform-height OCR font. The first has smaller notes below a raster-only rule, the second has small body type without a rule, the third has two hanging notes, and the fourth has full-size prose below a rule. | Original test material |
+| printed-notes | Six facsimiles share a uniform-height OCR font. They include smaller notes below a raster-only rule, two hanging notes, and raised marks transcribed as baseline letters. Controls place small body type without a rule, full-size prose under a rule, and a rule beside the small prose. | Original test material |
 | raised-words | An inline quotation with abbreviated names, an editorial superscript between words, a closing quote and a raised numeric callout before the following sentence. | Original test material |
 | shape | Two synthetic pages with an indented small-type quotation, repeated body sentence, and hanging footnote in smaller type. Only the second page has a drawn separator. | Original test material |
 
@@ -28,7 +28,7 @@ With the two Pollock pages added, the classifier at `30cff15f` recovered 1/29 sc
 
 With the offset-crop pages added, `e4db45c6` recovered 5/16 body sentences on the new pages and admitted two notes. The combined baseline was 148/159 body sentences and two note leaks.
 
-On the printed-notes pages, `6c027723` recovered 40/40 body sentences and admitted all eight notes. The combined baseline was 199/199 and eight note leaks.
+On the first four printed-notes pages, `6c027723` recovered 40/40 body sentences and admitted all eight notes.
 
 ## Private PDF acceptance
 

@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import java.io.StringWriter
 import java.text.Normalizer
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 internal data class LiteraturePaperMeta(
     val bookId: String,
@@ -129,11 +130,22 @@ internal object LiteratureTextNorm {
     }
 }
 
-/** Shelf, reader, library, and export show the characters the title meant, not the HTML escapes. */
-internal fun visibleBookTitle(raw: String): String {
-    if (raw.isBlank() || '&' !in raw) return raw
-    return LiteratureTextNorm.decodeHtmlEntities(raw)
+/** Titles shown to a reader: HTML entities become characters, and private-use glyphs are dropped. */
+internal fun sanitizeDisplayTitle(raw: String): String {
+    val decoded = LiteratureTextNorm.decodeHtmlEntities(raw)
+    val kept = StringBuilder(decoded.length)
+    var index = 0
+    while (index < decoded.length) {
+        val code = decoded.codePointAt(index)
+        val privateUse = code in 0xE000..0xF8FF || code in 0xF0000..0xFFFFD || code in 0x100000..0x10FFFD
+        if (!privateUse) kept.appendCodePoint(code)
+        index += Character.charCount(code)
+    }
+    return kept.toString().replace(Regex("""\s+"""), " ").trim()
 }
+
+/** Shelf, reader, library, and export show the characters the title meant, not the HTML escapes. */
+internal fun visibleBookTitle(raw: String): String = sanitizeDisplayTitle(raw)
 
 internal object LiteratureMetadata {
     private val junkTitle = Regex(
@@ -157,8 +169,18 @@ internal object LiteratureMetadata {
     private val anyYearToken = Regex("""(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)""")
     private val jstorAuthor = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Author(?:\(s\))?\s*[:：]\s*(.+)$""")
     private val multilineAuthorLabel = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Author(?:\(s\))?\s*[:：]\s*$""")
-    private val multilineTitleLabel = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Title\s*[:：]\s*$""")
-    private val explicitTitleLine = Regex("""(?im)^(?:Book\s+|Chapter\s+|Article\s+)?Title\s*[:：]\s*(.+)$""")
+    private val titledLabel = Regex("""(?i)^(chapter\s+title|article\s+title|book\s+title|title)\s*[:：]\s*(.*)$""")
+    private val fieldStop = Regex(
+        """(?i)^(?:(?:book|chapter|article)\s+)?author(?:\(s\))?\s*[:：]|^(?:editor(?:\(s\))?|pub\.?\s*year|publication\s+date|published(?:\s+in\s+print)?|source|date|year|isbn|issn|doi)\s*[:：]""",
+    )
+    private val titleSmallWords = setOf("of", "the", "in", "and", "a", "to", "for", "on", "or", "by", "an", "from", "with")
+    /** Chapter lines name societies and journals. The shared affiliation cue treats those words as bylines. */
+    private val chapterAffiliation = Regex(
+        """(?i)\b(?:university|college|institute|department|school\s+of|faculty|academy|museum|laboratory|hospital|clinic)\b""",
+    )
+    private val sectionOnly = Regex(
+        """(?i)^(?:abstract|introduction|background|contents|preface|foreword|references|bibliography|acknowledgements|summary|conclusion|index|appendix)$""",
+    )
     private val explicitYearLine = Regex("""(?im)^(?:Pub\.?\s*year|Publication\s+Date|Source|Published|Date|Year)\s*[:：].*?(?<!\d)(1[89]\d{2}|20\d{2})(?!\d)""")
     private val downloadNoiseLine = Regex("""(?i)downloaded|accessed|printed on|retrieved|terms of use|stable url|copyright|©""")
     private val coverAuthor = Regex("""(?im)^(?:Author(?:\(s\))?|By)\s*[:：]\s*(.+)$""")
@@ -190,7 +212,8 @@ internal object LiteratureMetadata {
         firstPagesText: List<String>,
     ): LiteraturePaperMeta {
         val info = runCatching { pdf?.documentInformation }.getOrNull()
-        val pdfTitle = info?.title?.let(LiteratureTextNorm::decodeHtmlEntities)?.takeIf { isUsefulTitle(it) }
+        val pdfTitle = info?.title?.let(LiteratureTextNorm::decodeHtmlEntities)
+            ?.takeIf { isUsefulTitle(it) && !isFileSlug(it) }
         val pdfAuthor = info?.author?.let(LiteratureTextNorm::decodeHtmlEntities)?.let(::formatAuthorList)?.takeIf { isUsefulAuthor(it) }
         val pdfMetaYears = buildSet {
             listOfNotNull(info?.subject, info?.keywords, info?.title).forEach { s ->
@@ -249,26 +272,37 @@ internal object LiteratureMetadata {
             }
         }
 
-        val page1 = firstPagesText.firstOrNull().orEmpty()
-        val frontText = firstPagesText.take(2).joinToString("\n")
+        val pages = firstPagesText.take(6)
+        val page1 = pages.firstOrNull().orEmpty()
+        val frontText = pages.take(2).joinToString("\n")
         val frontLines = page1.lines().map(String::trim).filter(String::isNotEmpty)
 
         val academicHeader = extractAcademicFrontHeader(frontLines)
         val labeledAuthor = extractLabeledAuthor(page1, frontLines)
-        val explicitPageTitle = extractFrontPageTitle(page1, frontLines)
-            ?.let(LiteratureTextNorm::decodeHtmlEntities)
+        val labeled = collectLabeledTitles(pages)
+        val chapterLabeled = labeled.firstOrNull { it.kind == "chapter" || it.kind == "article" }?.title
+        val workLabeled = labeled.firstOrNull { it.kind == "work" }?.title
+        val bookLabeled = labeled.firstOrNull { it.kind == "book" }?.title
+        val pageTitleSpecial = extractFrontPageTitle(frontLines)?.let(::sanitizeDisplayTitle)
             ?.takeIf { isUsefulTitle(it) }
+        // A coursepack cover's "Book title:" is the collection. The chapter title is printed on a later page.
+        val bodyChapter = if (chapterLabeled == null && workLabeled == null && pageTitleSpecial == null && bookLabeled != null) {
+            inBodyChapterTitle(pages, bookLabeled)
+        } else {
+            null
+        }
+        val pageTitle = chapterLabeled ?: workLabeled ?: pageTitleSpecial ?: bodyChapter ?: bookLabeled
         val academicPageTitle = academicHeader?.first
-            ?.let(LiteratureTextNorm::decodeHtmlEntities)
+            ?.let(::sanitizeDisplayTitle)
             ?.takeIf { isUsefulTitle(it) }
-        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle).takeIf { isUsefulTitle(it) }
+        val decodedStored = LiteratureTextNorm.decodeHtmlEntities(storedTitle)
+            .takeIf { isUsefulTitle(it) && !isFileSlug(it) }
         val storedLooksLikeFilename = decodedStored == null ||
             decodedStored.equals(rawStem, true) ||
             decodedStored.equals(fileStem, true) ||
             decodedStored.equals(strippedStem, true) ||
             (' ' !in decodedStored && '-' in decodedStored)
-        val pageTitle = explicitPageTitle ?: academicPageTitle
-        val knownTitle = pdfTitle ?: explicitPageTitle ?: (if (storedLooksLikeFilename) academicPageTitle else decodedStored) ?: academicPageTitle
+        val knownTitle = pdfTitle ?: pageTitle ?: (if (storedLooksLikeFilename) academicPageTitle else decodedStored) ?: academicPageTitle
         val plainAuthor = (academicHeader?.second ?: extractPlainHeaderAuthor(frontLines, knownTitle))
             ?.takeIf { cand -> knownTitle == null || !titleContainsCandidate(knownTitle, cand) }
         val expandedFileAuthor = fileAuthor?.let { surname -> expandSurnameFromText(surname, frontText) ?: surname }
@@ -282,8 +316,15 @@ internal object LiteratureMetadata {
         )
 
         val preferredStored = decodedStored.takeUnless { storedLooksLikeFilename }
-        val finalTitle = (pdfTitle ?: explicitPageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: decodedStored ?: strippedStem).take(220)
-        // Priority: explicit cover label -> embedded PDF metadata -> heuristic page-1 header -> filename fallback.
+        val unlabeled = if (pdfTitle == null && pageTitle == null && fileTitle == null && preferredStored == null) {
+            unlabeledFrontTitle(frontLines)?.let(::sanitizeDisplayTitle)?.takeIf { isUsefulTitle(it) }
+        } else {
+            null
+        }
+        val finalTitle = sanitizeDisplayTitle(
+            pdfTitle ?: pageTitle ?: preferredStored ?: academicPageTitle ?: fileTitle ?: unlabeled ?: decodedStored ?: strippedStem,
+        ).take(220)
+        // Priority: chapter or article label, then the title printed above the author, then a non-slug stored title.
         val finalAuthor = formatAuthorList((labeledAuthor ?: pdfAuthor ?: plainAuthor ?: expandedFileAuthor).orEmpty())
         return LiteraturePaperMeta(bookId, finalTitle, finalAuthor, finalYear)
     }
@@ -454,17 +495,113 @@ internal object LiteratureMetadata {
         return null
     }
 
-    private fun extractFrontPageTitle(page1: String, lines: List<String>): String? {
-        explicitTitleLine.find(page1)?.groupValues?.get(1)?.trim()?.takeIf { isUsefulTitle(it) }?.let { return it }
-        val mlIdx = lines.indexOfFirst { multilineTitleLabel.matches(it) }
-        if (mlIdx >= 0 && mlIdx + 1 < lines.size) {
-            val first = lines[mlIdx + 1]
-            val second = lines.getOrNull(mlIdx + 2)?.takeIf {
-                !it.contains(':') && !multilineAuthorLabel.matches(it) && !nonTitleLine.containsMatchIn(it) && it.length <= 60
+    private data class LabeledTitle(val kind: String, val title: String)
+
+    /** Chapter and article labels win over a collection's "Book title:". Wrapped lines are joined. */
+    private fun collectLabeledTitles(pages: List<String>): List<LabeledTitle> {
+        val found = mutableListOf<LabeledTitle>()
+        for (page in pages) {
+            val lines = page.lines().map(String::trim).filter(String::isNotEmpty)
+            var index = 0
+            while (index < lines.size) {
+                val match = titledLabel.matchEntire(lines[index])
+                if (match == null) {
+                    index++
+                    continue
+                }
+                val kind = when (match.groupValues[1].lowercase()) {
+                    "chapter title" -> "chapter"
+                    "article title" -> "article"
+                    "book title" -> "book"
+                    else -> "work"
+                }
+                val parts = mutableListOf<String>()
+                val inline = match.groupValues[2].trim()
+                if (inline.isNotEmpty()) parts += inline
+                var next = index + 1
+                while (next < lines.size && parts.size < 4) {
+                    val line = lines[next]
+                    if (titledLabel.matches(line) || fieldStop.matches(line)) break
+                    if (line.length > 80 || line.last() in ".!?。！？") break
+                    parts += line
+                    next++
+                }
+                val joined = sanitizeDisplayTitle(parts.joinToString(" "))
+                if (isUsefulTitle(joined)) found += LabeledTitle(kind, joined)
+                index = maxOf(next, index + 1)
             }
-            val joined = listOfNotNull(first, second).joinToString(" ").trim()
-            if (isUsefulTitle(joined)) return joined
         }
+        return found
+    }
+
+    /**
+     * The line printed above the chapter's own author, after the coursepack cover.
+     * A later section heading is not used: it is followed by a sentence, not by the author.
+     */
+    private fun inBodyChapterTitle(pages: List<String>, bookTitle: String): String? {
+        val bookKey = titleKey(bookTitle)
+        pages.forEachIndexed { pageIndex, page ->
+            val lines = page.lines().map(String::trim).filter(String::isNotEmpty).take(24)
+            val start = if (pageIndex == 0) {
+                val lastLabel = lines.indexOfLast { titledLabel.matches(it) || fieldStop.matches(it) }
+                if (lastLabel < 0) lines.size else lastLabel + 1
+            } else {
+                0
+            }
+            for (index in start until lines.size) {
+                chapterAt(lines, index, bookKey)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun chapterAt(lines: List<String>, index: Int, bookKey: String): String? {
+        val line = lines[index]
+        if (!chapterLine(line)) return null
+        var title = line
+        var nextIndex = index + 1
+        val second = lines.getOrNull(nextIndex)
+        if (second != null && chapterLine(second) && second.substringBefore(' ').lowercase() in titleSmallWords) {
+            title = "$line $second"
+            nextIndex++
+        }
+        val after = lines.getOrNull(nextIndex).orEmpty()
+        if (!opensChapter(after)) return null
+        // The author sits directly above an affiliation. The chapter title sits above the author.
+        if (personNameLine.matches(title) && (chapterAffiliation.containsMatchIn(after) || after.equals("abstract", true) || after.equals("summary", true))) {
+            return null
+        }
+        val look = lines.subList(nextIndex, minOf(lines.size, nextIndex + 6))
+        val confirmed = look.any { line ->
+            chapterAffiliation.containsMatchIn(line) || line.equals("abstract", true) || line.equals("summary", true) ||
+                (line.length >= 40 && line.last() in ".!?。")
+        }
+        if (!confirmed) return null
+        val key = titleKey(title)
+        if (key.isEmpty() || key == bookKey || bookKey.startsWith(key) || key.startsWith(bookKey)) return null
+        return sanitizeDisplayTitle(title)
+    }
+
+    private fun chapterLine(line: String): Boolean {
+        if (line.length !in 12..160 || line.last() in ".!?。！？") return false
+        if (titledLabel.matches(line) || fieldStop.matches(line) || sectionOnly.matches(line)) return false
+        if (!isUsefulTitle(line) || chapterAffiliation.containsMatchIn(line)) return false
+        if (nonTitleLine.containsMatchIn(line)) return false
+        val words = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+        if (words.size !in 2..18) return false
+        return words.all { word -> word.lowercase() in titleSmallWords || word.first().isUpperCase() }
+    }
+
+    private fun opensChapter(line: String): Boolean {
+        if (line.isEmpty()) return false
+        if (personNameLine.matches(line) || chapterAffiliation.containsMatchIn(line)) return true
+        return line.equals("abstract", true) || line.equals("summary", true)
+    }
+
+    private fun titleKey(raw: String): String =
+        sanitizeDisplayTitle(raw).lowercase().replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
+
+    private fun extractFrontPageTitle(lines: List<String>): String? {
         val refArtIdx = lines.indexOfFirst { it.equals("REFERENCE ARTICLE", true) }
         if (refArtIdx >= 0 && refArtIdx + 1 < lines.size) {
             val cand = lines[refArtIdx + 1].trim()
@@ -476,6 +613,34 @@ internal object LiteratureMetadata {
             if (candidate.length in 6..180 && isUsefulTitle(candidate)) return candidate
         }
         return null
+    }
+
+    /** Used only when the file title and the stored title are both missing or are file slugs. */
+    private fun unlabeledFrontTitle(lines: List<String>): String? {
+        val header = lines.take(14)
+        for (i in header.indices) {
+            val line = header[i]
+            if (line.length !in 12..160 || line.last() in ".!?。！？") continue
+            if (!isUsefulTitle(line) || personNameLine.matches(line) || affiliationCue.containsMatchIn(line)) continue
+            if (nonTitleLine.containsMatchIn(line)) continue
+            val words = line.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+            if (words.size !in 3..22) continue
+            val look = header.subList(i + 1, minOf(header.size, i + 5))
+            val followedByByline = look.any { next ->
+                personNameLine.matches(next) || affiliationCue.containsMatchIn(next) ||
+                    next.equals("abstract", true) || next.equals("summary", true)
+            }
+            if (followedByByline) return line
+        }
+        return null
+    }
+
+    internal fun isFileSlug(raw: String): Boolean {
+        val clean = raw.trim().removeSuffix(".pdf").removeSuffix(".PDF")
+        if (clean.isEmpty() || clean.any { it.isWhitespace() }) return false
+        val parts = clean.split('-', '_', '–', '—').filter { it.isNotEmpty() }
+        if (parts.size < 3) return false
+        return parts.any { part -> part.length == 4 && part.all(Char::isDigit) }
     }
 
     private fun resolveConsensusYear(
@@ -1317,6 +1482,64 @@ internal object LiteraturePdfLayout {
     }
 
     private val noteLabel = Regex("""(?:\d{1,3}[.)]?|\[\d{1,3}]|[*†‡§])""")
+    private val edgeFolios = ThreadLocal<MutableMap<Int, MutableList<Int>>>()
+
+    /** Arabic page digits seen on the header or footer of [page] during the latest [extract] on this thread. */
+    fun consumeEdgeFolios(page: Int): List<Int> {
+        val found = edgeFolios.get()?.remove(page).orEmpty()
+        return found.distinct()
+    }
+
+    private fun rememberEdgeFolios(page: Int, values: List<Int>) {
+        if (values.isEmpty()) return
+        val map = edgeFolios.get() ?: mutableMapOf<Int, MutableList<Int>>().also { edgeFolios.set(it) }
+        map.getOrPut(page) { mutableListOf() }.addAll(values)
+    }
+
+    /**
+     * Page digits in the top or bottom band. Repeated ones are removed from the reading text
+     * before words are built, so the printed-page chain has to see them here.
+     */
+    private fun marginFolioValues(positions: List<BookPdfTextPosition>, height: Float): List<Int> {
+        if (height <= 0f) return emptyList()
+        val band = positions.filter {
+            it.dir == 0f && (it.yDirAdj < height * 0.07f || it.yDirAdj > height * 0.94f)
+        }
+        if (band.isEmpty()) return emptyList()
+        val found = mutableListOf<Int>()
+        for (row in band.groupBy { it.yDirAdj.roundToInt() }.values) {
+            val tokens = mutableListOf<String>()
+            val field = StringBuilder()
+            var right = Float.NEGATIVE_INFINITY
+            fun finish() {
+                val text = field.toString().trim()
+                if (text.isNotEmpty()) tokens += text
+                field.clear()
+            }
+            for (glyph in row.sortedBy { it.xDirAdj }) {
+                if (glyph.xDirAdj - right > maxOf(12f, glyph.heightDir * 2)) finish()
+                field.append(glyph.unicode.orEmpty())
+                right = glyph.xDirAdj + glyph.widthDirAdj
+            }
+            finish()
+            if (tokens.isEmpty()) continue
+            fun take(token: String, alone: Boolean) {
+                val match = folio.matchEntire(token.trim()) ?: return
+                val raw = match.groupValues[1]
+                if (!raw.all(Char::isDigit)) return
+                val value = raw.toIntOrNull() ?: return
+                if (value !in 1..9999) return
+                if (!alone && value in 1500..2099) return
+                found += value
+            }
+            val joined = tokens.joinToString(" ")
+            take(joined, tokens.size == 1)
+            take(tokens.first(), tokens.size == 1)
+            if (tokens.size > 1) take(tokens.last(), alone = false)
+            LiteraturePrintedPages.rangeStart(joined)?.let { found += it }
+        }
+        return found
+    }
 
     private fun insideCropBox(position: BookPdfTextPosition, crop: BookPdfRectangle): Boolean {
         val tm = position.textMatrix
@@ -1333,6 +1556,7 @@ internal object LiteraturePdfLayout {
                                             val addedNoteWords: Int)
 
     fun extract(pdf: BookPdfDocument, page: Int, trace: ((FootnoteLayoutTrace) -> Unit)? = null): List<GuideRegion> {
+        edgeFolios.get()?.remove(page)
         val pdfPage = pdf.getPage(page - 1)
         val crop = pdfPage.cropBox
         val graphics = pageGraphics(pdfPage)
@@ -1350,6 +1574,9 @@ internal object LiteraturePdfLayout {
                 super.processTextPosition(position)
             }
             override fun writePage() {
+                if (pdfPage.rotation == 0) {
+                    rememberEdgeFolios(page, charactersByArticle.flatMap { marginFolioValues(it, crop.height) })
+                }
                 scanLayer = glyphs > 0 && (graphics.textBehindScan || hiddenGlyphs.toLong() * 10 >= glyphs.toLong() * 9)
                 // OCR word boxes can overlap. Sorting their individual glyphs interleaves letters.
                 if (scanLayer) sortByPosition = false
@@ -1582,9 +1809,36 @@ internal object LiteraturePdfLayout {
             val lines = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
             if (lines.isEmpty()) return@mapNotNull null
             val edgeLines = (lines.take(2) + lines.takeLast(2))
+            val wideFolios = mutableListOf<Int>()
+            for (line in edgeLines) {
+                val tokens = line.map { it.text.trim() }.filter { it.isNotEmpty() }
+                if (tokens.isEmpty()) continue
+                fun take(token: String, alone: Boolean) {
+                    val match = folio.matchEntire(token) ?: return
+                    val raw = match.groupValues[1]
+                    if (!raw.all(Char::isDigit)) return
+                    val value = raw.toIntOrNull() ?: return
+                    if (value !in 1..9999) return
+                    if (!alone && value in 1500..2099) return
+                    wideFolios += value
+                }
+                take(tokens.joinToString(" "), tokens.size == 1)
+                take(tokens.first(), tokens.size == 1)
+                if (tokens.size > 1) take(tokens.last(), alone = false)
+                LiteraturePrintedPages.rangeStart(tokens.joinToString(" "))?.let { wideFolios += it }
+            }
+            val loneBand = (lines.take(4) + lines.takeLast(4)).filter { band -> edgeLines.none { it === band } }
+            for (line in loneBand) {
+                val tokens = line.map { it.text.trim() }.filter { it.isNotEmpty() }
+                if (tokens.size == 1) {
+                    val value = LiteraturePrintedPages.parseFolio(tokens.first())
+                    if (value != null && value !in 1500..2099) wideFolios += value
+                }
+            }
+            rememberEdgeFolios(page, wideFolios)
             val label = edgeLines.firstNotNullOfOrNull { line ->
                 folio.matchEntire(line.joinToString(" ") { it.text })?.groupValues?.get(1)
-            } ?: edgeLines.firstNotNullOfOrNull { line ->
+            } ?: wideFolios.firstOrNull()?.toString() ?: edgeLines.firstNotNullOfOrNull { line ->
                 val candidates = listOf(line.first() to line.getOrNull(1), line.last() to line.getOrNull(line.lastIndex - 1))
                 candidates.firstOrNull { (w, neighbor) ->
                     folio.matches(w.text) && neighbor != null &&

@@ -277,6 +277,14 @@ internal fun unlockBookPdf(file: File, password: String) {
     }
 }
 
+internal fun bookPdfPageLabels(pdf: BookPdfDocument): List<Int?> {
+    val count = pdf.numberOfPages
+    val raw = runCatching { pdf.documentCatalog.pageLabels?.labelsByPageIndices }.getOrNull()
+    return List(count) { index ->
+        raw?.getOrNull(index)?.trim()?.toIntOrNull()?.takeIf { it in 1..9999 }
+    }
+}
+
 internal fun newBookPdfRenderer(pdf: BookPdfDocument): BookPdfRenderer =
     BookPdfRenderer(pdf).apply { isSubsamplingAllowed = true }
 

@@ -152,6 +152,9 @@ internal fun TextbookReader(
         LaunchedEffect(book.id, ui.page) { onPage(book.pages.first().number) }
         return
     }
+    val shownBookTitle = remember(book.id, book.title) {
+        runCatching { library.facingTitle(book.id, book.title) }.getOrDefault(sanitizeDisplayTitle(book.title))
+    }
     val hasOriginal = book.format == "pdf" || book.format in BookFormats.images
     val originalPdf = book.format == "pdf"
     val textOnlySource = !hasOriginal || page.ocr
@@ -1896,7 +1899,7 @@ internal fun TextbookReader(
                     Box(Modifier.fillMaxSize().background(paper)) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             OriginalBookPage(
-                                "${book.title} ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
+                                "$shownBookTitle ${book.pageLabel(ui.page)}", image, aspect, layer, page.text, null, marks,
                                 citation, quoteAnchor, onResize = { originalSize = it }, onRetry = { retry++ },
                                 onSelection = {},
                             )
@@ -2837,7 +2840,7 @@ internal fun TextbookReader(
         ImmersiveTopHud(
             visible = showHud,
             availableWidth = maxWidth,
-            bookTitle = book.title,
+            bookTitle = shownBookTitle,
             sectionTitle = if (source != null) "出处 · ${source.title}" else
                 activeTocNode?.let { BookBoundaries.headerTitleForNode(navigationBook, it) }
                     ?: frontMatterTitle ?: effectiveChapterSpan?.title ?: currentSection?.title,
@@ -2982,6 +2985,7 @@ internal fun TextbookReader(
 
         // 9. 统一顶部轻提示队列（报错 / 出处警告 / 坏页 / 断开连接），同一时刻最多显示一条，均可关闭，且不与选段胶囊抢位。
         val noticeText = sourceWarning
+            ?: ui.literatureQuoteMiss
             ?: (if (viewSaveError) "视图设置暂未保存，下次切换将重试。" else null)
             ?: (if (markError) "高亮暂未保存，请重试。" else null)
             ?: (if (chosen != null && learnableSelection == null) "选段超过 4000 字，请缩窄范围后再问。" else null)
@@ -3120,7 +3124,7 @@ internal fun TextbookReader(
         if (notesPageOpen) {
             BookNotesPageOverlay(
                 bookId = book.id,
-                bookTitle = book.title,
+                bookTitle = shownBookTitle,
                 library = library,
                 lessonFirstPages = {
                     book.lessons.associate { lesson -> lesson.id to lesson.firstPage }

@@ -85,6 +85,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var guideCourse by remember { mutableStateOf<String?>(null) }
     var comparisonCourse by remember { mutableStateOf<String?>(null) }
     var followCourse by remember { mutableStateOf<String?>(null) }
+    var sectionFollowCourse by remember { mutableStateOf<String?>(null) }
     val courseUiPreferences = remember(controller.library) { CourseUiPreferenceStore(controller.library.directory) }
     var spoilerMutedCourseIds by remember { mutableStateOf(emptySet<String>()) }
     val aiEnabled = LocalReadingAiExplain.current
@@ -463,7 +464,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             val spoilerMutedSaved = remember(detail.courseId) {
                                 courseUiPreferences.isSpoilerNoticeMuted(detail.courseId)
                             }
-                            if (followCourse == detail.courseId) {
+                            if (sectionFollowCourse == detail.courseId) {
+                                LiteratureFollowPane(detail, controller.library, onBack = { sectionFollowCourse = null }) { bookId, page, quote ->
+                                    run { controller.jumpToLiteratureQuote(detail.courseId, bookId, page, quote) }
+                                }
+                            } else if (followCourse == detail.courseId) {
                                 val followIds = detail.materials
                                     .filter { it.format.equals("pdf", ignoreCase = true) }
                                     .map { it.bookId }
@@ -504,6 +509,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     onOpenLiteratureFollow = {
                                         guideCourse = null
                                         comparisonCourse = null
+                                        sectionFollowCourse = null
                                         followCourse = detail.courseId
                                     },
                                 ) { source ->
@@ -511,16 +517,20 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             } else CourseScreen(
                                 detail = detail,
+                                displayBookTitle = controller.library::facingTitle,
                                 busy = ui.busy || ui.courseBusy,
                                 notice = ui.courseNotice,
                                 onOpenLiteratureGuide = if (!originalPdfTouchEnabled) {
-                                    { comparisonCourse = null; followCourse = null; guideCourse = detail.courseId }
+                                    { comparisonCourse = null; followCourse = null; sectionFollowCourse = null; guideCourse = detail.courseId }
                                 } else null,
                                 onOpenLiteratureFollow = if (!originalPdfTouchEnabled) {
-                                    { comparisonCourse = null; guideCourse = null; followCourse = detail.courseId }
+                                    { comparisonCourse = null; guideCourse = null; sectionFollowCourse = null; followCourse = detail.courseId }
                                 } else null,
                                 onOpenLiteratureComparison = if (!originalPdfTouchEnabled) {
-                                    { guideCourse = null; followCourse = null; comparisonCourse = detail.courseId }
+                                    { guideCourse = null; followCourse = null; sectionFollowCourse = null; comparisonCourse = detail.courseId }
+                                } else null,
+                                onOpenSectionFollow = if (!originalPdfTouchEnabled) {
+                                    { guideCourse = null; comparisonCourse = null; followCourse = null; sectionFollowCourse = detail.courseId }
                                 } else null,
                                 onBack = { run { controller.back() } },
                                 onOpenTopic = { topic -> run { controller.openCourseTopic(detail.courseId, topic.topicId, explainer) } },

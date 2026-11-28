@@ -412,7 +412,10 @@ private fun OriginalPdfLeaf(
     val active = reading.page == page.number
     val matchesCitation = citation?.takeIf { displayed != null && kotlin.math.abs(displayed - it.boxes.width / it.boxes.height) < .05 }
     val marks = remember(library, book.id, page, highlightRevision) { library.highlights(book.id, page) }
-    OriginalBookPage("${book.title} ${book.pageLabel(page.number)}", image, aspect ?: FallbackPdfAspect, layer,
+    val shownBookTitle = remember(book.id, book.title) {
+        runCatching { library.facingTitle(book.id, book.title) }.getOrDefault(sanitizeDisplayTitle(book.title))
+    }
+    OriginalBookPage("$shownBookTitle ${book.pageLabel(page.number)}", image, aspect ?: FallbackPdfAspect, layer,
         page.text, reading.selection?.takeIf { it.page == page.number }?.range, marks, matchesCitation, quote,
         onResize = { pixelWidth = it.width }, onRetry = { layers.invalidate(page.number); retry++ },
         onSelection = { range ->

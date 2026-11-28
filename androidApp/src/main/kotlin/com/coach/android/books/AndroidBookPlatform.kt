@@ -88,6 +88,14 @@ internal fun unlockBookPdf(file: File, password: String) {
     }
 }
 
+internal fun bookPdfPageLabels(pdf: BookPdfDocument): List<Int?> {
+    val count = pdf.numberOfPages
+    val raw = runCatching { pdf.documentCatalog.pageLabels?.labelsByPageIndices }.getOrNull()
+    return List(count) { index ->
+        raw?.getOrNull(index)?.trim()?.toIntOrNull()?.takeIf { it in 1..9999 }
+    }
+}
+
 internal fun readCachedPageBitmap(file: Path): BookBitmap? = null
 internal fun writeCachedPageBitmap(file: Path, bitmap: BookBitmap) = Unit
 

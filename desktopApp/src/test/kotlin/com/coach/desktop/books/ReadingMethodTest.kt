@@ -128,6 +128,15 @@ class ReadingMethodTest {
         after = ReadingMethodFlow.markReturned(after, "o")
         assertEquals("DONE", after.step)
 
+        val skippedBefore = ReadingMethodFlow.continueBeforePretest(ChapterMethodProgress("PRETEST"))
+        assertEquals("READ", skippedBefore.step)
+        assertTrue(skippedBefore.answers.isEmpty())
+        assertTrue(skippedBefore.wrongIds.isEmpty())
+        val skippedRecall = ReadingMethodFlow.continueRecall(ChapterMethodProgress("RECALL"))
+        assertEquals("QUIZ", skippedRecall.step)
+        assertEquals("", skippedRecall.recall)
+        assertTrue(skippedRecall.wrongIds.isEmpty())
+
         val passed = ReadingMethodFlow.finishQuiz(
             ChapterMethodProgress("QUIZ", answers = mapOf("g" to "对", "o" to "还记得")),
             quiz,

@@ -104,6 +104,14 @@ internal fun ReadingMethodPanel(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        val tasteAsk = LocalFirstTasteAsk.current
+        if (tasteAsk != null) {
+            V7TextButton(
+                onClick = { tasteAsk.ask() },
+                modifier = Modifier.testTag("companion-taste-ask"),
+                ringInside = true,
+            ) { Text("来道题") }
+        }
         val state = bookState
         if (!draftReady || state == null || plan == null && chapter != null) {
             Text("正在按这本书选学法…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
@@ -133,12 +141,24 @@ internal fun ReadingMethodPanel(
             return@Column
         }
         val progress = state.progress(plan.id, method)
-        Text(
-            stepTitle(method, progress.step),
-            style = MaterialTheme.typography.labelLarge,
-            color = colors.actionPrimary,
-            modifier = Modifier.testTag("reading-method-step"),
-        )
+        var flowOpen by remember(book.id, plan.id, method) { mutableStateOf(true) }
+        Row(
+            Modifier.fillMaxWidth().testTag(if (flowOpen) "reading-method-step-row" else "reading-method-collapsed"),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stepTitle(method, progress.step),
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.actionPrimary,
+                modifier = Modifier.weight(1f).testTag("reading-method-step"),
+            )
+            V7TextButton(
+                onClick = { flowOpen = !flowOpen },
+                modifier = Modifier.testTag("reading-method-fold"),
+                ringInside = true,
+            ) { Text(if (flowOpen) "收起" else "展开") }
+        }
+        if (!flowOpen) return@Column
         when (method) {
             ReadingMethod.BEFORE -> BeforeFlow(plan, graded, progress, onProgress = { commit(state.withProgress(plan.id, method, it)) })
             ReadingMethod.DURING -> DuringFlow(
@@ -159,7 +179,7 @@ internal fun ReadingMethodPanel(
 }
 
 @Composable
-private fun BeforeFlow(
+internal fun BeforeFlow(
     plan: ReadingChapterPlan,
     graded: List<ReadingCheck>,
     progress: ChapterMethodProgress,
@@ -170,8 +190,7 @@ private fun BeforeFlow(
         "PRETEST" -> {
             CheckList(checks, progress, reveal = true, onAnswer = { id, value -> onProgress(ReadingMethodFlow.recordAnswer(progress, id, value)) })
             PaperButton(
-                onClick = { onProgress(ReadingMethodFlow.finishBeforePretest(progress, checks)) },
-                enabled = ReadingMethodFlow.allAnswered(progress, checks),
+                onClick = { onProgress(ReadingMethodFlow.continueBeforePretest(progress)) },
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text("做完了，去读") }
         }
@@ -194,7 +213,7 @@ private fun BeforeFlow(
 }
 
 @Composable
-private fun DuringFlow(
+internal fun DuringFlow(
     plan: ReadingChapterPlan,
     graded: List<ReadingCheck>,
     progress: ChapterMethodProgress,
@@ -227,7 +246,6 @@ private fun DuringFlow(
             )
             PaperButton(
                 onClick = { onProgress(ReadingMethodFlow.finishDuringPause(progress, plan.sections.size)) },
-                enabled = progress.answers[check.id].orEmpty().isNotBlank(),
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text(if (index + 1 >= plan.sections.size) "这一章走完了" else "下一节") }
         }
@@ -236,7 +254,7 @@ private fun DuringFlow(
 }
 
 @Composable
-private fun AfterFlow(
+internal fun AfterFlow(
     plan: ReadingChapterPlan,
     graded: List<ReadingCheck>,
     progress: ChapterMethodProgress,
@@ -256,8 +274,7 @@ private fun AfterFlow(
                 tag = "reading-method-own-words",
             )
             PaperButton(
-                onClick = { onProgress(ReadingMethodFlow.finishRecall(progress)) },
-                enabled = progress.recall.isNotBlank(),
+                onClick = { onProgress(ReadingMethodFlow.continueRecall(progress)) },
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text("去做题") }
         }

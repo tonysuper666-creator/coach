@@ -31,7 +31,9 @@ import com.coach.desktop.books.CoachConnectivityStatus
 import com.coach.desktop.books.CollectionKind
 import com.coach.desktop.books.CollectionSummary
 import com.coach.desktop.books.ExplainConsent
+import com.coach.desktop.books.FirstTasteAsk
 import com.coach.desktop.books.HostOfflineBadge
+import com.coach.desktop.books.LocalFirstTasteAsk
 import com.coach.desktop.books.LocalBookHinge
 import com.coach.desktop.books.LocalCoachConnectivity
 import com.coach.desktop.books.LocalConnectivityPollMs
@@ -180,22 +182,36 @@ internal fun WindowsTextbookHost(
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     var sawEmptyShelf by remember { mutableStateOf(false) }
     var tasteActive by remember { mutableStateOf(false) }
+    var tastePinned by remember { mutableStateOf(false) }
+    var tasteDismissedBook by remember { mutableStateOf<String?>(null) }
     // Outlives the panel, so the question on screen survives the panel leaving and re-entering composition.
     val tasteMemory = remember(controller.library.directory) { com.coach.desktop.books.FirstTasteMemory() }
+    val tasteAsk = remember { FirstTasteAsk() }
     var tasteDone by remember(controller.library.directory) {
         mutableStateOf(com.coach.desktop.books.FirstOpenStore.isDone(controller.library.directory))
     }
-    LaunchedEffect(firstOpenGuide, ui.initialized, isEmptyLibrary, ui.book?.id, ui.screen, tasteDone) {
-        if (!firstOpenGuide || tasteDone) {
-            tasteActive = false
-            return@LaunchedEffect
-        }
+    var tasteMuted by remember(controller.library.directory) {
+        mutableStateOf(com.coach.desktop.books.FirstOpenStore.isMuted(controller.library.directory))
+    }
+    tasteAsk.onAsk = {
+        tastePinned = true
+        tasteDismissedBook = null
+    }
+    // sawEmptyShelf still remembers an empty shelf, but it only offers the side strip. It never covers the page.
+    LaunchedEffect(
+        firstOpenGuide, ui.initialized, isEmptyLibrary, ui.book?.id, ui.screen,
+        tasteDone, tasteMuted, tastePinned, tasteDismissedBook,
+    ) {
+        val bookId = ui.book?.id
+        val reading = ui.initialized && bookId != null && ui.screen == com.coach.desktop.books.BookScreen.READER
         if (ui.initialized && isEmptyLibrary && ui.book == null) sawEmptyShelf = true
-        tasteActive = sawEmptyShelf && ui.book != null && ui.screen == com.coach.desktop.books.BookScreen.READER
+        val auto = firstOpenGuide && !tasteDone && !tasteMuted && sawEmptyShelf && reading && tasteDismissedBook != bookId
+        tasteActive = reading && (tastePinned || auto)
     }
     fun finishFirstTaste() {
         com.coach.desktop.books.FirstOpenStore.markDone(controller.library.directory)
         tasteDone = true
+        tastePinned = false
         tasteActive = false
     }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
@@ -338,6 +354,7 @@ internal fun WindowsTextbookHost(
                         LocalDeskTypeControl provides typeControl,
                         LocalReadingFont provides preferences.font,
                         LocalImportNoticeHandled provides true,
+                        LocalFirstTasteAsk provides tasteAsk,
                         com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide,
                         com.coach.desktop.books.LocalReadingSectionSummary provides preferences.sectionSummary,
                         com.coach.desktop.books.LocalReadingAiExplain provides preferences.aiExplain,
@@ -395,7 +412,17 @@ internal fun WindowsTextbookHost(
                         }
                     }
                 }
-                BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
+                val readingNow = ui.screen == BookScreen.READER
+                BookImportToast(
+                    ui.importNotice,
+                    controller::dismissImportNotice,
+                    if (readingNow) {
+                        Modifier.align(Alignment.BottomEnd).padding(bottom = 20.dp, end = 16.dp)
+                    } else {
+                        Modifier.align(Alignment.TopCenter)
+                    },
+                    clearTop = !readingNow,
+                )
                 val updateIdle = !settings && !tasteActive &&
                     ui.screen != BookScreen.READER &&
                     ui.screen != BookScreen.LEARNING &&
@@ -410,8 +437,20 @@ internal fun WindowsTextbookHost(
                         connectivity = connectivity,
                         onReadBook = ::finishFirstTaste,
                         onDone = ::finishFirstTaste,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(start = 72.dp, end = 72.dp, bottom = 20.dp),
                         memory = tasteMemory,
+                        compact = true,
+                        onDismiss = {
+                            tastePinned = false
+                            tasteDismissedBook = tasteBook.id
+                        },
+                        onMute = {
+                            com.coach.desktop.books.FirstOpenStore.mute(controller.library.directory)
+                            tasteMuted = true
+                            tastePinned = false
+                            tasteDismissedBook = tasteBook.id
+                        },
+                        onAllowExplain = { ExplainConsent(controller.library.directory).allow(tasteBook.id) },
                     )
                 }
             }

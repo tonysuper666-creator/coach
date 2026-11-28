@@ -123,6 +123,10 @@ internal object ReadingMethodFlow {
     fun finishBeforePretest(progress: ChapterMethodProgress, checks: List<ReadingCheck>): ChapterMethodProgress =
         if (allAnswered(progress, checks)) progress.copy(step = "READ") else progress
 
+    /** 没做完也能去读。空着的题不补答案、不记错，也不当成掌握度。 */
+    fun continueBeforePretest(progress: ChapterMethodProgress): ChapterMethodProgress =
+        progress.copy(step = "READ")
+
     fun finishBeforeRead(progress: ChapterMethodProgress): ChapterMethodProgress =
         progress.copy(step = "COMPARE")
 
@@ -143,6 +147,10 @@ internal object ReadingMethodFlow {
 
     fun finishRecall(progress: ChapterMethodProgress): ChapterMethodProgress =
         if (progress.recall.isNotBlank()) progress.copy(step = "QUIZ") else progress
+
+    /** 没写回忆也能去做题。空白不记成错，也不写入掌握度。 */
+    fun continueRecall(progress: ChapterMethodProgress): ChapterMethodProgress =
+        progress.copy(step = "QUIZ")
 
     fun finishQuiz(progress: ChapterMethodProgress, checks: List<ReadingCheck>): ChapterMethodProgress {
         if (!allAnswered(progress, checks)) return progress

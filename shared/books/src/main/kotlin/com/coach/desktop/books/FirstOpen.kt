@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -8,8 +9,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -22,8 +26,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -44,6 +50,7 @@ import java.nio.file.Path
  */
 internal object FirstOpenStore {
     private const val FILE = "first-open-done"
+    private const val MUTED = "first-taste-muted"
 
     fun isDone(directory: Path): Boolean = Files.isRegularFile(directory.resolve(FILE))
 
@@ -51,7 +58,26 @@ internal object FirstOpenStore {
         Files.createDirectories(directory)
         Files.writeString(directory.resolve(FILE), "done\n")
     }
+
+    /** 「不再提示」：换书、重启都不再主动把开胃题递上来。按需入口不受这个标记影响。 */
+    fun isMuted(directory: Path): Boolean = Files.isRegularFile(directory.resolve(MUTED))
+
+    fun mute(directory: Path) {
+        Files.createDirectories(directory)
+        Files.writeString(directory.resolve(MUTED), "muted\n")
+    }
 }
+
+/** 伴读里的「来道题」。宿主接上之后，点它就把开胃题小条再打开。 */
+internal class FirstTasteAsk {
+    var onAsk: (() -> Unit)? = null
+    fun ask() { onAsk?.invoke() }
+}
+
+internal val LocalFirstTasteAsk = staticCompositionLocalOf<FirstTasteAsk?> { null }
+
+internal fun isExplainConsentGate(message: String): Boolean =
+    "允许讲解" in message || "请先打开个人导入的书" in message
 
 internal object FirstOpenCopy {
     const val TITLE = "放进一本书，马上做第一道题。"
@@ -248,6 +274,10 @@ internal fun FirstTastePanel(
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
     memory: FirstTasteMemory = remember { FirstTasteMemory() },
+    compact: Boolean = false,
+    onDismiss: () -> Unit = {},
+    onMute: () -> Unit = {},
+    onAllowExplain: () -> Unit = {},
 ) {
     val colors = CoachTheme.colors
     val pollMs = LocalConnectivityPollMs.current
@@ -257,6 +287,7 @@ internal fun FirstTastePanel(
     var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
     var recoveredOnline by remember(book.id) { mutableStateOf(false) }
     var waitingBookReady by remember(book.id) { mutableStateOf(false) }
+    var asked by remember(book.id) { mutableStateOf(false) }
     memory.bind(book.id)
 
     // If Tier 0 PDF import had not yet extracted body paragraphs when FirstTastePanel mounted,
@@ -359,33 +390,92 @@ internal fun FirstTastePanel(
             }
         }
     }
-    Column(
+    val shape = RoundedCornerShape(12.dp)
+    val frame = if (compact) {
         modifier
-            .fillMaxSize()
-            .background(colors.bgCanvas)
+            .widthIn(max = 440.dp)
+            .heightIn(max = 420.dp)
+            .clip(shape)
+            .background(colors.surface1)
+            .border(1.dp, colors.borderSubtle, shape)
+    } else {
+        modifier.fillMaxSize().background(colors.bgCanvas)
+    }
+    Column(
+        frame
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 36.dp)
+            .padding(
+                horizontal = if (compact) 12.dp else 28.dp,
+                vertical = if (compact) 10.dp else 36.dp,
+            )
             .testTag("first-taste"),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 16.dp),
     ) {
-        Text(book.title, style = MaterialTheme.typography.titleLarge, color = colors.fgPrimary, textAlign = TextAlign.Center)
+        if (compact) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "开胃题",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.fgPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                V7TextButton(
+                    onClick = { asked = true },
+                    modifier = Modifier.testTag("first-taste-ask"),
+                    ringInside = true,
+                ) { Text("来一道") }
+                V7TextButton(onDismiss, modifier = Modifier.testTag("first-taste-dismiss"), ringInside = true) { Text("×") }
+                V7TextButton(onMute, modifier = Modifier.testTag("first-taste-mute"), ringInside = true) { Text("不再提示") }
+            }
+        } else {
+            Text(book.title, style = MaterialTheme.typography.titleLarge, color = colors.fgPrimary, textAlign = TextAlign.Center)
+        }
         when (val current = memory.step) {
             TasteStep.Loading -> {
                 Text(FirstOpenCopy.MAKING, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
             }
             is TasteStep.Hold -> {
-                Text(current.message, color = v7Alert(), textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
-                PrimaryButton(
-                    onClick = {
-                        manualClicks += 1
-                        fetchTrigger += 1
-                    },
-                    modifier = Modifier.testTag("first-taste-primary"),
-                ) {
-                    Text(FirstOpenCopy.RETRY)
+                val consentGate = isExplainConsentGate(current.message)
+                if (compact && consentGate && !asked) {
+                    Text(
+                        "想先做一道再读，点「来一道」。不点也能翻书。",
+                        color = colors.fgSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().testTag("first-taste-offer"),
+                    )
+                } else if (compact && consentGate) {
+                    Text(
+                        "讲解还没对这本书放开。点一下，就出这道题。",
+                        color = colors.fgSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().testTag("first-taste-status"),
+                    )
+                    PrimaryButton(
+                        onClick = {
+                            onAllowExplain()
+                            manualClicks += 1
+                            fetchTrigger += 1
+                        },
+                        modifier = Modifier.testTag("first-taste-allow"),
+                    ) { Text("允许这本书讲解") }
+                } else {
+                    Text(current.message, color = v7Alert(), textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
+                    PrimaryButton(
+                        onClick = {
+                            manualClicks += 1
+                            fetchTrigger += 1
+                        },
+                        modifier = Modifier.testTag("first-taste-primary"),
+                    ) {
+                        Text(FirstOpenCopy.RETRY)
+                    }
+                    V7TextButton(onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }
                 }
-                V7TextButton(onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }
             }
             is TasteStep.Ask -> {
                 Text(FirstOpenCopy.ANSWER_HINT, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))

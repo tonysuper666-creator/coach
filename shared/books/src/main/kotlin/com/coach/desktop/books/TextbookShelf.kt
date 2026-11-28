@@ -90,7 +90,12 @@ internal fun BookImportProgressBar(
 }
 
 @Composable
-internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Unit, modifier: Modifier = Modifier) {
+internal fun BookImportToast(
+    notice: BookImportNotice?,
+    onDismiss: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+    clearTop: Boolean = true,
+) {
     if (notice == null) return
     LaunchedEffect(notice.id) {
         kotlinx.coroutines.delay(4_000)
@@ -98,16 +103,37 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
     }
     val colors = CoachTheme.colors
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
-    Box(
+    Row(
         modifier
-            .padding(top = 56.dp, start = 16.dp, end = 16.dp)
+            .padding(top = if (clearTop) 56.dp else 8.dp, start = 16.dp, end = 16.dp, bottom = 8.dp)
+            .widthIn(max = 420.dp)
             .paperShadow("card", colors.dark)
             .clip(shape)
             .background(colors.fgPrimary)
             .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("book-import-toast"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(notice.message, style = MaterialTheme.typography.bodySmall, color = colors.surface1)
+        Text(
+            notice.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.surface1,
+            modifier = Modifier.widthIn(max = 320.dp),
+        )
+        Text(
+            "×",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.surface1,
+            modifier = Modifier
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = { onDismiss(notice.id) },
+                )
+                .padding(horizontal = 4.dp)
+                .testTag("book-import-toast-close"),
+        )
     }
 }
 

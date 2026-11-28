@@ -648,6 +648,10 @@ internal object CourseExamPoints {
                 val chapterNodes = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
                 val starts = chapterNodes.map { it.startPage }.toSet()
                 if (starts.isNotEmpty()) chapterStartsByBook[mat.bookId] = starts
+                if (recoveredPages.isNotEmpty()) {
+                    // The drill builder cleans the full book before selecting source pages.
+                    recoveredPages.retainAll(cleanTextbookPagesByNumber(bookPages, starts).keys)
+                }
                 val chRanges = chapterNodes.map { it.startPage..it.endPage.coerceAtLeast(it.startPage) }
                 if (chRanges.isNotEmpty()) chapterRangesByBook[mat.bookId] = chRanges
                 val allTocTitles = structure.tocNodes
@@ -692,19 +696,35 @@ internal object CourseExamPoints {
     // Only trust a numbered native bookmark if its destination prints the same number and heading.
     internal fun bodyConfirmedSections(nodes: List<BookTocNode>, bookPages: List<BookPage>): List<ExamSectionSpan> {
         val byPage = bookPages.associateBy { it.number }
-        return nodes.mapNotNull { node ->
-            val number = node.numberLabel ?: return@mapNotNull null
-            if (node.source != HeadingSource.PDF_OUTLINE || node.kind != TocNodeKind.BACK_MATTER ||
-                !nativeSectionNumber.matches(number)) return@mapNotNull null
+        val boundaries = nodes.filter { node ->
+            node.source == HeadingSource.PDF_OUTLINE && (
+                nativeSectionNumber.matches(node.numberLabel.orEmpty()) ||
+                    node.numberLabel?.toIntOrNull() != null ||
+                    BookTocWaterfall.classifyOutlineLabel(node.title).kind in setOf(TocNodeKind.BACK_MATTER, TocNodeKind.APPENDIX) ||
+                    normalize(node.title) in setOf("section summary", "chapter summary", "conceptual questions", "problems & exercises")
+                )
+        }
+        var chapter: String? = null
+        val seen = mutableSetOf<String>()
+        return boundaries.mapIndexedNotNull { index, node ->
+            val number = node.numberLabel.orEmpty()
+            if (!nativeSectionNumber.matches(number)) {
+                chapter = number.takeIf { explicitSectionPrefix.containsMatchIn(node.title) }
+                return@mapIndexedNotNull null
+            }
+            if (node.kind != TocNodeKind.BACK_MATTER || number.substringBefore('.') != chapter || !seen.add(number)) return@mapIndexedNotNull null
             val title = node.title.replace(sectionNumber, "").trimEnd('*').trim()
-            if (!isValidExamPointTitle(title, title, defined = false, numbered = true, markdown = false, officialTocSection = true)) return@mapNotNull null
-            val page = byPage[node.startPage] ?: return@mapNotNull null
+            if (!isValidExamPointTitle(title, title, defined = false, numbered = true, markdown = false, officialTocSection = true)) return@mapIndexedNotNull null
+            val page = byPage[node.startPage] ?: return@mapIndexedNotNull null
             val key = normalize(title)
             val words = key.split(' ').joinToString("""\s+""", transform = Regex::escape)
             val heading = Regex("""(?m)^${Regex.escape(number)}\s*[|.:：–—-]?\s*$words(?!\p{L})""")
             val lines = page.text.lineSequence().joinToString("\n", transform = ::normalize)
-            if (!heading.containsMatchIn(lines) || !hasSubstantiveBody(page.text)) return@mapNotNull null
-            ExamSectionSpan(title, key, node.startPage..node.endPage)
+            if (!heading.containsMatchIn(lines) || !hasSubstantiveBody(page.text)) return@mapIndexedNotNull null
+            // A flattened outline can end a section at its first subheading on the very same page.
+            val nextPage = boundaries.getOrNull(index + 1)?.startPage
+            val end = nextPage?.minus(1)?.coerceAtLeast(node.startPage) ?: node.endPage
+            ExamSectionSpan(title, key, node.startPage..end)
         }
     }
 

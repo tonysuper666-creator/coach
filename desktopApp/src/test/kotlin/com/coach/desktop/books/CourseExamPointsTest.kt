@@ -674,19 +674,28 @@ class CourseExamPointsTest {
     fun numberedSectionsAfterAChapterGlossaryNeedAHeadingOnTheDestinationPage() {
         fun bookmark(number: String, title: String, page: Int) = BookTocNode(
             "section-$number", null, page, 1, TocNodeKind.BACK_MATTER, number,
-            "$number $title*", page, page + 1, source = HeadingSource.PDF_OUTLINE,
+            "$number $title*", page, page, source = HeadingSource.PDF_OUTLINE,
         )
-        val nodes = listOf(bookmark("2.1", "Lattice defects", 12), bookmark("2.2", "Elastic limits", 14))
+        val section = bookmark("2.1", "Lattice defects", 12)
+        val chapter = section.copy(numberLabel = "2", title = "Chapter 2 Deformation", startPage = 11)
+        val nodes = listOf(
+            chapter, section, section.copy(numberLabel = null, title = "Local geometry"),
+            bookmark("2.2", "Elastic limits", 14),
+            section.copy(numberLabel = null, title = "Glossary", startPage = 15),
+            bookmark("2.3", "Practice example", 16),
+        )
         val pages = listOf(
             BookPage(12, "2.1 | Lattice defects\nDislocations permit atoms in a solid to rearrange under stress."),
+            BookPage(13, "Grain boundaries interrupt the regular arrangement of atoms in a crystalline solid."),
             BookPage(14, "References\nSee section 2.2 Elastic limits in the catalogue for additional references."),
+            BookPage(16, "2.3 Practice example\nThis numbered entry occurs in the review at the back of the chapter."),
         )
         val spans = CourseExamPoints.bodyConfirmedSections(nodes, pages)
         assertEquals(listOf(ExamSectionSpan("Lattice defects", "lattice defects", 12..13)), spans)
         val evidence = pages.map { ExamTeachingPage("tb", it.number, CourseMaterialRole.CORE_TEXTBOOK, it.text, sectionEvidenceOnly = true) }
         val point = CourseExamPoints.identifyFromPages("glossary", evidence, sectionSpansByBook = mapOf("tb" to spans)).single()
         assertEquals("Lattice defects", point.title)
-        assertEquals(listOf(12), point.sources.map { it.startPage })
+        assertEquals(listOf(12, 13), point.sources.map { it.startPage })
     }
 
     @Test

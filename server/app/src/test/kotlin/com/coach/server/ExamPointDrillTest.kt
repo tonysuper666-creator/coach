@@ -54,7 +54,11 @@ class ExamPointDrillTest {
         assertFalse(body.bool("essayMissing"))
         assertTrue(body["essay"] !is kotlinx.serialization.json.JsonObject)
         assertEquals("A", option(body, 0, 0).str("letter"))
-        assertTrue(option(body, 0, 0).bool("correct"))
+        // The key moves to a seeded position at admission, so find it instead of assuming A.
+        val storedOptions = body.arr("choices")[0].jsonObject["options"] as JsonArray
+        val key = storedOptions.map { it.jsonObject }.single { opt -> opt.bool("correct") }
+        assertEquals("option A for c1", key.str("text"))
+        assertEquals(listOf("A", "B", "C", "D"), storedOptions.map { it.jsonObject.str("letter") })
         assertTrue(check.prompts.single().contains(quote))
         assertFalse(check.prompts.single().contains("REASON_SENTINEL"))
         assertFalse(check.prompts.single().contains("\"correct\""))

@@ -20,6 +20,8 @@ from typing import Any
 OUTSIDE_PREFIX = "书外 · 未对照原文"
 GUESS_PREFIX = "推想 · 书外 · 未对照原文"
 ESOTERIC_NOTICE = "按本书体系看，不是对现实的断言"
+HIGH_RISK_BOUNDARY = "high_risk"
+HIGH_RISK_NOTICE = "看病、法律、投资这类具体决定不从书里推，下面只讲书里怎么说。"
 NO_BOOK_DIRECT = "这本书里没有直接讲到这一点。"
 NO_BOOK_FICTION = "读到这里，书里还没讲到这一点。"
 
@@ -179,9 +181,11 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
         return failures
 
     boundary = resp.get("boundary")
-    model_called = resp.get("modelCalled")
+    high_risk_notice = resp.get("highRiskNotice")
     system_notice = resp.get("systemNotice")
     no_book_notice = resp.get("noBookNotice")
+    summary_text = (resp.get("text") or "").strip()
+    first_non_empty_line = next((ln.strip() for ln in summary_text.splitlines() if ln.strip()), "")
     gate = resp.get("gate") or {}
 
     # A4: 题头立场等于题目 stance 字段；若为换立场题且有 initialResponse，旧卡题头不变
@@ -194,24 +198,42 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
         if init_resp.get("stance") != init_stance:
             failures["A4"].append(f"{qid}: initial_stance={init_resp.get('stance')} expected={init_stance}")
 
-    # A5: 拦截卡与体系提示行
+    # A5: 高危直接回答与体系提示行（TON-1976 §6 新 A5 / TON-1982）
+    if entry in ("ask", "explain"):
+        if expected_stance == "esoteric":
+            if system_notice != ESOTERIC_NOTICE:
+                failures["A5"].append(f"{qid}: missing_esoteric_system_notice")
+        else:
+            if system_notice:
+                failures["A5"].append(f"{qid}: unexpected_system_notice_for_{expected_stance}")
+
     if expect_boundary:
-        if not isinstance(boundary, dict):
-            failures["A5"].append(f"{qid}: expected_boundary_card")
-        if model_called is not False:
-            failures["A5"].append(f"{qid}: expected_modelCalled_false got={model_called}")
-        if layers:
-            failures["A5"].append(f"{qid}: boundary_must_have_no_layers")
+        if boundary != HIGH_RISK_BOUNDARY:
+            failures["A5"].append(f"{qid}: expected_boundary_high_risk got={boundary!r}")
+        if isinstance(boundary, dict) or "actionLabel" in resp or "boundaryCard" in resp:
+            failures["A5"].append(f"{qid}: forbidden_intercept_card_field")
+        if high_risk_notice != HIGH_RISK_NOTICE:
+            failures["A5"].append(f"{qid}: missing_or_wrong_high_risk_notice")
+        if first_non_empty_line != HIGH_RISK_NOTICE:
+            failures["A5"].append(f"{qid}: first_line_not_high_risk_notice")
+        if any(l.get("layer") != "book" for l in layers):
+            failures["A5"].append(f"{qid}: high_risk_must_have_no_outside_or_guess")
+        # 换立场高危题（如 X2）：初始卡同样应为高危直接回答且玄学立场带体系提示行
+        if isinstance(init_resp, dict):
+            init_boundary = init_resp.get("boundary")
+            if init_boundary != HIGH_RISK_BOUNDARY or isinstance(init_boundary, dict):
+                failures["A5"].append(f"{qid}: initial_expected_boundary_high_risk got={init_boundary!r}")
+            if init_resp.get("highRiskNotice") != HIGH_RISK_NOTICE:
+                failures["A5"].append(f"{qid}: initial_missing_high_risk_notice")
+            if any(l.get("layer") != "book" for l in (init_resp.get("layers") or [])):
+                failures["A5"].append(f"{qid}: initial_high_risk_has_non_book")
+            if init_stance == "esoteric" and init_resp.get("systemNotice") != ESOTERIC_NOTICE:
+                failures["A5"].append(f"{qid}: initial_missing_esoteric_system_notice")
     else:
         if boundary is not None:
-            failures["A5"].append(f"{qid}: unexpected_boundary")
-        if entry in ("ask", "explain"):
-            if expected_stance == "esoteric":
-                if system_notice != ESOTERIC_NOTICE:
-                    failures["A5"].append(f"{qid}: missing_esoteric_system_notice")
-            else:
-                if system_notice:
-                    failures["A5"].append(f"{qid}: unexpected_system_notice_for_{expected_stance}")
+            failures["A5"].append(f"{qid}: unexpected_boundary got={boundary!r}")
+        if high_risk_notice:
+            failures["A5"].append(f"{qid}: unexpected_high_risk_notice")
 
     # 遍历所有层检查 A1, A2, A3, A6, A7
     valid_book_sentences = 0
@@ -321,18 +343,19 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
     if req_outside and not any(req_outside in t for t in outside_texts):
         failures["A7"].append(f"{qid}: missing_required_term_in_outside_layer")
 
-    # A8 非空与 allowNoBook 规则
-    if not expect_boundary:
-        has_any_content = bool(layers) or bool(no_book_notice)
-        if not has_any_content:
-            failures["A8"].append(f"{qid}: empty_answer")
-        elif valid_book_sentences == 0:
-            if not allow_no_book:
-                failures["A8"].append(f"{qid}: zero_book_sentences_not_allowed")
-            else:
-                expected_notice = NO_BOOK_FICTION if "fiction" in guards else NO_BOOK_DIRECT
-                if no_book_notice != expected_notice:
-                    failures["A8"].append(f"{qid}: missing_or_wrong_noBookNotice")
+    # A8 非空与 allowNoBook 规则（含高危题 A5 兜底检查）
+    expected_notice = NO_BOOK_FICTION if "fiction" in guards else NO_BOOK_DIRECT
+    has_any_content = bool(layers) or bool(no_book_notice)
+    if not has_any_content:
+        failures["A8"].append(f"{qid}: empty_answer")
+    elif expect_boundary:
+        if valid_book_sentences == 0 and no_book_notice != expected_notice:
+            failures["A5"].append(f"{qid}: high_risk_zero_book_missing_fallback")
+    elif valid_book_sentences == 0:
+        if not allow_no_book:
+            failures["A8"].append(f"{qid}: zero_book_sentences_not_allowed")
+        elif no_book_notice != expected_notice:
+            failures["A8"].append(f"{qid}: missing_or_wrong_noBookNotice")
 
     return failures
 

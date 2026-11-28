@@ -33,7 +33,6 @@ import com.coach.protocol.BookStanceCopy
 import com.coach.protocol.BookStanceGuard
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.PaperCard
-import com.coach.ui.v7.V7TextButton
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -96,18 +95,13 @@ internal sealed interface StanceLayer {
     }
 }
 
-internal data class StanceBoundary(
-    val kind: String,
-    val message: String,
-    val actionLabel: String,
-)
-
 internal data class StanceAnswer(
     val stance: BookStance,
     val layers: List<StanceLayer>,
+    val highRiskNotice: String? = null,
     val systemNotice: String? = null,
     val noBookNotice: String? = null,
-    val boundary: StanceBoundary? = null,
+    val boundary: String? = null,
     val modelCalled: Boolean = true,
     val droppedSentences: Int = 0,
     val outOfRange: Int = 0,
@@ -196,15 +190,10 @@ internal object StanceAnswerCodec {
                 })
             }
         })
+        answer.highRiskNotice?.let { put("highRiskNotice", it) }
         answer.systemNotice?.let { put("systemNotice", it) }
         answer.noBookNotice?.let { put("noBookNotice", it) }
-        answer.boundary?.let { b ->
-            put("boundary", buildJsonObject {
-                put("kind", b.kind)
-                put("message", b.message)
-                put("actionLabel", b.actionLabel)
-            })
-        }
+        answer.boundary?.let { put("boundary", it) }
         put("modelCalled", answer.modelCalled)
         put("droppedSentences", answer.droppedSentences)
         put("outOfRange", answer.outOfRange)
@@ -217,19 +206,21 @@ internal object StanceAnswerCodec {
         val outOfRange = (obj["outOfRange"] as? JsonPrimitive)?.intOrNull ?: 0
         val systemNotice = (obj["systemNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
         val noBookNotice = (obj["noBookNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
-        val boundary = (obj["boundary"] as? JsonObject)?.let { bObj ->
-            val kind = (bObj["kind"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
-                ?: BookStanceCopy.ESOTERIC_BOUNDARY_KIND
-            val message = (bObj["message"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
-                ?: BookStanceCopy.ESOTERIC_BOUNDARY_TEXT
-            val actionLabel = (bObj["actionLabel"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
-                ?: BookStanceCopy.ESOTERIC_BOUNDARY_ACTION
-            StanceBoundary(kind, message, actionLabel)
+        val boundary = when (val rawBoundary = obj["boundary"]) {
+            is JsonPrimitive -> rawBoundary.takeIf { it.isString }?.contentOrNull?.trim()
+                ?.takeIf { it == BookStanceCopy.HIGH_RISK_BOUNDARY }
+            // 向下兼容旧缓存中的对象形态，不渲染任何拦截卡，仅转为高危提示行形态
+            is JsonObject -> BookStanceCopy.HIGH_RISK_BOUNDARY
+            else -> null
         }
+        val highRiskNotice = (obj["highRiskNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: if (boundary == BookStanceCopy.HIGH_RISK_BOUNDARY) BookStanceCopy.HIGH_RISK_NOTICE else null
+        val isHighRisk = boundary == BookStanceCopy.HIGH_RISK_BOUNDARY
         val layers = mutableListOf<StanceLayer>()
         for (el in (obj["layers"] as? JsonArray).orEmpty()) {
             val lObj = el as? JsonObject ?: continue
             val kind = AnswerLayerKind.fromWire((lObj["layer"] as? JsonPrimitive)?.contentOrNull) ?: continue
+            if (isHighRisk && kind != AnswerLayerKind.BOOK) continue
             val label = (lObj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
             when (kind) {
                 AnswerLayerKind.OUTSIDE -> {
@@ -284,6 +275,7 @@ internal object StanceAnswerCodec {
         return StanceAnswer(
             stance = stance,
             layers = layers,
+            highRiskNotice = highRiskNotice,
             systemNotice = systemNotice,
             noBookNotice = noBookNotice,
             boundary = boundary,
@@ -317,12 +309,12 @@ internal fun stanceCitationPassage(
 }
 
 /**
- * 客户端共用分层回答卡组件（TON-1977 #1/#4，供讲解、选段提问、阶段 2 库里提问复用）：
+ * 客户端共用分层回答卡组件（TON-1977 #1/#4 & TON-1982，供讲解、选段提问、阶段 2 库里提问复用）：
  * - 题头显示当前回答立场（古籍切知识显示「历史学角度」，玄学切知识显示「文献和思想史角度」）；
- * - 拦截卡只显示固定提示与「只看书里怎么讲」按钮；
+ * - `boundary == "high_risk"` 时不显示拦截卡或弹窗，直接在题头下第一行展示高危提示行，样式与体系提示行一致；玄学立场时两行都有；
  * - 本书块按返回 `label` 分块显示，每句各自带出处、可单独点击跳原页高亮该句原句；
  * - 书外 / 推想块显示固定标签（「书外 · 未对照原文」/「推想 · 书外 · 未对照原文」），不可点、不带页码；
- * - 卡底「换个角度：」列出其他立场，点击用新立场重问并将新卡接在下方，旧卡题头不变。
+ * - 卡底「换个角度：」列出其他立场（带 `esoteric` 标记的书上 `original` 显示为「只看书里怎么讲」），点击用新立场重问并将新卡接在下方，旧卡题头不变。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -336,7 +328,6 @@ internal fun LayeredAnswerCard(
     showReaderPage: Boolean = false,
     onOpenCitation: (StanceCitation) -> Unit,
     onSwitchStance: ((BookStance) -> Unit)? = null,
-    onBoundaryReadBook: (() -> Unit)? = null,
     switchEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
@@ -346,6 +337,8 @@ internal fun LayeredAnswerCard(
     val pineWash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
     val mutedBg = colors.surface2
     val headerText = answer.stance.labelForBook(bookDefaultStance, bookGuards)
+    val highRiskLine = answer.highRiskNotice?.takeIf { it.isNotBlank() }
+        ?: if (answer.boundary == BookStanceCopy.HIGH_RISK_BOUNDARY) BookStanceCopy.HIGH_RISK_NOTICE else null
 
     PaperCard(
         modifier = modifier.fillMaxWidth().testTag("stance-answer-card"),
@@ -369,169 +362,152 @@ internal fun LayeredAnswerCard(
             )
         }
 
-        val boundary = answer.boundary
-        if (boundary != null) {
-            Column(
-                Modifier
+        if (highRiskLine != null) {
+            Text(
+                highRiskLine,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.fgSecondary,
+                modifier = Modifier
                     .fillMaxWidth()
                     .clip(pillShape)
                     .background(mutedBg)
-                    .border(1.dp, colors.borderSubtle, pillShape)
-                    .padding(12.dp)
-                    .testTag("stance-boundary-card"),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    boundary.message,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.fgPrimary,
-                    modifier = Modifier.testTag("stance-boundary-message"),
-                )
-                if (onBoundaryReadBook != null) {
-                    V7TextButton(
-                        onClick = onBoundaryReadBook,
-                        enabled = switchEnabled,
-                        modifier = Modifier.testTag("stance-boundary-action"),
-                    ) {
-                        Text(boundary.actionLabel)
-                    }
-                }
-            }
-        } else {
-            if (!answer.systemNotice.isNullOrBlank()) {
-                Text(
-                    answer.systemNotice,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.fgSecondary,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(pillShape)
-                        .background(mutedBg)
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .testTag("stance-system-notice"),
-                )
-            }
-            if (!answer.noBookNotice.isNullOrBlank()) {
-                Text(
-                    answer.noBookNotice,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.fgSecondary,
-                    modifier = Modifier.fillMaxWidth().testTag("stance-no-book-notice"),
-                )
-            }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .testTag("stance-high-risk-notice"),
+            )
+        }
+        if (!answer.systemNotice.isNullOrBlank()) {
+            Text(
+                answer.systemNotice,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.fgSecondary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(pillShape)
+                    .background(mutedBg)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .testTag("stance-system-notice"),
+            )
+        }
+        if (!answer.noBookNotice.isNullOrBlank()) {
+            Text(
+                answer.noBookNotice,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.fgSecondary,
+                modifier = Modifier.fillMaxWidth().testTag("stance-no-book-notice"),
+            )
+        }
 
-            answer.layers.forEachIndexed { layerIndex, layer ->
-                when (layer) {
-                    is StanceLayer.Book -> {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .testTag("stance-layer-book-$layerIndex"),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(
-                                layer.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = pine,
-                                modifier = Modifier.testTag("stance-layer-book-label-$layerIndex"),
-                            )
-                            layer.sentences.forEachIndexed { sentIndex, sentence ->
-                                val primary = sentence.citations.first()
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clip(pillShape)
-                                        .clickable(role = Role.Button) { onOpenCitation(primary) }
-                                        .pointerHoverIcon(PointerIcon.Hand)
-                                        .padding(vertical = 2.dp)
-                                        .testTag("stance-book-sentence-$layerIndex-$sentIndex"),
+        answer.layers.forEachIndexed { layerIndex, layer ->
+            when (layer) {
+                is StanceLayer.Book -> {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .testTag("stance-layer-book-$layerIndex"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            layer.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = pine,
+                            modifier = Modifier.testTag("stance-layer-book-label-$layerIndex"),
+                        )
+                        layer.sentences.forEachIndexed { sentIndex, sentence ->
+                            val primary = sentence.citations.first()
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(pillShape)
+                                    .clickable(role = Role.Button) { onOpenCitation(primary) }
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .padding(vertical = 2.dp)
+                                    .testTag("stance-book-sentence-$layerIndex-$sentIndex"),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    sentence.text,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colors.fgPrimary,
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
-                                    Text(
-                                        sentence.text,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = colors.fgPrimary,
-                                    )
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                                    ) {
-                                        sentence.citations.forEachIndexed { citeIndex, cite ->
-                                            val loc = bookCitationLabel(
-                                                book,
-                                                allBlocks,
-                                                Citation("S${citeIndex + 1}", cite.docId, cite.page, cite.quote),
-                                            )
-                                            val readerPage = if (showReaderPage && !loc.contains("第 ${cite.page} 页")) {
-                                                "第 ${cite.page} 页 · "
-                                            } else ""
-                                            val snippet = shortQuote(cite.quote)
-                                            Text(
-                                                "出处 · $readerPage$loc · $snippet",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = pine,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                textDecoration = TextDecoration.Underline,
-                                                modifier = Modifier
-                                                    .clickable(role = Role.Button) { onOpenCitation(cite) }
-                                                    .pointerHoverIcon(PointerIcon.Hand)
-                                                    .padding(vertical = 2.dp)
-                                                    .testTag("stance-sentence-citation-$layerIndex-$sentIndex-$citeIndex"),
-                                            )
-                                        }
+                                    sentence.citations.forEachIndexed { citeIndex, cite ->
+                                        val loc = bookCitationLabel(
+                                            book,
+                                            allBlocks,
+                                            Citation("S${citeIndex + 1}", cite.docId, cite.page, cite.quote),
+                                        )
+                                        val readerPage = if (showReaderPage && !loc.contains("第 ${cite.page} 页")) {
+                                            "第 ${cite.page} 页 · "
+                                        } else ""
+                                        val snippet = shortQuote(cite.quote)
+                                        Text(
+                                            "出处 · $readerPage$loc · $snippet",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = pine,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textDecoration = TextDecoration.Underline,
+                                            modifier = Modifier
+                                                .clickable(role = Role.Button) { onOpenCitation(cite) }
+                                                .pointerHoverIcon(PointerIcon.Hand)
+                                                .padding(vertical = 2.dp)
+                                                .testTag("stance-sentence-citation-$layerIndex-$sentIndex-$citeIndex"),
+                                        )
                                     }
                                 }
                             }
                         }
                     }
-                    is StanceLayer.Outside -> {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(pillShape)
-                                .background(mutedBg)
-                                .border(1.dp, colors.borderSubtle, pillShape)
-                                .padding(10.dp)
-                                .testTag("stance-layer-outside-$layerIndex"),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Text(
-                                layer.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.fgSecondary,
-                                modifier = Modifier.testTag("stance-layer-outside-label-$layerIndex"),
-                            )
-                            Text(
-                                layer.text,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.fgPrimary,
-                            )
-                        }
+                }
+                is StanceLayer.Outside -> {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(pillShape)
+                            .background(mutedBg)
+                            .border(1.dp, colors.borderSubtle, pillShape)
+                            .padding(10.dp)
+                            .testTag("stance-layer-outside-$layerIndex"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            layer.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.fgSecondary,
+                            modifier = Modifier.testTag("stance-layer-outside-label-$layerIndex"),
+                        )
+                        Text(
+                            layer.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.fgPrimary,
+                        )
                     }
-                    is StanceLayer.Guess -> {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(pillShape)
-                                .background(mutedBg)
-                                .border(1.dp, colors.borderSubtle, pillShape)
-                                .padding(10.dp)
-                                .testTag("stance-layer-guess-$layerIndex"),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Text(
-                                layer.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.fgSecondary,
-                                modifier = Modifier.testTag("stance-layer-guess-label-$layerIndex"),
-                            )
-                            Text(
-                                layer.text,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.fgPrimary,
-                            )
-                        }
+                }
+                is StanceLayer.Guess -> {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(pillShape)
+                            .background(mutedBg)
+                            .border(1.dp, colors.borderSubtle, pillShape)
+                            .padding(10.dp)
+                            .testTag("stance-layer-guess-$layerIndex"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            layer.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.fgSecondary,
+                            modifier = Modifier.testTag("stance-layer-guess-label-$layerIndex"),
+                        )
+                        Text(
+                            layer.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.fgPrimary,
+                        )
                     }
                 }
             }
@@ -559,7 +535,7 @@ internal fun LayeredAnswerCard(
                     modifier = Modifier.align(Alignment.CenterVertically),
                 )
                 for (target in alternatives) {
-                    val btnLabel = target.labelForBook(bookDefaultStance, bookGuards)
+                    val btnLabel = target.switchLabelForBook(bookDefaultStance, bookGuards)
                     Text(
                         btnLabel,
                         style = MaterialTheme.typography.labelSmall,

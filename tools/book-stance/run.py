@@ -203,7 +203,12 @@ def write_verification_report(out_dir: Path, run_meta: dict[str, Any], results: 
                 lines.append(f"  - Initial summary: {ir['text'].replace(chr(10), ' ')}")
         if resp.get("boundary"):
             b = resp["boundary"]
-            lines.append(f"- **BOUNDARY**: {b.get('message')} [{b.get('actionLabel')}]")
+            if isinstance(b, dict):
+                lines.append(f"- **BOUNDARY**: {b.get('message')} [{b.get('actionLabel')}]")
+            else:
+                lines.append(f"- **BOUNDARY**: `{b}`")
+        if resp.get("highRiskNotice"):
+            lines.append(f"- High-risk notice: {resp['highRiskNotice']}")
         if resp.get("systemNotice"):
             lines.append(f"- System notice: {resp['systemNotice']}")
         if resp.get("noBookNotice"):

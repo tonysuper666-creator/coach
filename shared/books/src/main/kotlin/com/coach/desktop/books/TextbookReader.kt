@@ -2347,11 +2347,6 @@ internal fun TextbookReader(
                     val target = visibleThread?.selection ?: return@CompanionAskPane
                     runInlineSelection(target, entry.action, entry.questionText, stanceOverride = nextStance)
                 },
-                onBoundaryReadBook = { entry ->
-                    val target = visibleThread?.selection ?: return@CompanionAskPane
-                    val currentStance = entry.explanation.stanceAnswer?.stance
-                    runInlineSelection(target, SelectionExplainAction.EXPLAIN, null, stanceOverride = currentStance)
-                },
             )
         }
 

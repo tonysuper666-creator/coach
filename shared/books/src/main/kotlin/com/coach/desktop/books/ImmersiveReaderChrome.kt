@@ -1227,7 +1227,6 @@ internal fun CompanionAskPane(
     bookStanceResolution: BookStanceResolution = BookStanceResolution.Undetermined,
     onOpenStanceCitation: ((StanceCitation, List<SourceBlock>) -> Unit)? = null,
     onSwitchTurnStance: ((InlineExplainEntry, com.coach.protocol.BookStance) -> Unit)? = null,
-    onBoundaryReadBook: ((InlineExplainEntry) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
@@ -1435,7 +1434,6 @@ internal fun CompanionAskPane(
                                             }
                                         },
                                         onSwitchStance = onSwitchTurnStance?.let { cb -> { nextStance -> cb(entry, nextStance) } },
-                                        onBoundaryReadBook = onBoundaryReadBook?.let { cb -> { cb(entry) } },
                                         switchEnabled = !thread.loading,
                                     )
                                 } else if (entry.explanation.citations.isEmpty()) {

@@ -282,7 +282,6 @@ internal fun PageExplanation(
                                     }
                                 },
                                 onSwitchStance = { nextStance -> switchPageStance(nextStance) },
-                                onBoundaryReadBook = { switchPageStance(stanceAns.stance) },
                                 switchEnabled = !switching,
                             )
                         } else {

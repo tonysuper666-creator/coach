@@ -400,26 +400,9 @@ internal object ExplainWire {
         val modelCalled = (body["modelCalled"] as? JsonPrimitive)?.booleanOrNull ?: true
         val summaryText = (body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
 
-        val boundaryObj = body["boundary"] as? JsonObject
-        if (boundaryObj != null) {
-            val msg = (boundaryObj["message"] as? JsonPrimitive)?.contentOrNull?.trim()
-                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_TEXT
-            val actionLabel = (boundaryObj["actionLabel"] as? JsonPrimitive)?.contentOrNull?.trim()
-                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_ACTION
-            val kind = (boundaryObj["kind"] as? JsonPrimitive)?.contentOrNull?.trim()
-                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_KIND
-            val answer = StanceAnswer(
-                stance = stance,
-                layers = emptyList(),
-                systemNotice = null,
-                noBookNotice = null,
-                boundary = StanceBoundary(kind, msg, actionLabel),
-                modelCalled = modelCalled,
-                droppedSentences = dropped,
-                outOfRange = outOfRange,
-            )
-            return ExplainResult.Done(Explanation(summaryText.ifBlank { msg }, emptyList(), elapsed, answer))
-        }
+        val boundaryStr = (body["boundary"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.trim()
+            ?.takeIf { it == BookStanceCopy.HIGH_RISK_BOUNDARY }
+        val isHighRisk = boundaryStr == BookStanceCopy.HIGH_RISK_BOUNDARY
 
         val sentById = sent.associateBy { it.id }
         val layers = mutableListOf<StanceLayer>()
@@ -429,6 +412,7 @@ internal object ExplainWire {
             for (el in rawLayers) {
                 val obj = el as? JsonObject ?: continue
                 val kind = AnswerLayerKind.fromWire((obj["layer"] as? JsonPrimitive)?.contentOrNull) ?: continue
+                if (isHighRisk && kind != AnswerLayerKind.BOOK) continue
                 val label = (obj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
                 when (kind) {
                     AnswerLayerKind.OUTSIDE -> {
@@ -492,11 +476,16 @@ internal object ExplainWire {
             }
         }
 
+        val highRiskNotice = if (isHighRisk) {
+            (body["highRiskNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: BookStanceCopy.HIGH_RISK_NOTICE
+        } else null
         val systemNotice = if (stance == BookStance.ESOTERIC) {
             (body["systemNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                 ?: BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
         } else null
         val noBookNotice = (body["noBookNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            ?: if (isHighRisk && layers.isEmpty()) BookStanceCopy.NO_BOOK_DIRECT else null
 
         if (layers.isEmpty() && noBookNotice.isNullOrBlank()) {
             val fallback = summaryText.trim().ifBlank { "这次回答的出处无法核对。" }
@@ -505,9 +494,10 @@ internal object ExplainWire {
         val answer = StanceAnswer(
             stance = stance,
             layers = layers,
+            highRiskNotice = highRiskNotice,
             systemNotice = systemNotice,
             noBookNotice = noBookNotice,
-            boundary = null,
+            boundary = boundaryStr,
             modelCalled = modelCalled,
             droppedSentences = dropped,
             outOfRange = outOfRange,
@@ -882,7 +872,6 @@ internal fun BookExplainPanel(
                                             }
                                         },
                                         onSwitchStance = { nextStance -> start(block, stanceOverride = nextStance) },
-                                        onBoundaryReadBook = { start(block, stanceOverride = stanceAns.stance) },
                                         switchEnabled = !state.switching,
                                     )
                                 } else {

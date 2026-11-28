@@ -33,6 +33,24 @@ import kotlin.test.*
 /** Source anchors survive both component reflow and Desk's opt-in width. */
 @OptIn(ExperimentalTestApi::class)
 class BookPageViewTest {
+    private fun ComposeUiTest.revealReaderHud() {
+        if (onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isEmpty()) {
+            if (onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty()) {
+                onNodeWithTag("reader-page").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.RequestFocus)
+                waitForIdle()
+                onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
+            }
+            if (onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isEmpty()) {
+                onNodeWithTag("textbook-reader").performMouseInput { click(center) }
+                waitForIdle()
+            }
+            waitUntil(timeoutMillis = 5_000) {
+                onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+    }
+
     @Test fun guideArrivalFitsOnlyTheSheetContainingTheHardPoint() {
         org.junit.Assume.assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val book = spotBook()
@@ -187,8 +205,7 @@ class BookPageViewTest {
                         onNoteSession = {}, onPage = { writes += it }, onBack = {}, onLearn = {})
                 } }
                 waitForIdle()
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
-                waitForIdle()
+                revealReaderHud()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 fun sources() = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
@@ -265,14 +282,16 @@ class BookPageViewTest {
             val book = library.importBook(file)
             assertEquals(1, book.pages.size)
             library.save(book.copy(promptSeen = true))
-            BookHudPreferenceStore(library.directory).setPinned(true)
             val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
-                waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
+                waitUntil(timeoutMillis = 20_000) {
+                    controller.state.value.screen == BookScreen.READER && !controller.state.value.busy
+                }
                 waitForIdle()
+                revealReaderHud()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()

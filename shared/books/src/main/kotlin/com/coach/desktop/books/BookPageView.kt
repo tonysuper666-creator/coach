@@ -395,7 +395,7 @@ internal fun BookPageView(
             }
             .testTag("book-page-layout"),
         linePitchPx, topMargin,
-    ) { maxWidth, maxHeight, viewportWidth ->
+    ) { maxWidth, maxHeight, viewportWidth, zoom ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val visibleColumns = when {
@@ -424,14 +424,21 @@ internal fun BookPageView(
         // 沉浸式行宽封顶 720dp，多出来的宽度全给页边，外侧不窄于书脊侧。
         val (outerExtra, spineExtra) = if (!immersive) Pair(0f, 0f) else {
             val minMargins = (minLeftInset + minRightInset).value
-            // maxWidth 是基线网格里的宽度，viewportWidth 是屏幕上的宽度，两者之比就是网格放大倍数的倒数。
-            val gridPerScreen = if (viewportWidth.value > 0f) maxWidth.value / viewportWidth.value else 1f
-            val text = bookImmersiveTextDp(sheetWidth.value, minMargins, BOOK_IMMERSIVE_MAX_TEXT_DP * gridPerScreen)
+            // zoom 是基线网格放大倍数；屏上行宽 = 网格行宽 * zoom，网格内行宽上限为 720dp / zoom。
+            val text = bookImmersiveTextDp(sheetWidth.value, minMargins, BOOK_IMMERSIVE_MAX_TEXT_DP / zoom)
             bookImmersiveExtraMargins(sheetWidth.value - minMargins - text, spread)
         }
         val leftInset = minLeftInset + outerExtra.dp
         val rightInset = minRightInset + spineExtra.dp
-        val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
+        val widthPx = with(density) {
+            val rawPx = (sheetWidth - leftInset - rightInset).toPx()
+            if (immersive) {
+                val maxGridPx = kotlin.math.floor((BOOK_IMMERSIVE_MAX_TEXT_DP / zoom).dp.toPx().toDouble()).toInt().coerceAtLeast(1)
+                kotlin.math.floor(rawPx.toDouble()).toInt().coerceIn(1, maxGridPx)
+            } else {
+                rawPx.roundToInt().coerceAtLeast(1)
+            }
+        }
         val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
@@ -801,14 +808,14 @@ private fun BookPageViewport(
     modifier: Modifier,
     linePitchPx: Int?,
     topMargin: Dp,
-    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
+    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp, zoom: Float) -> Unit,
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
         val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
         val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
         if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
-            content(maxWidth, maxHeight, maxWidth)
+            content(maxWidth, maxHeight, maxWidth, 1f)
             return@BoxWithConstraints
         }
         val gridHeight = rows * linePitchPx + reservedPx
@@ -825,7 +832,7 @@ private fun BookPageViewport(
                 }
             }
         }) {
-            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth) }
+            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth, zoom) }
         }
     }
 }

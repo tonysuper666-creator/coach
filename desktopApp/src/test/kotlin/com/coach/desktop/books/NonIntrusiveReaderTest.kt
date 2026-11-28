@@ -395,7 +395,12 @@ class NonIntrusiveReaderTest {
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertDoesNotExist()
 
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                waitForIdle()
+                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isNotEmpty()
+                }
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()
                 waitForIdle()
@@ -463,7 +468,16 @@ class NonIntrusiveReaderTest {
                 onNodeWithTag("damaged-pages-dismiss").performClick()
                 waitForIdle()
                 onNodeWithTag("damaged-pages").assertDoesNotExist()
-                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                // Move pointer to reading center so HUD is deterministically hidden on both macOS and Windows,
+                // then restore focus to reader-page and reveal HUD via Tab.
+                onRoot().performMouseInput { moveTo(Offset(640f, 400f)) }
+                waitForIdle()
+                onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                waitForIdle()
+                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isNotEmpty()
+                }
                 waitForIdle()
                 onNodeWithTag("damaged-pages-badge").assertIsDisplayed().performClick()
                 waitForIdle()

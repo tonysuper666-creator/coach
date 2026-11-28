@@ -192,8 +192,10 @@ An isolated specimen uses the same process on the second page.
             assertEquals(expectedStart + quote.length, note.end)
             assertEquals(quote, note.quote)
             assertEquals("第二处", note.note)
-            if (onAllNodesWithTag("immersive-companion-drawer").fetchSemanticsNodes().isEmpty())
+            if (onAllNodesWithTag("immersive-companion-drawer").fetchSemanticsNodes().isEmpty()) {
+                revealReaderHud()
                 onNodeWithTag("immersive-companion-toggle").performClick()
+            }
             onNodeWithTag("companion-tab-notes").performClick()
             waitTag("note-${note.id}")
             onNodeWithText("我的原句：$quote").assertIsDisplayed()

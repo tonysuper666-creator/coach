@@ -146,6 +146,8 @@ object BookMapVerifyMain {
                 var mapChapters = 0
                 var mapModel = ""
                 var mapStatus = "skipped"
+                var mapStage = ""
+                var mapErrorCode = ""
 
                 val existingMap = BookMapStore.load(library, indexed)
                 if (existingMap != null && existingMap.totalPoints > 0) {
@@ -166,6 +168,8 @@ object BookMapVerifyMain {
                     mapChapters = outcome.chapters
                     mapModel = outcome.model
                     mapStatus = outcome.status
+                    mapStage = outcome.stage
+                    mapErrorCode = outcome.errorCode
                 }
 
                 val spans = BookMapSkeleton.chapters(indexed)
@@ -177,6 +181,8 @@ object BookMapVerifyMain {
                     put("bodyStartPage", BookMapSkeleton.bodyStartPage(indexed))
                     put("chapters", spans.size)
                     put("mapStatus", mapStatus)
+                    if (mapStage.isNotBlank()) put("mapStage", mapStage)
+                    if (mapErrorCode.isNotBlank()) put("mapErrorCode", mapErrorCode)
                     put("mapChapters", mapChapters)
                     put("mapPoints", mapPoints)
                     put("model", mapModel)
@@ -209,6 +215,8 @@ object BookMapVerifyMain {
         val chapters: Int = 0,
         val points: Int = 0,
         val model: String = "",
+        val stage: String = "",
+        val errorCode: String = "",
     )
 
     private fun generateBookMapOverHttp(
@@ -219,33 +227,62 @@ object BookMapVerifyMain {
         token: String,
         maxPolls: Int,
     ): GenerateOutcome = runBlocking(Dispatchers.IO) {
-        val built = BookMapWire.buildBatchRequest(book, ExplainLanguage.BILINGUAL, revision = 0)
-        if (built.refMap.isEmpty()) return@runBlocking GenerateOutcome("no_readable_sentences")
         val http = CourseHttp(serverUrl, deviceId, token, "library")
         try {
-            var polls = 0
-            while (polls < maxPolls) {
-                polls += 1
-                val reply = http.fetchBookMapBatch(book.id, built.payload)
-                val body = reply.body ?: return@runBlocking GenerateOutcome("http_error_${reply.statusCode ?: 0}")
-                when (val parsed = BookMapWire.parseBatchResponse(book, body, built.refMap)) {
-                    is BookMapBatchParseResult.Pending -> {
-                        BookMapStore.savePendingJob(library, book.id, built.skeletonHash, parsed.jobKey, 0)
-                        delay(parsed.retryAfterMs.coerceIn(1_000L, 15_000L))
-                    }
-                    is BookMapBatchParseResult.Ready -> {
-                        BookMapStore.save(library, parsed.document, expected = book)
+            var revision = 0
+            while (revision <= 1) {
+                val built = BookMapWire.buildBatchRequest(book, ExplainLanguage.BILINGUAL, revision = revision)
+                if (built.refMap.isEmpty()) {
+                    return@runBlocking GenerateOutcome("no_readable_sentences", stage = "request_parse", errorCode = "empty_refs")
+                }
+                var polls = 0
+                var retriedWithBump = false
+                while (polls < maxPolls) {
+                    polls += 1
+                    val reply = http.fetchBookMapBatch(book.id, built.payload)
+                    val body = reply.body
+                    if (body == null) {
+                        val code = reply.code.orEmpty().ifBlank { "http_${reply.statusCode ?: 0}" }
+                        if (revision == 0 && (reply.statusCode == 502 || reply.statusCode == 503)) {
+                            revision += 1
+                            retriedWithBump = true
+                            break
+                        }
                         return@runBlocking GenerateOutcome(
-                            status = "generated",
-                            chapters = parsed.document.chapters.size,
-                            points = parsed.document.totalPoints,
-                            model = parsed.document.model,
+                            status = "http_error_${reply.statusCode ?: 0}",
+                            stage = "http_call",
+                            errorCode = code,
                         )
                     }
-                    is BookMapBatchParseResult.Invalid -> return@runBlocking GenerateOutcome("invalid_response")
+                    when (val parsed = BookMapWire.parseBatchResponse(book, body, built.refMap)) {
+                        is BookMapBatchParseResult.Pending -> {
+                            BookMapStore.savePendingJob(library, book.id, built.skeletonHash, parsed.jobKey, revision)
+                            delay(parsed.retryAfterMs.coerceIn(1_000L, 15_000L))
+                        }
+                        is BookMapBatchParseResult.Ready -> {
+                            BookMapStore.save(library, parsed.document, expected = book)
+                            return@runBlocking GenerateOutcome(
+                                status = "generated",
+                                chapters = parsed.document.chapters.size,
+                                points = parsed.document.totalPoints,
+                                model = parsed.document.model,
+                            )
+                        }
+                        is BookMapBatchParseResult.Invalid -> {
+                            if (revision == 0) {
+                                revision += 1
+                                retriedWithBump = true
+                                break
+                            }
+                            return@runBlocking GenerateOutcome("invalid_response", stage = "client_parse", errorCode = "invalid_response")
+                        }
+                    }
+                }
+                if (!retriedWithBump) {
+                    return@runBlocking GenerateOutcome("pending_timeout", stage = "chunk_poll", errorCode = "pending_timeout")
                 }
             }
-            GenerateOutcome("pending_timeout")
+            GenerateOutcome("failed", stage = "chunk_submit", errorCode = "retry_exhausted")
         } finally {
             http.close()
         }

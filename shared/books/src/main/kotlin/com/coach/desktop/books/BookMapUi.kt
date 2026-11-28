@@ -67,6 +67,7 @@ internal fun BookWhatAboutMapPanel(
     var progressByChapter by remember(book.id) { mutableStateOf<Map<String, ChapterProgressRecord>>(emptyMap()) }
     var activeJob by remember(book.id) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var revision by remember(book.id) { mutableIntStateOf(0) }
+    var lastFailedWasPending by remember(book.id) { mutableStateOf(false) }
 
     // 1. Load locally cached map & reading progress (zero quota spend on reopen).
     //    Re-runs automatically whenever the book's skeleton changes (TON-1876) to reconcile chapters immediately.
@@ -137,6 +138,7 @@ internal fun BookWhatAboutMapPanel(
                     val reply = fetchBatch(built.payload)
                     val body = reply.body
                     if (body == null) {
+                        lastFailedWasPending = reply.error?.contains("超时") == true
                         state = BookMapErrors.fromCallFailure(reply.error, reply.trouble, existingDoc)
                         return@launch
                     }
@@ -156,6 +158,7 @@ internal fun BookWhatAboutMapPanel(
                                 totalChunks = parsed.totalChunks,
                             )
                             if (polls >= 120) {
+                                lastFailedWasPending = true
                                 state = BookMapUiState.Failed(
                                     message = "批处理还在排队中，稍后点一下继续获取，不会重复花额度。",
                                     offline = false,
@@ -167,6 +170,7 @@ internal fun BookWhatAboutMapPanel(
                             delay(pollDelayOverrideMs ?: parsed.retryAfterMs)
                         }
                         is BookMapBatchParseResult.Ready -> {
+                            lastFailedWasPending = false
                             val currentBook = latestBook
                             val finalDoc = BookMapReconciler.reconcile(parsed.document, currentBook)
                             withContext(Dispatchers.IO) {
@@ -177,6 +181,7 @@ internal fun BookWhatAboutMapPanel(
                             return@launch
                         }
                         is BookMapBatchParseResult.Invalid -> {
+                            lastFailedWasPending = false
                             state = BookMapUiState.Failed(
                                 message = parsed.message,
                                 offline = false,
@@ -215,7 +220,7 @@ internal fun BookWhatAboutMapPanel(
         progressByChapter = progressByChapter,
         onGenerateAll = { startGenerate(emptySet(), bumpRevision = false) },
         onRegenerateStale = { staleIds -> startGenerate(staleIds, bumpRevision = true) },
-        onRetry = { startGenerate(emptySet(), bumpRevision = false) },
+        onRetry = { startGenerate(emptySet(), bumpRevision = !lastFailedWasPending) },
         onClickAnchor = { anchor ->
             onOpenAnchor(BookMapAnchorResolver.toCompanionAnchor(book, anchor))
         },

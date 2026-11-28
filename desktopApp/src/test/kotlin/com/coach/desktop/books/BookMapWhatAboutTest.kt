@@ -598,4 +598,197 @@ class BookMapWhatAboutTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun epubWrappedLinesStayCompleteSentencesAndRetryAfterFailureBumpsRevision() {
+        val root = Files.createTempDirectory("book-map-epub-wrap-")
+        try {
+            val wrappedPage = """CHAPTER V.
+OF THE REAL AND NOMINAL PRICE OF COMMODITIES.
+
+Every man is rich or poor according to the degree in which he can afford to
+enjoy the necessaries, conveniencies, and amusements of human life. But after
+the division of labour has once thoroughly taken place, it is but a very small
+part of these with which a man’s own labour can supply him.
+
+Labour therefore, is the real measure of the exchangeable value of all
+commodities across domestic and international markets."""
+            val book = Textbook(
+                id = "epub-wrapped",
+                title = "Wealth Wrapped EPUB",
+                format = "epub",
+                pages = listOf(BookPage(1, wrappedPage)),
+                readingPage = 1,
+                structure = BookStructure(
+                    pageRoles = emptyMap(),
+                    sections = emptyList(),
+                    source = "EPUB_NAV",
+                    tocNodes = listOf(BookTocNode("ch-5", null, 0, 1, TocNodeKind.CHAPTER, "5", "Chapter V", 1, 1, source = HeadingSource.EPUB_TOC)),
+                ).apply {
+                    resolvedLessons = listOf(
+                        BookLesson("ch-5", "Chapter V", listOf(SourceBlock("b1", 1, 0, wrappedPage.length, false, wrappedPage))),
+                    )
+                },
+            )
+
+            // 1. Candidate sentences must NOT truncate at single soft `\n` line wraps, while preserving exact raw UTF-16 slices.
+            val built = BookMapWire.buildBatchRequest(book)
+            val refs = built.refMap.values.toList()
+            assertEquals(3, refs.size, "Expected 3 complete sentences across 2 wrapped paragraphs, got ${refs.size}")
+            assertTrue(refs[0].text.contains("afford to\nenjoy the necessaries"), "First sentence must span soft newline intact")
+            assertTrue(refs[0].text.endsWith("human life."), "First sentence must end at full sentence period")
+            assertTrue(refs[1].text.contains("very small\npart of these"), "Second sentence must span soft newline intact")
+            assertTrue(refs[2].text.contains("all\ncommodities"), "Third sentence must span soft newline intact")
+            for (r in refs) {
+                assertEquals(r.text, wrappedPage.substring(r.startUtf16, r.endUtf16), "Raw UTF-16 slice must match page text verbatim")
+            }
+            // Wire payload sends clean single-line prose to Haiku without mid-sentence newlines.
+            val wireRefs = built.payload["chapters"]!!.jsonArray.single().jsonObject["refs"]!!.jsonArray
+            assertTrue(wireRefs.none { it.jsonObject["text"]!!.jsonPrimitive.content.contains('\n') })
+
+            // 2. Single-chapter book allows up to 10 points in parseBatchResponse.
+            val singleChPages = (1..5).map { p ->
+                BookPage(
+                    p,
+                    (1..4).joinToString("\n\n") { s ->
+                        "Sentence $s on page $p establishes core principle ${(p - 1) * 4 + s} for the entire lecture deck."
+                    },
+                )
+            }
+            val singleChBook = Textbook(
+                id = "single-ch-deck",
+                title = "Week 1 Lecture Slides",
+                format = "pdf",
+                pages = singleChPages,
+                readingPage = 1,
+                structure = BookStructure(
+                    pageRoles = emptyMap(),
+                    sections = emptyList(),
+                    source = "PDF_OUTLINE",
+                    tocNodes = listOf(BookTocNode("ch-1", null, 0, 1, TocNodeKind.CHAPTER, "1", "Lecture 1", 1, 5, source = HeadingSource.PDF_OUTLINE)),
+                ).apply {
+                    resolvedLessons = listOf(
+                        BookLesson("ch-1", "Lecture 1", singleChPages.map { SourceBlock("b-${it.number}", it.number, 0, it.text.length, false, it.text) }),
+                    )
+                },
+            )
+            val singleBuilt = BookMapWire.buildBatchRequest(singleChBook)
+            val tenPointsResp = buildJsonObject {
+                put("formatVersion", 2)
+                put("pending", false)
+                put("model", "claude-haiku-5-5")
+                put("chapters", buildJsonArray {
+                    add(buildJsonObject {
+                        put("chapterId", "ch-1")
+                        put("chapterNum", 1)
+                        put("oneLiner", "整份讲义概述")
+                        put("points", buildJsonArray {
+                            singleBuilt.refMap.keys.take(10).forEachIndexed { idx, refId ->
+                                add(buildJsonObject {
+                                    put("summary", "单章要点 ${idx + 1}")
+                                    put("refs", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(refId)) })
+                                })
+                            }
+                        })
+                    })
+                })
+            }
+            val parsedSingle = BookMapWire.parseBatchResponse(singleChBook, tenPointsResp, singleBuilt.refMap) as BookMapBatchParseResult.Ready
+            assertEquals(10, parsedSingle.document.totalPoints, "Single-chapter book must retain up to 10 points")
+
+            // 3. UI retry after non-pending failure must bump revision so Bridge does not replay a cached failed chunkKey.
+            val library = TextbookLibrary(root)
+            val seenRevisions = mutableListOf<Int>()
+            runSkikoComposeUiTest(size = Size(820f, 960f)) {
+                setContent {
+                    CoachTheme(false) {
+                        CompositionLocalProvider(LocalV7ReducedMotion provides true) {
+                            BookWhatAboutMapPanel(
+                                book = book,
+                                library = library,
+                                currentPage = 1,
+                                aiAvailable = true,
+                                pollDelayOverrideMs = 10L,
+                                fetchBatch = { req ->
+                                    val rev = req["revision"]!!.jsonPrimitive.intOrNull ?: -1
+                                    seenRevisions += rev
+                                    if (seenRevisions.size == 1) {
+                                        CourseServerCallResult(body = null, error = "全书地图生成失败，请稍后重试。", trouble = ExplainTrouble.Other)
+                                    } else {
+                                        CourseServerCallResult(body = fakeBatchResponseFor(req), error = null)
+                                    }
+                                },
+                                onOpenAnchor = {},
+                            )
+                        }
+                    }
+                }
+                onNodeWithTag("book-map-v2-generate").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    runCatching { onNodeWithTag("book-map-v2-retry").assertExists() }.isSuccess
+                }
+                onNodeWithTag("book-map-v2-retry").performClick()
+                waitUntil(timeoutMillis = 5_000) {
+                    runCatching { onNodeWithTag("book-map-v2-point-0-0").assertExists() }.isSuccess
+                }
+            }
+            assertEquals(listOf(0, 1), seenRevisions, "Retry after non-pending failure must bump revision from 0 to 1")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun realPublicCorpusEpubAndPdfMapSentencesHighlightWithoutNewlineTruncation() {
+        val corpusRoot = java.nio.file.Path.of(System.getProperty("user.home"), "Coach", "materials", "public-corpus")
+        val epubPaths = listOf(
+            corpusRoot.resolve("nonfiction/origin-of-species/origin-of-species.epub"),
+            corpusRoot.resolve("nonfiction/wealth-of-nations/wealth-of-nations.epub"),
+        ).filter { Files.isRegularFile(it) }
+        val pdfPath = corpusRoot.resolve("textbooks/openstax-economics-2e/principles-of-economics-2e.pdf")
+        if (epubPaths.isEmpty() && !Files.isRegularFile(pdfPath)) return
+
+        val root = Files.createTempDirectory("book-map-real-corpus-")
+        try {
+            val library = TextbookLibrary(root.resolve("lib"), streamPdfExtras = true, lazyPdfExtras = true)
+            for (epub in epubPaths) {
+                val book = library.importBook(epub)
+                val built = BookMapWire.buildBatchRequest(book)
+                assertTrue(built.refMap.size >= 40, "${epub.fileName} should yield abundant candidate refs")
+                var exactCount = 0
+                var multiLineCount = 0
+                for (r in built.refMap.values) {
+                    val page = assertNotNull(book.page(r.pdfPage))
+                    if (page.text.substring(r.startUtf16, r.endUtf16) == r.text) exactCount++
+                    if ('\n' in r.text) multiLineCount++
+                }
+                assertEquals(built.refMap.size, exactCount, "${epub.fileName}: every ref must match exact raw page slice")
+                // Verify live-window TextView highlight for 5 sampled points across chapters in WindowsTextbookHost.
+                val resp = fakeBatchResponseFor(built.payload)
+                val parsed = BookMapWire.parseBatchResponse(book, resp, built.refMap) as BookMapBatchParseResult.Ready
+                BookMapStore.save(library, parsed.document, expected = book)
+                val sampledAnchors = parsed.document.chapters.flatMap { it.points }.mapNotNull { it.primaryAnchor }.take(5)
+                assertEquals(5, sampledAnchors.size)
+                for (a in sampledAnchors) {
+                    val companion = BookMapAnchorResolver.toCompanionAnchor(book, a)
+                    val pg = assertNotNull(book.page(companion.pdfPage))
+                    assertEquals(companion.quoteAnchor, pg.text.substring(companion.startUtf16, companion.endUtf16))
+                }
+            }
+            if (Files.isRegularFile(pdfPath)) {
+                val staged = library.stageBookImportTier0(pdfPath)
+                val book = if (staged.book.indexState != "READY") library.indexBookTier1(staged.book.id) else staged.book
+                val built = BookMapWire.buildBatchRequest(book)
+                assertTrue(built.refMap.size >= 40, "OpenStax PDF should yield candidate refs across chapters")
+                var exactPdf = 0
+                for (r in built.refMap.values) {
+                    val pg = assertNotNull(book.page(r.pdfPage))
+                    if (pg.text.substring(r.startUtf16, r.endUtf16) == r.text) exactPdf++
+                }
+                assertEquals(built.refMap.size, exactPdf, "OpenStax PDF: every ref must match exact raw page slice")
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

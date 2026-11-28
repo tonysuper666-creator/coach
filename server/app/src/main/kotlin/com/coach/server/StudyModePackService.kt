@@ -2543,9 +2543,28 @@ fun Application.studyModeRoutes(
                     throw e
                 } catch (e: BookMapQuotaExceededException) {
                     call.respondText(
-                        buildJsonObject { put("error", e.message ?: "生成额度已达上限，请稍后再试。"); put("code", "monthly_quota") }.toString(),
+                        buildJsonObject {
+                            put("error", e.message ?: "生成额度已达上限，请稍后再试。")
+                            put("code", e.errorCode)
+                            put("stage", "chunk_submit")
+                            put("errorCode", e.errorCode)
+                        }.toString(),
                         ContentType.Application.Json,
                         HttpStatusCode.TooManyRequests,
+                    )
+                } catch (e: BookMapGenerationException) {
+                    val status = when (e.stage) {
+                        "request_parse" -> HttpStatusCode.BadRequest
+                        else -> HttpStatusCode.BadGateway
+                    }
+                    call.respondText(
+                        buildJsonObject {
+                            put("error", e.message ?: "全书地图生成失败，请稍后重试。")
+                            put("stage", e.stage)
+                            put("errorCode", e.errorCode)
+                        }.toString(),
+                        ContentType.Application.Json,
+                        status,
                     )
                 } catch (e: FriendServiceError) {
                     if (friend != null) {

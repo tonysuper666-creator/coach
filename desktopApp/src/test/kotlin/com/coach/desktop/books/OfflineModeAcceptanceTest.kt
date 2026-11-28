@@ -4,6 +4,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
@@ -16,10 +17,12 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
@@ -307,7 +310,8 @@ class OfflineModeAcceptanceTest {
                 waitForIdle()
                 assertEquals(1, controller.state.value.page)
 
-                // Turn page forward
+                // Reveal the reader controls and turn the page forward
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
                 onNodeWithTag("next-page").performClick()
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.page > 1 }
 
@@ -837,6 +841,7 @@ class OfflineModeAcceptanceTest {
                 onNodeWithTag("textbook-reader").assertIsDisplayed()
 
                 // Open TOC & Companion drawer (Explain -> Ask -> Notes)
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
                 onNodeWithTag("v7-directory-toggle").performClick()
                 waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("immersive-companion-toggle").performClick()

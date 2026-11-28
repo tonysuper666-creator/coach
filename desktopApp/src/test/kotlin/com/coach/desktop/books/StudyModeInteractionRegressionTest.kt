@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
@@ -14,8 +15,10 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
 import com.coach.client.PairedCredentials
@@ -749,7 +752,8 @@ exchangeable value of all commodities."""
                 }
                 // Open the companion drawer if not already open.
                 if (runCatching { onNodeWithTag("single-book-companion").assertExists() }.isFailure) {
-                    onNodeWithTag("reader-companion-toggle").performClick()
+                    onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+                    onNodeWithTag("immersive-companion-toggle").performClick()
                     waitForIdle()
                 }
                 waitUntil(timeoutMillis = 10_000) {

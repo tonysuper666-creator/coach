@@ -408,6 +408,23 @@ internal object HeldOutDecomposer {
         """(?:^|[.;]\s+)(?:The\s+|An?\s+)?([A-Za-z][A-Za-z0-9 -]{2,48})\s+(?:is\s+defined\s+as|refers\s+to|is\s+called|is\s+known\s+as)\b""",
     )
     private val capitalRun = Regex("""\b[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*(?:\s+[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*){1,5}\b""")
+    private val lineOptionMarker = Regex(
+        """^\s*(?:(\()([A-Fa-f])\)|(\[)([A-Fa-f])\]|([A-Fa-f])([.)、:：]))\s+(\S.*)$""",
+    )
+    private val subQuestionMarks = Regex("""(?i)\[\s*\d+\s*marks?\s*]|\(\s*\d+\s*marks?\s*\)""")
+    private val subQuestionVerbLead = Regex(
+        """(?i)^(?:explain|discuss|compare|contrast|define|calculate|compute|describe|derive|prove|show|sketch|draw|plot|identify|evaluate|analyze|analyse|outline|state|list|what|why|how|suppose|consider|assume|comment)\b""",
+    )
+    private val inlineOptionSpecs = listOf(
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))\(([A-F])\)(?=\s+\S)"""), minCount = 2, isLower = false),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))\[([A-F])\](?=\s+\S)"""), minCount = 2, isLower = false),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))([A-F])\)(?=\s+\S)"""), minCount = 2, isLower = false),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))([A-F])\.(?=\s+\S)"""), minCount = 3, isLower = false),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))\(([a-f])\)(?=\s+\S)"""), minCount = 3, isLower = true),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))\[([a-f])\](?=\s+\S)"""), minCount = 3, isLower = true),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))([a-f])\)(?=\s+\S)"""), minCount = 3, isLower = true),
+        InlineOptionSpec(Regex("""(?:^|(?<=\s))([a-f])\.(?=\s+\S)"""), minCount = 3, isLower = true),
+    )
     private val boilerplate = setOf("contents", "outline", "summary", "references", "overview", "目录", "小结", "参考文献")
     val boilerplateWords: Set<String> get() = boilerplate
     private val glueWords = setOf(
@@ -443,6 +460,10 @@ internal object HeldOutDecomposer {
         val pageBoundary: Boolean,
         val resetToFirstPage: Boolean,
     )
+
+    private data class InlineOptionSpec(val regex: Regex, val minCount: Int, val isLower: Boolean)
+
+    private data class LineOption(val letter: Char, val isUpper: Boolean, val style: String, val body: String)
 
     private data class TermMatcher(
         val title: String,
@@ -787,7 +808,8 @@ internal object HeldOutDecomposer {
 
     private fun focusOrNull(stem: String, matchers: List<TermMatcher>): String? {
         pointLine.find(stem)?.let { return clean(it.groupValues[1]) }
-        val body = stem.replace(numberPrefix, "").trim()
+        val stemOnly = stripChoiceOptions(stem)
+        val body = stemOnly.replace(numberPrefix, "").trim()
         bestTermMatch(body, matchers)?.let { return clean(it) }
         // Question stems open with Explain/Discuss/…. Those words are not the point name.
         val titled = capitalRun.findAll(body)
@@ -796,6 +818,102 @@ internal object HeldOutDecomposer {
             .maxByOrNull { it.length }
         if (titled != null) return clean(titled)
         return null
+    }
+
+    /** Removes multiple-choice option lines/clauses so point naming uses only the stem while keeping essay sub-questions. */
+    internal fun stripChoiceOptions(stem: String): String {
+        val lines = stem.lines()
+        var trimmedStem = stem
+        for (i in 1 until lines.size) {
+            val first = parseLineOption(lines[i]) ?: continue
+            if (first.letter.lowercaseChar() != 'a') continue
+            val collected = mutableListOf(first)
+            var expected = first.letter + 1
+            for (j in (i + 1) until lines.size) {
+                val next = parseLineOption(lines[j]) ?: continue
+                if (next.isUpper == first.isUpper && next.style == first.style && next.letter == expected) {
+                    collected += next
+                    expected = next.letter + 1
+                } else if (next.letter.lowercaseChar() == 'a') {
+                    break
+                }
+            }
+            if (collected.size < 2) continue
+            if (!isSubQuestionSequence(first.isUpper, collected, lines.subList(0, i))) {
+                trimmedStem = lines.subList(0, i).joinToString("\n").trim()
+                break
+            }
+        }
+        return stripInlineChoiceOptions(trimmedStem)
+    }
+
+    private fun parseLineOption(line: String): LineOption? {
+        val m = lineOptionMarker.matchEntire(line) ?: return null
+        val (letterChar, style) = when {
+            m.groupValues[2].isNotEmpty() -> m.groupValues[2][0] to "PAREN"
+            m.groupValues[4].isNotEmpty() -> m.groupValues[4][0] to "BRACKET"
+            else -> m.groupValues[5][0] to "PUNCT_${m.groupValues[6]}"
+        }
+        return LineOption(letterChar, letterChar.isUpperCase(), style, m.groupValues[7].trim())
+    }
+
+    private fun isSubQuestionSequence(
+        isUpper: Boolean,
+        collected: List<LineOption>,
+        precedingLines: List<String>,
+    ): Boolean {
+        if (isUpper) return false
+        if (collected.any { isSubQuestionBody(it.body) }) return true
+        if (collected.size == 2) {
+            val prevEnd = precedingLines.lastOrNull { it.isNotBlank() }?.trimEnd().orEmpty()
+            return prevEnd.lastOrNull() !in setOf('?', '？', ':', '：')
+        }
+        return false
+    }
+
+    private fun isSubQuestionBody(body: String): Boolean =
+        '?' in body || '？' in body || subQuestionMarks.containsMatchIn(body) || subQuestionVerbLead.containsMatchIn(body)
+
+    private fun stripInlineChoiceOptions(text: String): String {
+        var earliestCut: Int? = null
+        for (spec in inlineOptionSpecs) {
+            val matches = spec.regex.findAll(text).toList()
+            if (matches.size < spec.minCount) continue
+            var i = 0
+            while (i < matches.size) {
+                if (matches[i].groupValues[1].lowercase()[0] != 'a') {
+                    i++
+                    continue
+                }
+                val seq = mutableListOf(matches[i])
+                var expected = matches[i].groupValues[1][0] + 1
+                var j = i + 1
+                while (j < matches.size) {
+                    val ch = matches[j].groupValues[1][0]
+                    if (ch == expected) {
+                        seq += matches[j]
+                        expected += 1
+                    } else if (ch.lowercaseChar() == 'a') {
+                        break
+                    }
+                    j++
+                }
+                if (seq.size >= spec.minCount) {
+                    val hasSubQuestionPrompt = spec.isLower && seq.indices.any { idx ->
+                        val start = seq[idx].range.last + 1
+                        val end = if (idx + 1 < seq.size) seq[idx + 1].range.first else text.length
+                        isSubQuestionBody(text.substring(start, end).trim())
+                    }
+                    if (!hasSubQuestionPrompt) {
+                        val cut = seq.first().range.first
+                        if (earliestCut == null || cut < earliestCut) earliestCut = cut
+                        break
+                    }
+                }
+                i = j
+            }
+        }
+        return if (earliestCut != null) text.substring(0, earliestCut).trim() else text
     }
 
     private fun extractTextbookTerms(textbook: String): List<String> {

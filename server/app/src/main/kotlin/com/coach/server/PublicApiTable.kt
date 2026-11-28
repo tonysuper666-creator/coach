@@ -70,6 +70,7 @@ internal object PublicApiTable {
         // Reading and companion.
         open(post, "/v1/library/explain", "friend imports and friend Bridge route; audit in the friend directory"),
         open(post, "/v1/library/explain/cancel", "cancels only this device's request"),
+        open(delete, "/v1/library/personal-imports/{bookId}", "resets only the authenticated device's personal import snapshots for this book in its own or friend store"),
         open(post, "/v1/library/companion/chapter", "friend Bridge route via FriendScopedBatchTransport; no owner ledger row"),
         open(post, "/v1/library/collection/ask", "friend quota check, friend Bridge route, friend audit"),
         // 2.2+ study features.

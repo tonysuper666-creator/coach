@@ -339,6 +339,24 @@ class LibraryExplainTest {
         }
     }
 
+    @Test fun resetPersonalImportsClearsStaleBookSnapshotsAfterReimportWhilePreservingSameSessionGuard() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            h.reply()
+            val oldBlock = personal(h.version, text = "旧版切页原文")
+            h.imports!!.register("phone", oldBlock, libraryExplainRequest(oldBlock))
+            val newBlock = personal(h.version, text = "新版切页原文")
+            assertEquals(409, h.post(newBlock).first)
+            assertEquals(400, h.deletePersonalImports("bad-id").first)
+            val (delStatus, delBody) = h.deletePersonalImports(h.version)
+            assertEquals(200, delStatus)
+            assertEquals(true, delBody["ok"]?.jsonPrimitive?.booleanOrNull)
+            assertTrue((delBody["cleared"]?.jsonPrimitive?.intOrNull ?: 0) >= 1)
+            assertEquals(200, h.post(newBlock).first)
+            assertEquals(409, h.post(personal(h.version, text = "篡改的新版原文")).first)
+        }
+    }
+
     @Test fun personalReceiptCannotReclassifyKnownCatalogBookOrRestoreRevokedCoursePermissions() = runBlocking {
         Harness(local = true, personal = true).use { h ->
             for (entry in listOf(h.entry(source = null), h.entry(title = "Synthetic answers"), h.entry(source = "unknown"))) {
@@ -547,6 +565,13 @@ class LibraryExplainTest {
             val response = client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:$port/v1/library/explain"))
                 .header("X-Coach-Device", "phone").header("Authorization", "Bearer synthetic-private-token-32-characters")
                 .POST(HttpRequest.BodyPublishers.ofString(input.toString())).build(), HttpResponse.BodyHandlers.ofString())
+            response.statusCode() to LedgerJson.parseToJsonElement(response.body()).jsonObject
+        }
+        suspend fun deletePersonalImports(bookId: String): Pair<Int, JsonObject> = withContext(Dispatchers.IO) {
+            val port = engine.engine.resolvedConnectors().single().port
+            val response = client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:$port/v1/library/personal-imports/$bookId"))
+                .header("X-Coach-Device", "phone").header("Authorization", "Bearer synthetic-private-token-32-characters")
+                .DELETE().build(), HttpResponse.BodyHandlers.ofString())
             response.statusCode() to LedgerJson.parseToJsonElement(response.body()).jsonObject
         }
         fun reply(delayMs: Long = 1) = stub.stream(delayMs,

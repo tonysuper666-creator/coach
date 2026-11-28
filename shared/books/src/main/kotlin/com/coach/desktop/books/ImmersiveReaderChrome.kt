@@ -1260,7 +1260,9 @@ internal fun CompanionAskPane(
             )
         } else if (quoteSource != null) {
             val sources = remember(thread, quoteSource) { ExplainWire.selectionBlocks(quoteSource, thread?.context) }
-            val chapter = remember(book, quoteSource.page) { BookChapterResolver.chapterForPage(book, quoteSource.page) }
+            val chapter = remember(book, quoteSource.page, quoteSource.start) {
+                BookChapterResolver.chapterForPage(book, quoteSource.page, quoteSource.start)
+            }
             Text(explanationScope(sources.minOf { it.page }, sources.maxOf { it.page }, chapter?.title ?: book.title),
                 style = MaterialTheme.typography.labelMedium, modifier = Modifier.testTag("inline-explain-scope"))
             Row(

@@ -258,6 +258,31 @@ fun Application.libraryExplainRoutes(
             reader?.cancel(call.attributes[observedDevice], "library", input?.str("requestId").orEmpty())
             call.respondText("{}", ContentType.Application.Json)
         }
+        delete("/v1/library/personal-imports/{bookId}") { call.withReaderConnection {
+            val friend = call.attributes.getOrNull(observedFriend)
+            val device = call.attributes[observedDevice]
+            val bookId = call.parameters["bookId"].orEmpty()
+            if (!Regex("[0-9a-f]{64}").matches(bookId)) {
+                return@withReaderConnection call.respondText(
+                    json("error" to "书籍编号格式不对。").toString(),
+                    ContentType.Application.Json,
+                    HttpStatusCode.BadRequest,
+                )
+            }
+            try {
+                val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
+                val resolvedImports = importStore
+                    ?: return@withReaderConnection call.respondText(
+                        json("error" to "服务还未接通个人导入清理，请更新服务后重试。").toString(),
+                        ContentType.Application.Json,
+                        HttpStatusCode.ServiceUnavailable,
+                    )
+                val cleared = withContext(Dispatchers.IO) { resolvedImports.resetBook(device, bookId) }
+                call.respondText(json("ok" to true, "cleared" to cleared).toString(), ContentType.Application.Json)
+            } catch (e: FriendServiceError) {
+                call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
+            }
+        } }
         post("/v1/library/companion/chapter") { call.withReaderConnection {
             val friend = call.attributes.getOrNull(observedFriend)
             val device = call.attributes[observedDevice]

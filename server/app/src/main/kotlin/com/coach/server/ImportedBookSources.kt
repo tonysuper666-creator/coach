@@ -166,6 +166,16 @@ class ImportedBookSources internal constructor(directory: Path) {
         return receipt
     }
 
+    @Synchronized internal fun resetBook(device: String, book: String): Int {
+        if (!book.matches(Regex("[0-9a-f]{64}"))) return 0
+        return database().use { db ->
+            db.prepareStatement("DELETE FROM blocks WHERE device=? AND book=?").use { sql ->
+                sql.setString(1, device); sql.setString(2, book)
+                sql.executeUpdate()
+            }
+        }
+    }
+
     private fun read(db: Connection, device: String, book: String): List<Block> =
         db.prepareStatement("SELECT page,start,text,snapshot FROM blocks WHERE device=? AND book=?").use { sql ->
             sql.setString(1, device); sql.setString(2, book)

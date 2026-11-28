@@ -1008,6 +1008,7 @@ internal class TextbookLibrary(
 
     fun importBook(source: Path, control: BookImportControl = BookImportControl(), password: String? = null): Textbook {
         val staged = stageBookImport(source, control, password)
+        clearPersonalImportSync(staged.book.id)
         if (!staged.book.hasPendingOcr) return staged.book
         return try {
             resumeBookOcr(staged.book.id, control)
@@ -2305,6 +2306,68 @@ internal class TextbookLibrary(
         }
     }
 
+    private fun ensurePersonalImportSyncTable(db: Connection) {
+        db.createStatement().use { statement ->
+            statement.execute(
+                """CREATE TABLE IF NOT EXISTS personal_import_sync(
+                    server_key TEXT NOT NULL,
+                    book TEXT NOT NULL,
+                    pages_digest TEXT NOT NULL,
+                    PRIMARY KEY(server_key, book))""",
+            )
+        }
+    }
+
+    @Synchronized fun localPagesDigest(bookId: String): String? = database().use { db ->
+        val digest = MessageDigest.getInstance("SHA-256")
+        var count = 0
+        db.prepareStatement("SELECT page, text FROM pages WHERE book=? ORDER BY page").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows ->
+                while (rows.next()) {
+                    count++
+                    val pageNum = rows.getInt(1)
+                    val text = rows.getString(2) ?: ""
+                    digest.update("$pageNum:${text.length}:".toByteArray(Charsets.UTF_8))
+                    digest.update(text.toByteArray(Charsets.UTF_8))
+                    digest.update('\n'.code.toByte())
+                }
+            }
+        }
+        if (count == 0) null else digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    @Synchronized fun syncedPersonalImportDigest(serverKey: String, bookId: String): String? = database().use { db ->
+        ensurePersonalImportSyncTable(db)
+        db.prepareStatement("SELECT pages_digest FROM personal_import_sync WHERE server_key=? AND book=?").use { sql ->
+            sql.setString(1, serverKey); sql.setString(2, bookId)
+            sql.executeQuery().use { row -> if (row.next()) row.getString(1) else null }
+        }
+    }
+
+    @Synchronized fun markPersonalImportSynced(serverKey: String, bookId: String, pagesDigest: String) {
+        database().use { db ->
+            ensurePersonalImportSyncTable(db)
+            db.prepareStatement(
+                "INSERT INTO personal_import_sync(server_key,book,pages_digest) VALUES(?,?,?) " +
+                    "ON CONFLICT(server_key,book) DO UPDATE SET pages_digest=excluded.pages_digest",
+            ).use { sql ->
+                sql.setString(1, serverKey); sql.setString(2, bookId); sql.setString(3, pagesDigest)
+                sql.executeUpdate()
+            }
+        }
+    }
+
+    @Synchronized fun clearPersonalImportSync(bookId: String) {
+        database().use { db ->
+            if (!BookSchemaMigration.tableExists(db, "personal_import_sync")) return@use
+            db.prepareStatement("DELETE FROM personal_import_sync WHERE book=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.executeUpdate()
+            }
+        }
+    }
+
     @Synchronized fun deleteBook(bookId: String, initiatingAccountKey: String? = null) {
         firstRenderGates.remove(bookId)
         aspectCache.remove(bookId)
@@ -2335,7 +2398,7 @@ internal class TextbookLibrary(
                     "book_learning_paths", "book_ladders", "book_reader_views", "book_pdf_modes",
                     "book_highlights", "book_notes", "book_ask_drafts", "book_ask_turns", "answers", "book_reviews", "book_structures", "book_section_cache", "book_body_start",
                     "book_open_session", "book_toc_nodes", "book_study_chunks", "book_bookmarks",
-                    "book_page_aspects", "book_visual_pages", "book_page_problems",
+                    "book_page_aspects", "book_visual_pages", "book_page_problems", "personal_import_sync",
                 )) {
                     val exists = db.createStatement().use { s -> s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='$table'").use { it.next() } }
                     if (exists) db.prepareStatement("DELETE FROM $table WHERE book=?").use { it.setString(1, bookId); it.executeUpdate() }

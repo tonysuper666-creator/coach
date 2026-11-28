@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,6 +18,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,22 +38,27 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.coach.protocol.BookStance
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.CoachLoadingDots
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -67,10 +76,61 @@ internal fun MyLibraryScreen(
     onBack: () -> Unit,
     onOpenBook: (String) -> Unit,
     clock: Clock = Clock.systemUTC(),
+    collections: List<CollectionSummary> = emptyList(),
+    onAskCollection: (suspend (JsonObject) -> CourseServerCallResult)? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
+    val fallbackExplainer = remember(library, onAskCollection) {
+        if (onAskCollection == null) BookExplainer(library = library) else null
+    }
+    var qaDraft by remember { mutableStateOf("") }
+    var qaCollectionId by remember { mutableStateOf(CollectionQaVirtualCollections.READ_LIBRARY_ID) }
+    var qaLoading by remember { mutableStateOf(false) }
+    var qaError by remember { mutableStateOf<String?>(null) }
+    var qaTurns by remember { mutableStateOf<List<CollectionQaTurn>>(emptyList()) }
+    var qaPanelOpen by remember { mutableStateOf(false) }
+    val qaResultScroll = rememberScrollState()
+
+    fun submitLibraryAsk(questionText: String = qaDraft, overrideStance: BookStance? = null) {
+        val clean = questionText.trim()
+        if (clean.isEmpty() || qaLoading) return
+        qaLoading = true
+        qaError = null
+        qaPanelOpen = true
+        scope.launch {
+            val res = CollectionQaEngine.ask(
+                library = library,
+                collectionId = qaCollectionId,
+                question = clean,
+                overrideStance = overrideStance,
+                remoteAsk = { payload ->
+                    if (onAskCollection != null) {
+                        onAskCollection(payload)
+                    } else {
+                        val exp = checkNotNull(fallbackExplainer)
+                        if (!exp.loaded) exp.load()
+                        exp.askCollection(payload)
+                    }
+                },
+            )
+            qaLoading = false
+            res.fold(
+                onSuccess = { turn ->
+                    qaTurns = qaTurns + turn
+                    if (overrideStance == null && qaDraft.trim() == clean) {
+                        qaDraft = ""
+                    }
+                },
+                onFailure = { err ->
+                    qaError = err.message ?: "跨书提问暂时不可用，请重试。"
+                },
+            )
+        }
+    }
+
     var text by remember { mutableStateOf("") }
     var bookTitle by remember { mutableStateOf("") }
     var kind by remember { mutableStateOf<LibraryKind?>(null) }
@@ -221,6 +281,147 @@ internal fun MyLibraryScreen(
         }
         if (status != null) {
             Text(status.orEmpty(), style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.padding(top = 6.dp).testTag("library-status"))
+        }
+        // 库里跨书提问框：默认直接对全部书提问，不出弹窗、不拦路、不抢焦点；回答出在下方结果区。
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .widthIn(max = 880.dp)
+                .padding(top = 10.dp)
+                .testTag("library-qa-box"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val askTargets = remember(collections) {
+                collections.filter { !it.record.archived && (it.record.kind == CollectionKind.BOOKLIST || it.record.kind == CollectionKind.COURSE) }
+            }
+            if (askTargets.isNotEmpty()) {
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterChip("全部书", qaCollectionId == CollectionQaVirtualCollections.READ_LIBRARY_ID, "library-qa-scope-all") {
+                        qaCollectionId = CollectionQaVirtualCollections.READ_LIBRARY_ID
+                    }
+                    for (col in askTargets) {
+                        FilterChip(col.record.title, qaCollectionId == col.record.id, "library-qa-scope-${col.record.id}") {
+                            qaCollectionId = col.record.id
+                        }
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                LibraryField(
+                    value = qaDraft,
+                    onValueChange = { qaDraft = it },
+                    placeholder = "向我的库跨书提问（按各书立场作答，每句可点回原文）…",
+                    tag = "library-qa-input",
+                    modifier = Modifier
+                        .weight(1f)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed &&
+                                qaDraft.isNotBlank() && !qaLoading
+                            ) {
+                                submitLibraryAsk()
+                                true
+                            } else false
+                        },
+                )
+                PaperButton(
+                    onClick = { submitLibraryAsk() },
+                    enabled = qaDraft.isNotBlank() && !qaLoading,
+                    modifier = Modifier.testTag("library-qa-send"),
+                ) { Text("提问") }
+                if (!qaPanelOpen && qaTurns.isNotEmpty()) {
+                    V7TextButton(
+                        onClick = { qaPanelOpen = true },
+                        modifier = Modifier.testTag("library-qa-history-toggle"),
+                        ringInside = true,
+                    ) { Text("历史回答 (${qaTurns.size})") }
+                }
+            }
+            if (qaPanelOpen && (qaLoading || qaError != null || qaTurns.isNotEmpty())) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colors.surface1)
+                        .border(1.dp, colors.borderSubtle, RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                        .testTag("library-qa-results"),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            if (qaLoading) "正在跨书核对原页…" else "跨书回答（${qaTurns.size}）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.fgSecondary,
+                        )
+                        Text(
+                            "关闭",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.fgSecondary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(role = Role.Button) { qaPanelOpen = false }
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .testTag("library-qa-close"),
+                        )
+                    }
+                    qaError?.let { errMsg ->
+                        Text(
+                            errMsg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = v7Alert(),
+                            modifier = Modifier.testTag("library-qa-error"),
+                        )
+                    }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp)
+                            .verticalScroll(qaResultScroll),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        qaTurns.forEachIndexed { idx, turn ->
+                            CollectionQaTurnView(
+                                turn = turn,
+                                turnIndex = idx,
+                                tagPrefix = "library-qa",
+                                onOpenCitation = { cit ->
+                                    if (onJumpCollectionCitation != null) {
+                                        onJumpCollectionCitation(cit)
+                                    } else {
+                                        if (cit.endUtf16 > cit.startUtf16 && cit.quoteAnchor.isNotBlank()) {
+                                            library.stageQuoteJump(
+                                                BookPassage(cit.bookId, cit.page, cit.startUtf16, cit.endUtf16, cit.quoteAnchor),
+                                            )
+                                        }
+                                        onOpenBook(cit.bookId)
+                                    }
+                                },
+                                onSwitchStance = { nextStance ->
+                                    submitLibraryAsk(questionText = turn.question, overrideStance = nextStance)
+                                },
+                                switchEnabled = !qaLoading,
+                                onClose = { qaPanelOpen = false },
+                            )
+                            if (idx < qaTurns.lastIndex) {
+                                HorizontalDivider(color = colors.borderSubtle.copy(alpha = 0.6f))
+                            }
+                        }
+                    }
+                }
+            }
         }
         LibraryField(
             value = text,

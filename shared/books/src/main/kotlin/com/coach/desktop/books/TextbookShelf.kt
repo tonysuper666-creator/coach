@@ -184,6 +184,8 @@ internal fun LibraryHome(
     onRetryUpload: (String) -> Unit = {},
     library: TextbookLibrary? = null,
     firstOpenGuide: Boolean = false,
+    onAskCollection: (suspend (kotlinx.serialization.json.JsonObject) -> CourseServerCallResult)? = null,
+    onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val scroll = rememberScrollState()
@@ -240,6 +242,9 @@ internal fun LibraryHome(
                         libraryOpen = false
                         onOpenBook(id)
                     },
+                    collections = activeCollections,
+                    onAskCollection = onAskCollection,
+                    onJumpCollectionCitation = onJumpCollectionCitation,
                 )
             } else if (isEmpty && firstOpenGuide) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

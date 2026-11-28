@@ -62,6 +62,8 @@ internal data class StanceCitation(
     val startUtf16: Int,
     val endUtf16: Int,
     val quote: String,
+    val bookId: String = "",
+    val bookTitle: String = "",
 )
 
 internal data class StanceBookSentence(
@@ -76,6 +78,9 @@ internal sealed interface StanceLayer {
     data class Book(
         override val label: String,
         val sentences: List<StanceBookSentence>,
+        val bookId: String = "",
+        val bookTitle: String = "",
+        val systemNotice: String? = null,
     ) : StanceLayer {
         override val kind: AnswerLayerKind = AnswerLayerKind.BOOK
     }
@@ -83,6 +88,8 @@ internal sealed interface StanceLayer {
     data class Outside(
         override val label: String,
         val text: String,
+        val bookId: String = "",
+        val bookTitle: String = "",
     ) : StanceLayer {
         override val kind: AnswerLayerKind = AnswerLayerKind.OUTSIDE
     }
@@ -90,6 +97,8 @@ internal sealed interface StanceLayer {
     data class Guess(
         override val label: String,
         val text: String,
+        val bookId: String = "",
+        val bookTitle: String = "",
     ) : StanceLayer {
         override val kind: AnswerLayerKind = AnswerLayerKind.GUESS
     }
@@ -105,7 +114,12 @@ internal data class StanceAnswer(
     val modelCalled: Boolean = true,
     val droppedSentences: Int = 0,
     val outOfRange: Int = 0,
-)
+    val missingRecordNotices: List<String> = emptyList(),
+    val isMixedStance: Boolean = false,
+) {
+    val highRisk: Boolean
+        get() = boundary == BookStanceCopy.HIGH_RISK_BOUNDARY
+}
 
 /**
  * 立场回答与旧版出处的持久化编解码器（向下兼容 `book_ask_turns.citations_json`）：
@@ -159,40 +173,62 @@ internal object StanceAnswerCodec {
     }
 
     fun encodeStanceAnswer(answer: StanceAnswer): JsonObject = buildJsonObject {
-        put("stance", answer.stance.wire)
+        put("stance", if (answer.isMixedStance) "mixed" else answer.stance.wire)
         put("layers", buildJsonArray {
             for (layer in answer.layers) {
                 add(buildJsonObject {
                     put("layer", layer.kind.wire)
                     put("label", layer.label)
                     when (layer) {
-                        is StanceLayer.Book -> put("sentences", buildJsonArray {
-                            for (s in layer.sentences) {
-                                add(buildJsonObject {
-                                    put("text", s.text)
-                                    put("citations", buildJsonArray {
-                                        for (c in s.citations) {
-                                            add(buildJsonObject {
-                                                put("docId", c.docId)
-                                                put("pdfPage", c.page)
-                                                put("startUtf16", c.startUtf16)
-                                                put("endUtf16", c.endUtf16)
-                                                put("quote", c.quote)
-                                            })
-                                        }
+                        is StanceLayer.Book -> {
+                            if (layer.bookId.isNotBlank()) put("bookId", layer.bookId)
+                            if (layer.bookTitle.isNotBlank()) put("bookTitle", layer.bookTitle)
+                            layer.systemNotice?.takeIf { it.isNotBlank() }?.let { put("systemNotice", it) }
+                            put("sentences", buildJsonArray {
+                                for (s in layer.sentences) {
+                                    add(buildJsonObject {
+                                        put("text", s.text)
+                                        put("citations", buildJsonArray {
+                                            for (c in s.citations) {
+                                                add(buildJsonObject {
+                                                    put("docId", c.docId)
+                                                    put("pdfPage", c.page)
+                                                    put("startUtf16", c.startUtf16)
+                                                    put("endUtf16", c.endUtf16)
+                                                    put("quote", c.quote)
+                                                    if (c.bookId.isNotBlank()) put("bookId", c.bookId)
+                                                    if (c.bookTitle.isNotBlank()) put("bookTitle", c.bookTitle)
+                                                })
+                                            }
+                                        })
                                     })
-                                })
-                            }
-                        })
-                        is StanceLayer.Outside -> put("text", layer.text)
-                        is StanceLayer.Guess -> put("text", layer.text)
+                                }
+                            })
+                        }
+                        is StanceLayer.Outside -> {
+                            if (layer.bookId.isNotBlank()) put("bookId", layer.bookId)
+                            if (layer.bookTitle.isNotBlank()) put("bookTitle", layer.bookTitle)
+                            put("text", layer.text)
+                        }
+                        is StanceLayer.Guess -> {
+                            if (layer.bookId.isNotBlank()) put("bookId", layer.bookId)
+                            if (layer.bookTitle.isNotBlank()) put("bookTitle", layer.bookTitle)
+                            put("text", layer.text)
+                        }
                     }
                 })
             }
         })
-        answer.highRiskNotice?.let { put("highRiskNotice", it) }
+        (answer.highRiskNotice ?: if (answer.highRisk) BookStanceCopy.HIGH_RISK_NOTICE else null)?.let {
+            put("highRiskNotice", it)
+        }
         answer.systemNotice?.let { put("systemNotice", it) }
         answer.noBookNotice?.let { put("noBookNotice", it) }
+        if (answer.missingRecordNotices.isNotEmpty()) {
+            put("missingRecordNotices", buildJsonArray {
+                answer.missingRecordNotices.forEach { add(JsonPrimitive(it)) }
+            })
+        }
         answer.boundary?.let { put("boundary", it) }
         put("modelCalled", answer.modelCalled)
         put("droppedSentences", answer.droppedSentences)
@@ -200,20 +236,25 @@ internal object StanceAnswerCodec {
     }
 
     fun decodeStanceAnswer(obj: JsonObject): StanceAnswer? {
-        val stance = BookStance.fromWire((obj["stance"] as? JsonPrimitive)?.contentOrNull) ?: return null
+        val rawStance = (obj["stance"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase() ?: return null
+        val isMixed = rawStance == "mixed"
+        val stance = if (isMixed) BookStance.KNOWLEDGE else (BookStance.fromWire(rawStance) ?: return null)
         val modelCalled = (obj["modelCalled"] as? JsonPrimitive)?.booleanOrNull ?: true
         val dropped = (obj["droppedSentences"] as? JsonPrimitive)?.intOrNull ?: 0
         val outOfRange = (obj["outOfRange"] as? JsonPrimitive)?.intOrNull ?: 0
         val systemNotice = (obj["systemNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
         val noBookNotice = (obj["noBookNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val missingRecordNotices = (obj["missingRecordNotices"] as? JsonArray).orEmpty().mapNotNull { el ->
+            (el as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+        }
         val boundary = when (val rawBoundary = obj["boundary"]) {
-            is JsonPrimitive -> rawBoundary.takeIf { it.isString }?.contentOrNull?.trim()
+            is JsonPrimitive -> rawBoundary.takeIf { it.isString }?.contentOrNull?.trim()?.lowercase()
                 ?.takeIf { it == BookStanceCopy.HIGH_RISK_BOUNDARY }
             // 向下兼容旧缓存中的对象形态，不渲染任何拦截卡，仅转为高危提示行形态
             is JsonObject -> BookStanceCopy.HIGH_RISK_BOUNDARY
             else -> null
         }
-        val highRiskNotice = (obj["highRiskNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val highRiskNotice = (obj["highRiskNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
             ?: if (boundary == BookStanceCopy.HIGH_RISK_BOUNDARY) BookStanceCopy.HIGH_RISK_NOTICE else null
         val isHighRisk = boundary == BookStanceCopy.HIGH_RISK_BOUNDARY
         val layers = mutableListOf<StanceLayer>()
@@ -222,16 +263,19 @@ internal object StanceAnswerCodec {
             val kind = AnswerLayerKind.fromWire((lObj["layer"] as? JsonPrimitive)?.contentOrNull) ?: continue
             if (isHighRisk && kind != AnswerLayerKind.BOOK) continue
             val label = (lObj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            val layerBookId = (lObj["bookId"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+            val layerBookTitle = (lObj["bookTitle"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
             when (kind) {
                 AnswerLayerKind.OUTSIDE -> {
                     val text = (lObj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
-                    layers += StanceLayer.Outside(label, text)
+                    layers += StanceLayer.Outside(label, text, layerBookId, layerBookTitle)
                 }
                 AnswerLayerKind.GUESS -> {
                     val text = (lObj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
-                    layers += StanceLayer.Guess(label, text)
+                    layers += StanceLayer.Guess(label, text, layerBookId, layerBookTitle)
                 }
                 AnswerLayerKind.BOOK -> {
+                    val layerSystemNotice = (lObj["systemNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
                     val rawSents = lObj["sentences"] as? JsonArray ?: continue
                     if (rawSents.isEmpty()) continue
                     var valid = true
@@ -252,13 +296,15 @@ internal object StanceAnswerCodec {
                             val startUtf16 = (cObj?.get("startUtf16") as? JsonPrimitive)?.intOrNull
                             val endUtf16 = (cObj?.get("endUtf16") as? JsonPrimitive)?.intOrNull
                             val quote = (cObj?.get("quote") as? JsonPrimitive)?.contentOrNull
+                            val cBookId = (cObj?.get("bookId") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+                            val cBookTitle = (cObj?.get("bookTitle") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
                             if (docId.isNullOrBlank() || page == null || startUtf16 == null || endUtf16 == null ||
                                 startUtf16 < 0 || endUtf16 <= startUtf16 || quote.isNullOrBlank()
                             ) {
                                 valid = false
                                 break
                             }
-                            cites += StanceCitation(docId, page, startUtf16, endUtf16, quote)
+                            cites += StanceCitation(docId, page, startUtf16, endUtf16, quote, cBookId, cBookTitle)
                         }
                         if (!valid || cites.isEmpty()) {
                             valid = false
@@ -267,7 +313,7 @@ internal object StanceAnswerCodec {
                         sents += StanceBookSentence(sText, cites)
                     }
                     if (valid && sents.isNotEmpty()) {
-                        layers += StanceLayer.Book(label, sents)
+                        layers += StanceLayer.Book(label, sents, layerBookId, layerBookTitle, layerSystemNotice)
                     }
                 }
             }
@@ -282,6 +328,8 @@ internal object StanceAnswerCodec {
             modelCalled = modelCalled,
             droppedSentences = dropped,
             outOfRange = outOfRange,
+            missingRecordNotices = missingRecordNotices,
+            isMixedStance = isMixed,
         )
     }
 }
@@ -319,8 +367,8 @@ internal fun stanceCitationPassage(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun LayeredAnswerCard(
-    book: Textbook,
-    allBlocks: List<SourceBlock>,
+    book: Textbook? = null,
+    allBlocks: List<SourceBlock> = emptyList(),
     answer: StanceAnswer,
     bookDefaultStance: BookStance? = null,
     bookSecondaryStance: BookStance? = null,
@@ -329,6 +377,8 @@ internal fun LayeredAnswerCard(
     onOpenCitation: (StanceCitation) -> Unit,
     onSwitchStance: ((BookStance) -> Unit)? = null,
     switchEnabled: Boolean = true,
+    citationLabelProvider: ((StanceCitation) -> String)? = null,
+    onClose: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -336,7 +386,11 @@ internal fun LayeredAnswerCard(
     val pillShape = RoundedCornerShape(CoachV7.Radius.s)
     val pineWash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
     val mutedBg = colors.surface2
-    val headerText = answer.stance.labelForBook(bookDefaultStance, bookGuards)
+    val headerText = if (answer.isMixedStance) {
+        BookStanceCopy.MIXED_STANCE_LABEL
+    } else {
+        answer.stance.labelForBook(bookDefaultStance, bookGuards)
+    }
     val highRiskLine = answer.highRiskNotice?.takeIf { it.isNotBlank() }
         ?: if (answer.boundary == BookStanceCopy.HIGH_RISK_BOUNDARY) BookStanceCopy.HIGH_RISK_NOTICE else null
 
@@ -348,7 +402,7 @@ internal fun LayeredAnswerCard(
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
                 headerText,
@@ -360,6 +414,19 @@ internal fun LayeredAnswerCard(
                     .padding(horizontal = 8.dp, vertical = 3.dp)
                     .testTag("stance-answer-header"),
             )
+            if (onClose != null) {
+                Text(
+                    "×",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.fgSecondary,
+                    modifier = Modifier
+                        .clip(pillShape)
+                        .clickable(role = Role.Button) { onClose() }
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("stance-answer-close"),
+                )
+            }
         }
 
         if (highRiskLine != null) {
@@ -388,6 +455,14 @@ internal fun LayeredAnswerCard(
                     .testTag("stance-system-notice"),
             )
         }
+        answer.missingRecordNotices.forEachIndexed { idx, notice ->
+            Text(
+                notice,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary,
+                modifier = Modifier.fillMaxWidth().testTag("stance-missing-record-notice-$idx"),
+            )
+        }
         if (!answer.noBookNotice.isNullOrBlank()) {
             Text(
                 answer.noBookNotice,
@@ -400,6 +475,11 @@ internal fun LayeredAnswerCard(
         answer.layers.forEachIndexed { layerIndex, layer ->
             when (layer) {
                 is StanceLayer.Book -> {
+                    val layerHeading = if (layer.bookTitle.isNotBlank()) {
+                        "《${layer.bookTitle}》 · ${layer.label}"
+                    } else {
+                        layer.label
+                    }
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -407,11 +487,24 @@ internal fun LayeredAnswerCard(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
-                            layer.label,
+                            layerHeading,
                             style = MaterialTheme.typography.labelSmall,
                             color = pine,
                             modifier = Modifier.testTag("stance-layer-book-label-$layerIndex"),
                         )
+                        if (!layer.systemNotice.isNullOrBlank() && layer.systemNotice != answer.systemNotice) {
+                            Text(
+                                layer.systemNotice,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fgSecondary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(pillShape)
+                                    .background(mutedBg)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .testTag("stance-layer-system-notice-$layerIndex"),
+                            )
+                        }
                         layer.sentences.forEachIndexed { sentIndex, sentence ->
                             val primary = sentence.citations.first()
                             Column(
@@ -434,17 +527,26 @@ internal fun LayeredAnswerCard(
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
                                     sentence.citations.forEachIndexed { citeIndex, cite ->
-                                        val loc = bookCitationLabel(
-                                            book,
-                                            allBlocks,
-                                            Citation("S${citeIndex + 1}", cite.docId, cite.page, cite.quote),
-                                        )
-                                        val readerPage = if (showReaderPage && !loc.contains("第 ${cite.page} 页")) {
-                                            "第 ${cite.page} 页 · "
-                                        } else ""
-                                        val snippet = shortQuote(cite.quote)
+                                        val labelText = when {
+                                            citationLabelProvider != null -> citationLabelProvider(cite)
+                                            book != null -> {
+                                                val loc = bookCitationLabel(
+                                                    book,
+                                                    allBlocks,
+                                                    Citation("S${citeIndex + 1}", cite.docId, cite.page, cite.quote),
+                                                )
+                                                val readerPage = if (showReaderPage && !loc.contains("第 ${cite.page} 页")) {
+                                                    "第 ${cite.page} 页 · "
+                                                } else ""
+                                                "出处 · $readerPage$loc · ${shortQuote(cite.quote)}"
+                                            }
+                                            else -> {
+                                                val bookPrefix = cite.bookTitle.takeIf { it.isNotBlank() }?.let { "$it · " } ?: ""
+                                                "出处 · ${bookPrefix}第 ${cite.page} 页 · ${shortQuote(cite.quote)}"
+                                            }
+                                        }
                                         Text(
-                                            "出处 · $readerPage$loc · $snippet",
+                                            labelText,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = pine,
                                             maxLines = 1,
@@ -463,6 +565,11 @@ internal fun LayeredAnswerCard(
                     }
                 }
                 is StanceLayer.Outside -> {
+                    val outHeading = if (layer.bookTitle.isNotBlank()) {
+                        "${layer.label} · 《${layer.bookTitle}》"
+                    } else {
+                        layer.label
+                    }
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -474,7 +581,7 @@ internal fun LayeredAnswerCard(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            layer.label,
+                            outHeading,
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.fgSecondary,
                             modifier = Modifier.testTag("stance-layer-outside-label-$layerIndex"),
@@ -487,6 +594,11 @@ internal fun LayeredAnswerCard(
                     }
                 }
                 is StanceLayer.Guess -> {
+                    val guessHeading = if (layer.bookTitle.isNotBlank()) {
+                        "${layer.label} · 《${layer.bookTitle}》"
+                    } else {
+                        layer.label
+                    }
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -498,7 +610,7 @@ internal fun LayeredAnswerCard(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            layer.label,
+                            guessHeading,
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.fgSecondary,
                             modifier = Modifier.testTag("stance-layer-guess-label-$layerIndex"),
@@ -516,11 +628,11 @@ internal fun LayeredAnswerCard(
         if (onSwitchStance != null) {
             HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle.copy(alpha = 0.6f))
             val alternatives = buildList {
-                if (bookSecondaryStance != null && bookSecondaryStance != answer.stance) {
+                if (!answer.isMixedStance && bookSecondaryStance != null && bookSecondaryStance != answer.stance) {
                     add(bookSecondaryStance)
                 }
                 for (st in BookStance.entries) {
-                    if (st != answer.stance && st !in this) add(st)
+                    if ((answer.isMixedStance || st != answer.stance) && st !in this) add(st)
                 }
             }
             FlowRow(

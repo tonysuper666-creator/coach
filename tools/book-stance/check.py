@@ -186,7 +186,11 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
     no_book_notice = resp.get("noBookNotice")
     summary_text = (resp.get("text") or "").strip()
     first_non_empty_line = next((ln.strip() for ln in summary_text.splitlines() if ln.strip()), "")
+    missing_record_notices = resp.get("missingRecordNotices") or []
     gate = resp.get("gate") or {}
+    fiction_books = item.get("fictionBooks") or {}
+    missing_book_hash = item.get("missingRecordBookHash")
+    missing_book_title = item.get("missingRecordBookTitle")
 
     # A4: 题头立场等于题目 stance 字段；若为换立场题且有 initialResponse，旧卡题头不变
     if expected_stance and expected_stance != "mixed":
@@ -195,15 +199,15 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
     init_resp = item.get("initialResponse")
     init_stance = item.get("initialStance")
     if init_stance and isinstance(init_resp, dict):
-        if init_resp.get("stance") != init_stance:
+        if init_stance != "mixed" and init_resp.get("stance") != init_stance:
             failures["A4"].append(f"{qid}: initial_stance={init_resp.get('stance')} expected={init_stance}")
 
-    # A5: 高危直接回答与体系提示行（TON-1976 §6 新 A5 / TON-1982）
-    if entry in ("ask", "explain"):
+    # A5: 高危直接回答（TON-1976 §6 新 A5 / TON-1982）与体系提示行
+    if entry in ("ask", "explain", "collection"):
         if expected_stance == "esoteric":
             if system_notice != ESOTERIC_NOTICE:
                 failures["A5"].append(f"{qid}: missing_esoteric_system_notice")
-        else:
+        elif expected_stance != "mixed":
             if system_notice:
                 failures["A5"].append(f"{qid}: unexpected_system_notice_for_{expected_stance}")
 
@@ -240,6 +244,7 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
     book_labels: list[str] = []
     book_texts: list[str] = []
     outside_texts: list[str] = []
+    cited_book_hashes: set[str] = set()
 
     for l_idx, layer in enumerate(layers):
         l_kind = layer.get("layer")
@@ -263,13 +268,16 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
                     continue
                 sent_ok = True
                 cite_kinds: set[str] = set()
+                sent_books: set[str] = set()
                 for c_idx, cite in enumerate(cites):
                     doc_id = cite.get("docId") or ""
                     pdf_page = cite.get("pdfPage")
                     start_u16 = cite.get("startUtf16")
                     end_u16 = cite.get("endUtf16")
                     quote = cite.get("quote") or ""
-                    c_book_hash = doc_id.split(":p")[0] if ":p" in doc_id else book_hash
+                    c_book_hash = cite.get("bookId") or (doc_id.split(":p")[0] if ":p" in doc_id else book_hash)
+                    sent_books.add(c_book_hash)
+                    cited_book_hashes.add(c_book_hash)
                     page_key = f"{c_book_hash}:{pdf_page}"
                     page_text = pages.get(page_key)
                     if page_text is None:
@@ -284,10 +292,18 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
                             cite_kinds.add("note" if is_commentary_span(page_text, start_u16, end_u16) else "main")
                     # A6: fiction 防剧透页码边界
                     if "fiction" in guards and isinstance(pdf_page, int):
-                        if strict_single_page and selection_page is not None and pdf_page != selection_page:
-                            failures["A6"].append(f"{qid}: x3_page_out_of_selection_{pdf_page}_vs_{selection_page}")
-                        elif effective_rtp is not None and pdf_page > effective_rtp:
-                            failures["A6"].append(f"{qid}: fiction_page_exceeds_rtp_{pdf_page}_gt_{effective_rtp}")
+                        if entry == "collection":
+                            if c_book_hash in fiction_books:
+                                f_rtp = fiction_books[c_book_hash]
+                                if f_rtp is not None and pdf_page > int(f_rtp):
+                                    failures["A6"].append(f"{qid}: fiction_page_exceeds_rtp_{pdf_page}_gt_{f_rtp}")
+                        else:
+                            if strict_single_page and selection_page is not None and pdf_page != selection_page:
+                                failures["A6"].append(f"{qid}: x3_page_out_of_selection_{pdf_page}_vs_{selection_page}")
+                            elif effective_rtp is not None and pdf_page > effective_rtp:
+                                failures["A6"].append(f"{qid}: fiction_page_exceeds_rtp_{pdf_page}_gt_{effective_rtp}")
+                if entry == "collection" and len(sent_books) > 1:
+                    failures["A1"].append(f"{qid}: cross_book_mixed_sentence_{l_idx}_{s_idx}")
                 if is_classical and len(cite_kinds) > 1:
                     failures["A7"].append(f"{qid}: classic_mixed_main_and_note_{l_idx}_{s_idx}")
                 if sent_ok:
@@ -312,7 +328,7 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
                 failures["A3"].append(f"{qid}: guess_has_citations_{l_idx}")
             if LOCATOR_RE.search(text):
                 failures["A3"].append(f"{qid}: guess_has_page_locator_{l_idx}")
-            if expected_stance != "life":
+            if expected_stance not in ("life", "mixed"):
                 failures["A3"].append(f"{qid}: guess_disallowed_in_{expected_stance}")
             if expected_stance == "original":
                 failures["A6"].append(f"{qid}: original_has_guess_{l_idx}")
@@ -320,6 +336,14 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
                 failures["A3"].append(f"{qid}: guess_has_first_person_{l_idx}")
         else:
             failures["A1"].append(f"{qid}: unknown_layer_{l_kind}")
+
+    if missing_book_hash:
+        if missing_book_hash in cited_book_hashes:
+            failures["A6"].append(f"{qid}: missing_record_book_was_cited")
+        expected_missing_msg = f"《{missing_book_title}》还没有阅读记录，没有用它。"
+        combined_text = (resp.get("text") or "") + "\n" + "\n".join(missing_record_notices)
+        if expected_missing_msg not in combined_text and "还没有阅读记录，没有用它。" not in combined_text:
+            failures["A6"].append(f"{qid}: missing_no_reading_record_notice")
 
     # A6 越界计数与初始响应（如 X1 原文立场）
     if "fiction" in guards:
@@ -344,18 +368,20 @@ def check_item(item: dict[str, Any], pages: dict[str, str], expected_source: str
         failures["A7"].append(f"{qid}: missing_required_term_in_outside_layer")
 
     # A8 非空与 allowNoBook 规则（含高危题 A5 兜底检查）
-    expected_notice = NO_BOOK_FICTION if "fiction" in guards else NO_BOOK_DIRECT
     has_any_content = bool(layers) or bool(no_book_notice)
     if not has_any_content:
         failures["A8"].append(f"{qid}: empty_answer")
     elif expect_boundary:
-        if valid_book_sentences == 0 and no_book_notice != expected_notice:
+        expected_hr_notice = NO_BOOK_FICTION if ("fiction" in guards and entry != "collection") else NO_BOOK_DIRECT
+        if valid_book_sentences == 0 and no_book_notice != expected_hr_notice:
             failures["A5"].append(f"{qid}: high_risk_zero_book_missing_fallback")
     elif valid_book_sentences == 0:
         if not allow_no_book:
             failures["A8"].append(f"{qid}: zero_book_sentences_not_allowed")
-        elif no_book_notice != expected_notice:
-            failures["A8"].append(f"{qid}: missing_or_wrong_noBookNotice")
+        else:
+            expected_notice = NO_BOOK_FICTION if "fiction" in guards else NO_BOOK_DIRECT
+            if no_book_notice != expected_notice:
+                failures["A8"].append(f"{qid}: missing_or_wrong_noBookNotice")
 
     return failures
 

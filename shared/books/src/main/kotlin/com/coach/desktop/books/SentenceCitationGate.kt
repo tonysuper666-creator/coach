@@ -4,6 +4,8 @@ import com.coach.desktop.books.CollectionQaJson.arr
 import com.coach.desktop.books.CollectionQaJson.boolOrFalse
 import com.coach.desktop.books.CollectionQaJson.intOrNull
 import com.coach.desktop.books.CollectionQaJson.str
+import com.coach.protocol.BookStanceCopy
+import com.coach.protocol.BookStanceGuard
 import kotlinx.serialization.json.JsonObject
 import java.text.Normalizer
 
@@ -542,6 +544,153 @@ internal object SentenceCitationGate {
             conflictCards = conflictCards,
             fallbackMessage = fallback,
             droppedUnverifiedCount = dropped,
+        )
+    }
+
+    /**
+     * 阶段 2（TON-1978）按立场分层回答的客户端逐句复核：
+     * - 校验每一句的 UTF-16 原句切片、小说有效进度页码边界；
+     * - 任一「本书」块中有句子出处无法核对时整块丢弃（fail-closed）；
+     * - 同时兼容 high_risk 直接回答与缺失阅读记录提示。
+     */
+    fun verifyStanceCollectionResponse(
+        collectionId: String,
+        question: String,
+        responseJson: JsonObject,
+        rawPagesByKey: Map<Pair<String, Int>, String>,
+        bookStances: List<CollectionBookStancePayload>,
+        shortLabelByBookId: Map<String, String>,
+        docLabelByBookId: Map<String, String>,
+    ): CollectionQaTurn? {
+        val decoded = StanceAnswerCodec.decodeStanceAnswer(responseJson) ?: return null
+        val stanceByBookId = bookStances.associateBy { it.bookId }
+        val verifiedLayers = mutableListOf<StanceLayer>()
+        val flatSentences = mutableListOf<CollectionQaSentence>()
+        var extraDropped = 0
+
+        for (layer in decoded.layers) {
+            when (layer) {
+                is StanceLayer.Outside, is StanceLayer.Guess -> {
+                    if (!decoded.highRisk) verifiedLayers += layer
+                }
+                is StanceLayer.Book -> {
+                    var blockValid = true
+                    val verifiedBookSents = mutableListOf<StanceBookSentence>()
+                    for (sent in layer.sentences) {
+                        val verifiedCites = mutableListOf<StanceCitation>()
+                        for (cite in sent.citations) {
+                            val bookId = cite.bookId.ifBlank {
+                                layer.bookId.ifBlank { cite.docId.substringBefore(":p") }
+                            }
+                            val bs = stanceByBookId[bookId]
+                            if (bs != null && BookStanceGuard.FICTION in bs.guards) {
+                                val rtp = bs.readThroughPage
+                                if (bs.missingReadingRecord || rtp == null || cite.page > rtp) {
+                                    blockValid = false
+                                    break
+                                }
+                            }
+                            val rawPageText = rawPagesByKey[bookId to cite.page]
+                            if (rawPageText == null) {
+                                blockValid = false
+                                break
+                            }
+                            val exact = cite.startUtf16 in 0 until cite.endUtf16 &&
+                                cite.endUtf16 <= rawPageText.length &&
+                                rawPageText.substring(cite.startUtf16, cite.endUtf16) == cite.quote
+                            val finalCite = if (exact) {
+                                cite.copy(
+                                    bookId = bookId,
+                                    bookTitle = cite.bookTitle.ifBlank { bs?.title.orEmpty() },
+                                )
+                            } else {
+                                val snapped = verifyOrSnapAnchor(cite.quote, rawPageText)
+                                if (!snapped.verified || snapped.endUtf16 <= snapped.startUtf16) {
+                                    blockValid = false
+                                    break
+                                }
+                                cite.copy(
+                                    startUtf16 = snapped.startUtf16,
+                                    endUtf16 = snapped.endUtf16,
+                                    quote = rawPageText.substring(snapped.startUtf16, snapped.endUtf16),
+                                    bookId = bookId,
+                                    bookTitle = cite.bookTitle.ifBlank { bs?.title.orEmpty() },
+                                )
+                            }
+                            verifiedCites += finalCite
+                        }
+                        if (!blockValid || verifiedCites.isEmpty()) {
+                            blockValid = false
+                            break
+                        }
+                        verifiedBookSents += StanceBookSentence(sent.text, verifiedCites)
+                    }
+                    if (!blockValid || verifiedBookSents.isEmpty()) {
+                        extraDropped += layer.sentences.size
+                        continue
+                    }
+                    val resolvedBookId = layer.bookId.ifBlank {
+                        verifiedBookSents.first().citations.first().bookId
+                    }
+                    val resolvedBookTitle = layer.bookTitle.ifBlank {
+                        stanceByBookId[resolvedBookId]?.title.orEmpty()
+                    }
+                    verifiedLayers += layer.copy(
+                        sentences = verifiedBookSents,
+                        bookId = resolvedBookId,
+                        bookTitle = resolvedBookTitle,
+                    )
+                    for (vs in verifiedBookSents) {
+                        val c = vs.citations.first()
+                        val bTitle = c.bookTitle.ifBlank { resolvedBookTitle }
+                        flatSentences += CollectionQaSentence(
+                            claim = vs.text,
+                            citation = CollectionQaCitation(
+                                collectionId = collectionId,
+                                bookId = c.bookId,
+                                docLabel = docLabelByBookId[c.bookId] ?: bTitle,
+                                shortLabel = shortLabelByBookId[c.bookId] ?: bTitle.take(12),
+                                page = c.page,
+                                quoteAnchor = c.quote,
+                                startUtf16 = c.startUtf16,
+                                endUtf16 = c.endUtf16,
+                            ),
+                            rawExactMatch = true,
+                        )
+                    }
+                }
+            }
+        }
+
+        val allRelevantFiction = bookStances.isNotEmpty() &&
+            bookStances.all { BookStanceGuard.FICTION in it.guards }
+        val finalNoBookNotice = if (flatSentences.isEmpty()) {
+            decoded.noBookNotice ?: if (!decoded.highRisk && allRelevantFiction) {
+                BookStanceCopy.NO_BOOK_FICTION
+            } else {
+                BookStanceCopy.NO_BOOK_DIRECT
+            }
+        } else null
+
+        val verifiedAnswer = decoded.copy(
+            layers = verifiedLayers,
+            noBookNotice = finalNoBookNotice,
+            droppedSentences = decoded.droppedSentences + extraDropped,
+        )
+        val fallbackMsg = buildString {
+            decoded.missingRecordNotices.forEach { appendLine(it) }
+            if (flatSentences.isEmpty() && !finalNoBookNotice.isNullOrBlank()) append(finalNoBookNotice)
+        }.trim().takeIf { it.isNotEmpty() }
+
+        return CollectionQaTurn(
+            question = question,
+            sentences = flatSentences,
+            hasMaterialConflict = false,
+            conflictSummaryZh = "",
+            conflictCards = emptyList(),
+            fallbackMessage = fallbackMsg,
+            droppedUnverifiedCount = verifiedAnswer.droppedSentences,
+            stanceAnswer = verifiedAnswer,
         )
     }
 

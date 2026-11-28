@@ -121,10 +121,10 @@ def stop_proc(proc: subprocess.Popen[Any] | None) -> None:
             pass
 
 
-def post_explain(server_url: str, token: str, device_id: str, payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+def post_endpoint(server_url: str, endpoint: str, token: str, device_id: str, payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
-        f"{server_url.rstrip('/')}/v1/library/explain",
+        f"{server_url.rstrip('/')}{endpoint}",
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
@@ -137,15 +137,16 @@ def post_explain(server_url: str, token: str, device_id: str, payload: dict[str,
         return json.loads(resp.read().decode("utf-8"))
 
 
-def post_explain_with_retry(server_url: str, token: str, device_id: str, payload: dict[str, Any], retries: int = 2) -> dict[str, Any]:
+def post_explain_with_retry(server_url: str, token: str, device_id: str, payload: dict[str, Any], entry: str = "ask", retries: int = 2) -> dict[str, Any]:
     last_err: Exception | None = None
+    endpoint = "/v1/library/collection/ask" if entry == "collection" else "/v1/library/explain"
     expect_stance = "stance" in payload and payload["stance"] is not None
     for attempt in range(retries + 1):
         req_payload = dict(payload)
         if attempt > 0:
             req_payload["requestId"] = uuid.uuid4().hex
         try:
-            res = post_explain(server_url, token, device_id, req_payload)
+            res = post_endpoint(server_url, endpoint, token, device_id, req_payload)
             # Only retry on missing `stance` when the request itself actually asked for a stance response
             if expect_stance and "stance" not in res and attempt < retries:
                 time.sleep(1.5)
@@ -211,22 +212,28 @@ def write_verification_report(out_dir: Path, run_meta: dict[str, Any], results: 
             lines.append(f"- High-risk notice: {resp['highRiskNotice']}")
         if resp.get("systemNotice"):
             lines.append(f"- System notice: {resp['systemNotice']}")
+        for m in resp.get("missingRecordNotices") or []:
+            lines.append(f"- Missing record notice: {m}")
         if resp.get("noBookNotice"):
             lines.append(f"- No-book notice: {resp['noBookNotice']}")
         for lyr in resp.get("layers") or []:
             kind = lyr.get("layer")
             label = lyr.get("label")
+            btitle = lyr.get("bookTitle")
+            heading = f"《{btitle}》 · {label}" if btitle else label
             if kind == "book":
-                lines.append(f"- **[{label}]**")
+                lines.append(f"- **[{heading}]**")
+                if lyr.get("systemNotice") and lyr.get("systemNotice") != resp.get("systemNotice"):
+                    lines.append(f"  - Layer notice: {lyr['systemNotice']}")
                 for s_idx, sent in enumerate(lyr.get("sentences") or [], 1):
                     lines.append(f"  {s_idx}. 回答句：{sent.get('text')}")
                     for cite in sent.get("citations") or []:
                         lines.append(
-                            f"     - 原句 (p.{cite.get('pdfPage')} [{cite.get('startUtf16')}:{cite.get('endUtf16')}]): "
+                            f"     - 原句 ({cite.get('bookTitle') or r['bookTitle']} p.{cite.get('pdfPage')} [{cite.get('startUtf16')}:{cite.get('endUtf16')}]): "
                             f"{cite.get('quote')}"
                         )
             else:
-                lines.append(f"- **[{label}]** {lyr.get('text')}")
+                lines.append(f"- **[{heading}]** {lyr.get('text')}")
         if r.get("error"):
             lines.append(f"- **ERROR**: {r['error']}")
         lines.append("")
@@ -251,14 +258,11 @@ def main() -> int:
     parser.add_argument("--no-seed-forced", action="store_true", help="Do not auto-write book-stance-forced.json; resolve from existing library state only")
     args = parser.parse_args()
 
-    if args.entry == "collection":
-        print("collection entry is implemented in stage 2 (TON-1978).", file=sys.stderr)
-        return 2
     if args.set_name == "locked":
         print("--set locked is implemented in stage 2 (TON-1979).", file=sys.stderr)
         return 2
     if args.stance == "auto":
-        print("--stance auto is implemented in stage 2 (TON-1979); stage 1 uses --stance forced.", file=sys.stderr)
+        print("--stance auto is implemented in stage 2 (TON-1979); stage 1/collection uses --stance forced.", file=sys.stderr)
         return 2
 
     corpus_dir = args.corpus.expanduser().resolve()
@@ -432,6 +436,9 @@ def main() -> int:
                 "stanceSource": item.get("stanceSource", "undetermined"),
                 "resolvedDefaultStance": item.get("resolvedDefaultStance"),
                 "resolvedGuards": item.get("resolvedGuards"),
+                "fictionBooks": item.get("fictionBooks") or {},
+                "missingRecordBookHash": item.get("missingRecordBookHash"),
+                "missingRecordBookTitle": item.get("missingRecordBookTitle"),
                 "meta": item["meta"],
             }
             if "initialStance" in item:
@@ -439,10 +446,10 @@ def main() -> int:
             try:
                 if "initialRequest" in item:
                     record["initialResponse"] = post_explain_with_retry(
-                        server_url, token, args.device_id, item["initialRequest"]
+                        server_url, token, args.device_id, item["initialRequest"], entry=args.entry
                     )
                 record["response"] = post_explain_with_retry(
-                    server_url, token, args.device_id, item["request"]
+                    server_url, token, args.device_id, item["request"], entry=args.entry
                 )
             except Exception as exc:
                 record["error"] = str(exc)

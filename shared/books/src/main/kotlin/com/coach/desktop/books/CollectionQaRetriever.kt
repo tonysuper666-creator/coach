@@ -1,5 +1,8 @@
 package com.coach.desktop.books
 
+import com.coach.protocol.BookStance
+import com.coach.protocol.BookStanceCopy
+import com.coach.protocol.BookStanceGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -53,6 +56,9 @@ internal object CollectionQaRetriever {
         val matchedDiscrepancies: List<MatchedOfflineDiscrepancy>,
         val blockedBooklistEmptyMessage: String? = null,
         val unreadPagesFilteredOut: Int = 0,
+        val allStancesDetermined: Boolean = false,
+        val bookStances: List<CollectionBookStancePayload> = emptyList(),
+        val missingRecordNotices: List<String> = emptyList(),
     )
 
     private data class ConceptTerm(
@@ -254,6 +260,51 @@ internal object CollectionQaRetriever {
         "利维坦" to listOf("leviathan", "hobbes"),
         "理想国" to listOf("republic", "plato", "socrates"),
         "论自由" to listOf("liberty", "mill"),
+        "生存斗争" to listOf("struggle for existence", "struggle", "existence"),
+        "天敌" to listOf("enemies", "enemy", "checks", "destruction"),
+        "变异" to listOf("variation", "variations", "variability"),
+        "需求价格弹性" to listOf("price elasticity of demand", "price elasticity", "elasticity"),
+        "中点法" to listOf("midpoint method", "midpoint"),
+        "机会成本" to listOf("opportunity cost"),
+        "算开支" to listOf("economy", "expenses", "cost", "account", "expenditure"),
+        "开支" to listOf("expenses", "cost", "expenditure", "economy"),
+        "简单" to listOf("simplicity", "simple", "simplify"),
+        "骄傲" to listOf("pride", "vanity", "proud"),
+        "择偶" to listOf("marriage", "marry", "mate", "match"),
+        "内瑟菲尔德" to listOf("netherfield"),
+        "达西" to listOf("darcy"),
+        "伊丽莎白" to listOf("elizabeth"),
+        "华生" to listOf("watson"),
+        "观察" to listOf("observe", "observation"),
+        "对应原则" to listOf("principle of correspondence", "correspondence"),
+        "两极原则" to listOf("principle of polarity", "polarity"),
+        "降压药" to listOf("blood pressure", "medicine", "medication"),
+        "十三项德行" to listOf("thirteen virtues", "virtues", "temperance"),
+        "德行" to listOf("virtue", "virtues", "temperance"),
+        "瓦尔登湖" to listOf("walden", "thoreau"),
+        "梭罗" to listOf("thoreau", "walden"),
+        "经济学" to listOf("economics", "principles of economics"),
+        "傲慢与偏见" to listOf("pride and prejudice"),
+        "富兰克林" to listOf("franklin"),
+        "物种起源" to listOf("origin of species", "darwin"),
+        "福尔摩斯" to listOf("sherlock holmes", "holmes"),
+        "卡巴莱恩" to listOf("kybalion"),
+        "林子" to listOf("woods"),
+        "乡下" to listOf("woods", "country"),
+        "辞职" to listOf("labor", "business", "living"),
+        "上班" to listOf("business", "labor", "employment"),
+        "习惯" to listOf("habits", "habit", "virtues", "order"),
+        "智能手机" to listOf("telegraph", "news", "mail", "tools"),
+        "打卡" to listOf("little book", "table", "black mark", "week"),
+        "回家吃饭" to listOf("dinner", "visit", "village", "friends"),
+        "晚年" to listOf("later", "old age", "life", "virtues"),
+        "后悔" to listOf("repent", "regret", "faults", "error"),
+        "医生" to listOf("physician", "doctor", "medical"),
+        "奥斯汀" to listOf("austen", "pride", "prejudice"),
+        "嫁给" to listOf("marry", "marriage", "husband", "wife"),
+        "最难" to listOf("most trouble", "trouble", "difficult", "hardest", "order"),
+        "难做到" to listOf("trouble", "order", "difficult", "fault"),
+        "little book" to listOf("little book"),
     )
 
     private val irregularStems = mapOf(
@@ -348,6 +399,7 @@ internal object CollectionQaRetriever {
         "之间", "方面", "里面", "有关", "关于", "问题", "答案", "书里", "书中", "作者",
         "解释", "说明", "介绍", "分别", "各自", "主要", "原因", "存在", "一个", "一样",
         "没有", "有没", "有没有", "是否", "怎么说", "怎么讲", "是什么", "什么是", "区别", "不同",
+        "一章", "这一章", "这句", "这一句", "原文", "本来", "意思", "这么", "这里", "这一处",
     )
 
     private val genericEntityStopwords = setOf(
@@ -367,8 +419,9 @@ internal object CollectionQaRetriever {
         collectionId: String,
         question: String,
         currentBookId: String? = null,
+        readThroughPageOverrides: Map<String, Int?>? = null,
     ): RetrievalBundle = library.withCourseDatabase { db ->
-        retrieveWithConnection(db, library, collectionId, question, currentBookId)
+        retrieveWithConnection(db, library, collectionId, question, currentBookId, readThroughPageOverrides)
     }
 
     internal fun retrieveWithConnection(
@@ -377,6 +430,7 @@ internal object CollectionQaRetriever {
         collectionId: String,
         question: String,
         currentBookId: String? = null,
+        readThroughPageOverrides: Map<String, Int?>? = null,
     ): RetrievalBundle {
         val isVirtualReadLibrary = collectionId == CollectionQaVirtualCollections.READ_LIBRARY_ID
         val collectionRow = if (isVirtualReadLibrary) {
@@ -390,6 +444,25 @@ internal object CollectionQaRetriever {
         } else {
             loadCollectionMaterials(db, collectionId, collectionRow.kind)
         }
+
+        // 阶段 2 上线边界：库/合集内每本书都「已判定」才走新路径；有一本「未判定」整次走旧路径。
+        val stanceSource = BookStanceSources.forLibrary(library)
+        val determinedByBookId = LinkedHashMap<String, BookStanceResolution.Determined>()
+        var allStancesDetermined = collectionMaterials.isNotEmpty()
+        for (mat in collectionMaterials) {
+            val res = runCatching {
+                val loaded = runCatching { library.book(mat.bookId) }.getOrNull()
+                if (loaded != null) stanceSource.resolve(loaded)
+                else if (stanceSource is ForcedFileBookStanceSource) stanceSource.resolveByBookId(mat.bookId)
+                else BookStanceResolution.Undetermined
+            }.getOrDefault(BookStanceResolution.Undetermined)
+            if (res is BookStanceResolution.Determined) {
+                determinedByBookId[mat.bookId] = res
+            } else {
+                allStancesDetermined = false
+            }
+        }
+
         val acrossPapers = paperScopePattern.containsMatchIn(question)
         val materials = questionMaterials(db, collectionMaterials, question, currentBookId.takeIf { isVirtualReadLibrary }, acrossPapers)
         val shortLabelByBookId = materials.associate { it.bookId to it.shortLabel }
@@ -404,8 +477,99 @@ internal object CollectionQaRetriever {
         val allowedPagesByBook = HashMap<String, Set<Int>>()
         var focusedBodyStart: Int? = null
         var unreadPagesFilteredOut = 0
+        val bookStancesList = mutableListOf<CollectionBookStancePayload>()
+        val missingRecordNotices = mutableListOf<String>()
 
-        if (isVirtualReadLibrary) {
+        if (allStancesDetermined) {
+            val activityBooks = loadBooksWithReadActivity(db, currentBookId)
+            for (mat in collectionMaterials) {
+                val det = determinedByBookId.getValue(mat.bookId)
+                val allPages = loadAllPageNumbers(db, mat.bookId)
+                val bookPages = allPages.maxOrNull() ?: 1
+                val isFiction = BookStanceGuard.FICTION in det.guards
+                var rtp: Int? = null
+                var missingRecord = false
+                if (isFiction) {
+                    if (readThroughPageOverrides != null && mat.bookId in readThroughPageOverrides) {
+                        rtp = readThroughPageOverrides[mat.bookId]?.coerceIn(1, bookPages)
+                        missingRecord = (rtp == null)
+                    } else {
+                        val progressMap = BooklistProgressStore.loadForBook(db, mat.bookId)
+                        val readIds = progressMap.values.filter { it.readState == ChapterReadState.READ }.mapTo(HashSet()) { it.tocNodeId }
+                        val dwelledMax = progressMap.values.flatMap { it.dwelledPages }.maxOrNull()
+                        val readSpotPage = loadReadSpotPage(db, mat.bookId)
+                        val savedReadingPage = loadSavedReadingPage(db, mat.bookId)
+                        val loadedBook = runCatching { library.book(mat.bookId) }.getOrNull()
+                        val bodyStart = loadedBook?.let {
+                            BookBoundaries.bodyStart(it.pages, it.structure, it.correctedBodyPage).importPage
+                        } ?: 1
+                        val chapterMax = if (readIds.isNotEmpty() && loadedBook != null) {
+                            BookChapterResolver.chapters(loadedBook).filter { it.tocNodeId in readIds }.maxOfOrNull { it.lastPage }
+                        } else null
+                        val hasRecord = readIds.isNotEmpty() ||
+                            dwelledMax != null ||
+                            readSpotPage != null ||
+                            mat.bookId in activityBooks ||
+                            (savedReadingPage != null && savedReadingPage > maxOf(1, bodyStart))
+                        if (hasRecord) {
+                            rtp = listOfNotNull(savedReadingPage, readSpotPage, dwelledMax, chapterMax, 1)
+                                .maxOrNull()?.coerceIn(1, bookPages)
+                            missingRecord = (rtp == null)
+                        } else {
+                            rtp = null
+                            missingRecord = true
+                        }
+                    }
+                    if (missingRecord || rtp == null) {
+                        allowedPagesByBook[mat.bookId] = emptySet()
+                        unreadPagesFilteredOut += allPages.size
+                        missingRecordNotices += BookStanceCopy.noReadingRecord(mat.title)
+                    } else {
+                        val allowed = allPages.filterTo(LinkedHashSet()) { it <= rtp }
+                        allowedPagesByBook[mat.bookId] = allowed
+                        unreadPagesFilteredOut += (allPages.size - allowed.size).coerceAtLeast(0)
+                    }
+                } else if (!isVirtualReadLibrary && collectionRow.kind == CollectionKind.BOOKLIST) {
+                    val readIds = BooklistProgressStore.readChapterIds(db, mat.bookId)
+                    if (readIds.isEmpty()) {
+                        allowedPagesByBook[mat.bookId] = allPages.toSet()
+                    } else {
+                        val loadedBook = runCatching { library.book(mat.bookId) }.getOrNull()
+                        val chapterSpans = loadedBook?.let { BookChapterResolver.chapters(it) }.orEmpty()
+                        val allowed = LinkedHashSet<Int>()
+                        for (span in chapterSpans) {
+                            if (span.tocNodeId in readIds) {
+                                for (p in span.firstPage..span.lastPage) allowed += p
+                            }
+                        }
+                        val filtered = allowed.intersect(allPages.toSet())
+                        allowedPagesByBook[mat.bookId] = if (filtered.isEmpty()) allPages.toSet() else filtered
+                    }
+                } else {
+                    allowedPagesByBook[mat.bookId] = allPages.toSet()
+                }
+                val aliases = buildList {
+                    mat.sourceFilename?.substringBeforeLast('.')?.trim()?.takeIf(String::isNotEmpty)?.let(::add)
+                }
+                val annotationCtx = if (det.defaultStance == BookStance.CLASSIC || det.secondaryStance == BookStance.CLASSIC) {
+                    val headerText = (1..2).mapNotNull { p -> loadSinglePageText(db, mat.bookId, p)?.take(400) }
+                        .joinToString("\n")
+                    headerText.take(600).takeIf { it.isNotBlank() }
+                } else null
+                bookStancesList += CollectionBookStancePayload(
+                    bookId = mat.bookId,
+                    title = mat.title,
+                    aliases = aliases,
+                    defaultStance = det.defaultStance,
+                    secondaryStance = det.secondaryStance,
+                    guards = det.guards,
+                    readThroughPage = rtp,
+                    bookPages = bookPages,
+                    missingReadingRecord = missingRecord,
+                    annotationContext = annotationCtx,
+                )
+            }
+        } else if (isVirtualReadLibrary) {
             val activityBooks = loadBooksWithReadActivity(db, currentBookId)
             val fallbackAllBooks = activityBooks.isEmpty()
             for (mat in materials) {
@@ -533,7 +697,7 @@ internal object CollectionQaRetriever {
 
         val pageTextCache = HashMap<Pair<String, Int>, String>()
         fun readPage(bookId: String, page: Int): String? {
-            if (collectionRow.kind == CollectionKind.BOOKLIST) {
+            if (allStancesDetermined || collectionRow.kind == CollectionKind.BOOKLIST) {
                 val allowed = allowedPagesByBook[bookId].orEmpty()
                 if (page !in allowed) return null
             }
@@ -580,10 +744,11 @@ internal object CollectionQaRetriever {
         }
 
         // 2. FTS5 + BM25 + concept coverage + heading/definitional reranking across allowed materials
+        val effectiveBooklistFilter = allStancesDetermined || collectionRow.kind == CollectionKind.BOOKLIST
         val candidates = scoreAllowedPages(
             db = db,
             materials = materials,
-            collectionKind = collectionRow.kind,
+            collectionKind = if (effectiveBooklistFilter) CollectionKind.BOOKLIST else collectionRow.kind,
             allowedPagesByBook = allowedPagesByBook,
             queryProfile = queryProfile,
             currentBookId = currentBookId,
@@ -728,6 +893,9 @@ internal object CollectionQaRetriever {
             docLabelByBookId = docLabelByBookId,
             matchedDiscrepancies = matchedDiscrepancies,
             unreadPagesFilteredOut = unreadPagesFilteredOut,
+            allStancesDetermined = allStancesDetermined,
+            bookStances = bookStancesList,
+            missingRecordNotices = missingRecordNotices,
         )
     }
 
@@ -758,21 +926,40 @@ internal object CollectionQaRetriever {
         currentBookId: String?,
         acrossPapers: Boolean,
     ): List<CollectionMaterialMeta> {
-        val lower = question.lowercase()
+        val lower = foldTraditionalChinese(question.lowercase())
         val normalized = " " + lower.replace(titleSeparator, " ") + " "
         val citations = authorYear.findAll(lower).map { it.groupValues[1] to it.groupValues[2] }.toSet()
         val unresolved = citations.toMutableSet()
+        val corpusTitleAliases = listOf(
+            "walden" to listOf("瓦尔登湖", "梭罗"),
+            "economics" to listOf("经济学", "经济学 2e", "经济学2e"),
+            "pride and prejudice" to listOf("傲慢与偏见"),
+            "zhouyi" to listOf("周易", "易经"),
+            "周易" to listOf("周易", "易经"),
+            "论语" to listOf("论语"),
+            "道德经" to listOf("道德经", "老子"),
+            "franklin" to listOf("富兰克林"),
+            "origin of species" to listOf("物种起源", "达尔文"),
+            "sherlock holmes" to listOf("福尔摩斯"),
+            "kybalion" to listOf("卡巴莱恩"),
+        )
         val named = materials.filterTo(linkedSetOf()) { mat ->
-            val title = mat.title.lowercase()
+            val title = foldTraditionalChinese(mat.title.lowercase())
+            val shortTitle = title.replace(Regex("""[（(【\[][^）)】\]]*[）)】\]]"""), "").trim()
             val words = title.replace(titleSeparator, " ").trim()
-            val chineseTitle = title.any { it in '\u4e00'..'\u9fff' } && title.length >= 2 && title in lower
+            val chineseTitle = title.any { it in '\u4e00'..'\u9fff' } &&
+                ((title.length >= 2 && title in lower) || (shortTitle.length >= 2 && shortTitle in lower))
+            val aliasHit = corpusTitleAliases.any { (key, aliases) ->
+                (key in title || (mat.sourceFilename?.lowercase()?.contains(key) == true)) &&
+                    aliases.any { it in lower }
+            }
             val matched = if (citations.isEmpty()) emptySet() else {
                 listOfNotNull(title, mat.sourceFilename?.lowercase()).flatMap { label ->
                     authorYear.findAll(label).map { it.groupValues[1] to it.groupValues[2] }
                 }.intersect(citations)
             }
             unresolved.removeAll(matched)
-            chineseTitle || (words.length >= 3 && " $words " in normalized) || matched.isNotEmpty()
+            chineseTitle || aliasHit || (words.length >= 3 && " $words " in normalized) || matched.isNotEmpty()
         }
         val headers = mutableMapOf<String, String>()
         fun header(mat: CollectionMaterialMeta) = headers.getOrPut(mat.bookId) {
@@ -949,12 +1136,42 @@ internal object CollectionQaRetriever {
         }
 
         // 3. Chinese sequences: split on particles/question words first, then keep meaningful whole + n-grams
+        val titleOnlyZhParts = materials.flatMapTo(HashSet()) { mat ->
+            val rawT = mat.title
+            val noParen = rawT.replace(Regex("""[（(【\[][^）)】\]]*[）)】\]]"""), " ")
+            zhSequenceRegex.findAll("$rawT $noParen").map { it.value }.toList()
+        }
+        // Any book title written inside 《...》 in the question is a material filter, not a content keyword
+        Regex("""《([^》]+)》""").findAll(question).forEach { m ->
+            zhSequenceRegex.findAll(m.groupValues[1]).forEach { titleOnlyZhParts += it.value }
+        }
+        titleOnlyZhParts += listOf("王弼本", "十翼", "經文", "老子道德經注", "道德經注", "論語", "论语", "道德經", "道德经", "周易", "易經", "易经")
+
+        // Exact quoted/locator phrases in 「...」 or （...） get a dedicated high-importance slot
+        Regex("""[「（]([^」）]{2,24})[」）]""").findAll(question).forEachIndexed { idx, m ->
+            val phrase = m.groupValues[1].trim()
+            if (phrase !in titleOnlyZhParts && phrase !in zhRetrievalStopwords) {
+                val isZh = phrase.any { it in '\u4e00'..'\u9fff' }
+                val cleanPhrase = if (isZh) phrase else phrase.lowercase()
+                addSlot(
+                    "quoted:$idx:$cleanPhrase",
+                    listOf(ConceptTerm(cleanPhrase, weight = 1.6, isPhrase = !isZh, isChinese = isZh)),
+                    importance = 1.5,
+                )
+            }
+        }
+
         for (rawRun in zhSequenceRegex.findAll(question)) {
             val parts = zhSplitParticlesRegex.split(rawRun.value).filter { it.length >= 2 }
             for (part in parts) {
                 if (part in zhRetrievalStopwords) continue
+                if (part in titleOnlyZhParts) continue
                 zhTerms += part
                 val subTerms = ArrayList<ConceptTerm>()
+                // Keep exact unsplit run when particle splitting shortened a classical quote like 學而時習之 -> 學而時習
+                if (rawRun.value.length in 3..12 && rawRun.value != part && rawRun.value !in titleOnlyZhParts) {
+                    subTerms += ConceptTerm(rawRun.value, weight = 1.35, isChinese = true)
+                }
                 subTerms += ConceptTerm(part, weight = 1.0, isChinese = true)
                 if (part.length > 2) {
                     for (i in 0..(part.length - 2)) {
@@ -1129,6 +1346,7 @@ internal object CollectionQaRetriever {
                         pageTextCache[mat.bookId to page] = rawText
                         val normText = SentenceCitationGate.normalizeText(rawText)
                         val normLower = normText.lowercase()
+                        val zhFoldedLower = foldTraditionalChinese(normLower)
 
                         // Tokenize English words & stems once per page
                         val wordCounts = HashMap<String, Int>(64)
@@ -1170,7 +1388,10 @@ internal object CollectionQaRetriever {
                             var hitInHeading = false
                             for (term in slot.terms) {
                                 val count = when {
-                                    term.isChinese -> countSubstringOccurrences(normLower, term.text)
+                                    term.isChinese -> maxOf(
+                                        countSubstringOccurrences(normLower, term.text),
+                                        countSubstringOccurrences(zhFoldedLower, foldTraditionalChinese(term.text)),
+                                    )
                                     term.isPhrase -> countSubstringOccurrences(normLower, term.text)
                                     term.text.length <= 3 -> wordCounts[term.text] ?: 0
                                     else -> maxOf(wordCounts[term.text] ?: 0, stemCounts[term.text] ?: 0)
@@ -1703,11 +1924,39 @@ internal object CollectionQaRetriever {
             sql.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else null }
         }
 
+    private fun loadReadSpotPage(db: Connection, bookId: String): Int? {
+        if (!BookSchemaMigration.tableExists(db, "book_read_spots")) return null
+        return db.prepareStatement("SELECT page FROM book_read_spots WHERE book=?").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows -> if (rows.next()) rows.getInt(1) else null }
+        }
+    }
+
+    private val tradToSimpMap: Map<Char, Char> = mapOf(
+        '學' to '学', '習' to '习', '時' to '时', '說' to '说', '遠' to '远', '來' to '来',
+        '慍' to '愠', '溫' to '温', '見' to '见', '龍' to '龙', '潛' to '潜', '飛' to '飞',
+        '復' to '复', '無' to '无', '為' to '为', '與' to '与', '經' to '经', '書' to '书',
+        '義' to '义', '體' to '体', '實' to '实', '問' to '问', '對' to '对', '應' to '应',
+        '關' to '关', '點' to '点', '這' to '这', '個' to '个', '從' to '从', '進' to '进',
+        '論' to '论', '語' to '语', '道' to '道', '德' to '德', '註' to '注', '釋' to '释',
+        '傳' to '传', '記' to '记', '禮' to '礼', '詩' to '诗', '莊' to '庄', '陰' to '阴',
+        '陽' to '阳', '圖' to '图', '術' to '术', '占' to '占', '數' to '数', '國' to '国',
+        '開' to '开', '門' to '门', '長' to '长', '萬' to '万', '兩' to '两', '處' to '处',
+        '氣' to '氣'.let { '气' }, '雲' to '云', '變' to '变', '動' to '动', '靜' to '静',
+    )
+
+    private fun foldTraditionalChinese(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        for (ch in raw) sb.append(tradToSimpMap[ch] ?: ch)
+        return sb.toString()
+    }
+
     private fun isMultiBookComparisonQuery(question: String): Boolean {
         val lower = question.lowercase()
         val keywords = listOf(
             "compare", "contrast", "both", "versus", "vs", "between",
-            "两本", "两位", "两书", "对照", "对比", "比较", "异同", "各自", "分别", "同时",
+            "两本", "两位", "两书", "三本", "四本", "这三本", "这四本", "各怎么", "各说", "相通", "顺便",
+            "对照", "对比", "比较", "异同", "各自", "分别", "同时",
         )
         return keywords.any { it in lower }
     }
@@ -1758,6 +2007,8 @@ internal object CollectionQaEngine {
         collectionId: String,
         question: String,
         currentBookId: String? = null,
+        overrideStance: BookStance? = null,
+        readThroughPageOverrides: Map<String, Int?>? = null,
         remoteAsk: suspend (JsonObject) -> CourseServerCallResult,
     ): Result<CollectionQaTurn> {
         val cleanQ = question.trim()
@@ -1768,32 +2019,39 @@ internal object CollectionQaEngine {
             withContext(Dispatchers.IO) { runCatching { library.saveLastQuestion(currentBookId, cleanQ) } }
         }
         val bundle = withContext(Dispatchers.IO) {
-            CollectionQaRetriever.retrieve(library, collectionId, cleanQ, currentBookId)
+            CollectionQaRetriever.retrieve(library, collectionId, cleanQ, currentBookId, readThroughPageOverrides)
         }
-        bundle.blockedBooklistEmptyMessage?.let { msg ->
-            return Result.success(
-                CollectionQaTurn(
-                    question = cleanQ,
-                    sentences = emptyList(),
-                    hasMaterialConflict = false,
-                    conflictSummaryZh = "",
-                    fallbackMessage = msg,
-                ),
-            )
-        }
-        if (bundle.blocks.isEmpty()) {
-            return Result.success(
-                CollectionQaTurn(
-                    question = cleanQ,
-                    sentences = emptyList(),
-                    hasMaterialConflict = false,
-                    conflictSummaryZh = "",
-                    fallbackMessage = "当前材料中暂时没有检索到相关段落，请换个关键词再试。",
-                ),
-            )
+        if (!bundle.allStancesDetermined) {
+            bundle.blockedBooklistEmptyMessage?.let { msg ->
+                return Result.success(
+                    CollectionQaTurn(
+                        question = cleanQ,
+                        sentences = emptyList(),
+                        hasMaterialConflict = false,
+                        conflictSummaryZh = "",
+                        fallbackMessage = msg,
+                    ),
+                )
+            }
+            if (bundle.blocks.isEmpty()) {
+                return Result.success(
+                    CollectionQaTurn(
+                        question = cleanQ,
+                        sentences = emptyList(),
+                        hasMaterialConflict = false,
+                        conflictSummaryZh = "",
+                        fallbackMessage = "当前材料中暂时没有检索到相关段落，请换个关键词再试。",
+                    ),
+                )
+            }
         }
 
         val reqId = UUID.randomUUID().toString().replace("-", "").take(16)
+        val stanceWire = if (bundle.allStancesDetermined) {
+            overrideStance?.wire
+                ?: bundle.bookStances.map { it.defaultStance }.distinct().singleOrNull()?.wire
+                ?: "mixed"
+        } else null
         val payload = CollectionQaJson.encodeRequest(
             requestId = reqId,
             collection = bundle.collection,
@@ -1801,6 +2059,9 @@ internal object CollectionQaEngine {
             blocks = bundle.blocks,
             discrepancies = bundle.matchedDiscrepancies,
             shortLabelByBookId = bundle.shortLabelByBookId,
+            stanceWire = stanceWire,
+            overrideStance = overrideStance,
+            bookStances = bundle.bookStances,
         )
         val serverResult = remoteAsk(payload)
         fun failure(message: String, trouble: ExplainTrouble): Result<CollectionQaTurn> {
@@ -1813,6 +2074,22 @@ internal object CollectionQaEngine {
         val body = serverResult.body ?: return failure(
             serverResult.error ?: "这次没讲成。", serverResult.trouble ?: ExplainTrouble.Other,
         )
+
+        if (bundle.allStancesDetermined) {
+            val stanceTurn = SentenceCitationGate.verifyStanceCollectionResponse(
+                collectionId = bundle.collection.id,
+                question = cleanQ,
+                responseJson = body,
+                rawPagesByKey = bundle.rawPagesByKey,
+                bookStances = bundle.bookStances,
+                shortLabelByBookId = bundle.shortLabelByBookId,
+                docLabelByBookId = bundle.docLabelByBookId,
+            )
+            if (stanceTurn != null) return Result.success(stanceTurn)
+            return Result.failure(
+                CollectionQaException("材料里没有足够的依据回答这个问题。可以选中一段，再问它在说什么。", ExplainTrouble.Other),
+            )
+        }
 
         fun insufficientEvidence() = Result.failure<CollectionQaTurn>(
             CollectionQaException("材料里没有足够的依据回答这个问题。可以选中一段，再问它在说什么。", ExplainTrouble.Other),

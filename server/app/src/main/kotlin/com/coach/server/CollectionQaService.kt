@@ -482,6 +482,10 @@ class CollectionQaService(
         friend: String? = null,
         device: String? = null,
     ): JsonObject {
+        val rawStance = input["stance"]
+        if (rawStance != null && rawStance !is kotlinx.serialization.json.JsonNull) {
+            return CollectionQaStanceEngine.ask(transport, ledger, input, friend, device)
+        }
         val collectionId = input.str("collectionId").trim().also {
             require(it.length in 1..120) { "合集编号无效。" }
         }

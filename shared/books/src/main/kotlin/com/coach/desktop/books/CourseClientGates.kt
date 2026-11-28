@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import java.math.BigDecimal
 import java.math.MathContext
 import java.math.RoundingMode
+import java.text.Normalizer
 import kotlin.math.abs
 
 internal data class SanitizedNoteResult(
@@ -116,6 +117,14 @@ internal object CourseClientGates {
                 verified = true,
             )
         }
+        findNormalizedUtf16Span(text, ref.quote)?.let { (normStart, normEnd) ->
+            return ref.copy(
+                startUtf16 = normStart,
+                endUtf16 = normEnd,
+                quote = text.substring(normStart, normEnd),
+                verified = true,
+            )
+        }
         val snippet = ref.quote.trim().take(36)
         if (snippet.length >= 8) {
             val partialIdx = text.indexOf(snippet)
@@ -130,6 +139,122 @@ internal object CourseClientGates {
             }
         }
         return null
+    }
+
+    /**
+     * Maps a whitespace-collapsed, line-break-hyphen/soft-hyphen-joined citation quote back to
+     * exact UTF-16 `[start, end)` in [raw], without relaxing any other matching rules.
+     */
+    internal fun findNormalizedUtf16Span(raw: String, query: String): Pair<Int, Int>? {
+        findNormalizedUtf16SpanPass(raw, query, keepCompoundHyphen = false)?.let { return it }
+        if (query.any(::isLineBreakHyphen)) {
+            return findNormalizedUtf16SpanPass(raw, query, keepCompoundHyphen = true)
+        }
+        return null
+    }
+
+    private fun findNormalizedUtf16SpanPass(raw: String, query: String, keepCompoundHyphen: Boolean): Pair<Int, Int>? {
+        val normQuery = normalizeForCitationMatch(query, keepCompoundHyphen)
+        if (normQuery.length < 6) return null
+        val normChars = StringBuilder(raw.length)
+        val rawIndices = IntArray(raw.length + 1)
+        var outLen = 0
+        var lastWasSpace = true
+        var i = 0
+        while (i < raw.length) {
+            val joinedNext = hyphenJoinNextIndex(raw, i)
+            if (joinedNext >= 0) {
+                if (keepCompoundHyphen && raw[i] != '\u00AD') {
+                    rawIndices[outLen] = i
+                    normChars.append('-')
+                    outLen++
+                    lastWasSpace = false
+                }
+                i = joinedNext
+                continue
+            }
+            val ch = normalizeCitationChar(raw[i])
+            if (ch.isWhitespace()) {
+                if (!lastWasSpace && outLen > 0) {
+                    rawIndices[outLen] = i
+                    normChars.append(' ')
+                    outLen++
+                    lastWasSpace = true
+                }
+            } else {
+                rawIndices[outLen] = i
+                normChars.append(ch.lowercaseChar())
+                outLen++
+                lastWasSpace = false
+            }
+            i++
+        }
+        val haystack = normChars.toString().trimEnd()
+        val hit = haystack.indexOf(normQuery)
+        if (hit < 0) return null
+        val endNorm = (hit + normQuery.length - 1).coerceAtMost(outLen - 1)
+        val rawStart = rawIndices[hit]
+        val rawEnd = (rawIndices[endNorm] + 1).coerceAtMost(raw.length)
+        return if (rawStart in 0 until rawEnd) rawStart to rawEnd else null
+    }
+
+    private fun isHyphenJoinLetter(c: Char): Boolean =
+        c.isLetter() && c.code !in 0x4E00..0x9FFF && c.code !in 0x3400..0x4DBF
+
+    private fun isLineBreakHyphen(c: Char): Boolean =
+        c == '-' || c == '\u2010' || c == '\u2011'
+
+    private fun hyphenJoinNextIndex(text: String, i: Int): Int {
+        if (i <= 0 || !isHyphenJoinLetter(text[i - 1])) return -1
+        val ch = text[i]
+        val isSoft = ch == '\u00AD'
+        if (!isSoft && !isLineBreakHyphen(ch)) return -1
+        var j = i + 1
+        var sawSpace = false
+        while (j < text.length && normalizeCitationChar(text[j]).isWhitespace()) {
+            sawSpace = true
+            j++
+        }
+        if (!isSoft && !sawSpace) return -1
+        return if (j < text.length && isHyphenJoinLetter(text[j])) j else -1
+    }
+
+    private fun normalizeCitationChar(c: Char): Char = when (c) {
+        '\u2010', '\u2011', '\u2212', '\u2013', '\u2014' -> '-'
+        '\u2018', '\u2019' -> '\''
+        '\u201c', '\u201d' -> '"'
+        '\u00a0' -> ' '
+        else -> c
+    }
+
+    private fun normalizeForCitationMatch(s: String, keepCompoundHyphen: Boolean): String {
+        val nfkc = Normalizer.normalize(s, Normalizer.Form.NFKC)
+        val sb = StringBuilder(nfkc.length)
+        var lastSpace = true
+        var i = 0
+        while (i < nfkc.length) {
+            val joinedNext = hyphenJoinNextIndex(nfkc, i)
+            if (joinedNext >= 0) {
+                if (keepCompoundHyphen && nfkc[i] != '\u00AD') {
+                    sb.append('-')
+                    lastSpace = false
+                }
+                i = joinedNext
+                continue
+            }
+            val ch = normalizeCitationChar(nfkc[i])
+            if (ch.isWhitespace()) {
+                if (!lastSpace && sb.isNotEmpty()) {
+                    sb.append(' ')
+                    lastSpace = true
+                }
+            } else {
+                sb.append(ch.lowercaseChar())
+                lastSpace = false
+            }
+            i++
+        }
+        return sb.toString().trim()
     }
 
     fun auditOverlap(generatedText: String, sourceTexts: List<String>): NgramAuditResult {

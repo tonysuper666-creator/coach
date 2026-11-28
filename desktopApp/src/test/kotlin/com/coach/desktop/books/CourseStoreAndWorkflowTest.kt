@@ -243,6 +243,42 @@ class CourseStoreAndWorkflowTest {
             )
             assertNull(invalid)
 
+            // Gate 2b: client-side line-break hyphen & soft-hyphen verification (positive + negative)
+            val hyphenPage = BookPage(
+                12,
+                "The synthetic trial showed a pos- itive change in out-\npatient visits and sig\u00ADnificant savings.\n" +
+                    "A cost-effective plan ran in 2020- 2021 with health - income gaps and demand— and supply shifts.",
+            )
+            val clientPos = CourseClientGates.verifySingleCitation(
+                CourseCitationRef(
+                    "tb-hyp", "Synthetic Textbook", CourseMaterialRole.CORE_TEXTBOOK, 12, 0, 0, null,
+                    "The synthetic trial showed a positive change in outpatient visits and significant savings.",
+                ),
+                listOf(hyphenPage),
+            )
+            assertNotNull(clientPos, "Client verifier must join 'pos- itive', 'out-\\npatient', and soft hyphen")
+            assertTrue(hyphenPage.text.substring(clientPos.startUtf16, clientPos.endUtf16).contains("pos- itive"))
+            assertNull(
+                CourseClientGates.verifySingleCitation(
+                    CourseCitationRef(
+                        "tb-hyp", "Synthetic Textbook", CourseMaterialRole.CORE_TEXTBOOK, 12, 0, 0, null,
+                        "A costeffective plan ran in 2020- 2021",
+                    ),
+                    listOf(hyphenPage),
+                ),
+                "Client verifier must NOT join unspaced compound hyphen 'cost-effective'",
+            )
+            assertNull(
+                CourseClientGates.verifySingleCitation(
+                    CourseCitationRef(
+                        "tb-hyp", "Synthetic Textbook", CourseMaterialRole.CORE_TEXTBOOK, 12, 0, 0, null,
+                        "ran in 20202021 with healthincome gaps and demandand supply shifts.",
+                    ),
+                    listOf(hyphenPage),
+                ),
+                "Client verifier must NOT join numeric ranges, spaced dashes, or em-dashes",
+            )
+
             // Gate 3: English 8-gram and Chinese 12-gram overlap check
             val src = listOf(
                 "Adverse selection causes average insurer claims to rise monotonically across risk classes.",

@@ -193,7 +193,7 @@ internal object CollectionQaStanceEngine {
     )
 
     private enum class RejectReason(val hint: String) {
-        JSON("Response was not valid JSON. Output one valid JSON object only with no prose or unescaped quotes."),
+        JSON("Response was not valid JSON. Output one valid JSON object only with no prose, no markdown fences, and no unescaped ASCII double quotes; wrap quoted Chinese terms or commentary words in 「」 instead of \"."),
         ROOT_FIELDS("Root JSON must contain 'paragraphs' and 'boundary'."),
         PARAGRAPH_COUNT("Output at most 5 paragraphs."),
         PARAGRAPH_FIELDS("Check allowed keys on each paragraph."),
@@ -449,7 +449,11 @@ internal object CollectionQaStanceEngine {
             } else {
                 "All book sentences were dropped by the citation/single-sentence gate; emit clean single-fact sentences with valid non-mixed anchors and exact 5-200 char verbatim quotes, or keep only valid outside layers if the book does not cover the question."
             }
-            val repairNote = "\n\n[PREVIOUS ATTEMPT INVALID: $reasonHint State ONLY ONE fact per sentence; split multiple examples, numbers, or 'A and B' into separate sentences, each with its own anchor and verbatim quote (up to 200 chars) covering every number in that sentence; drop unsupported facts. Output valid JSON only.]"
+            val repairNote = if (verified1 == null && rejectReason == RejectReason.JSON) {
+                "\n\n[PREVIOUS ATTEMPT INVALID: ${RejectReason.JSON.hint} If the question asks ONLY what an absent commentator says, emit ONLY one \"outside\" paragraph (kind \"注家读法\") with \"boundary\": null. Output valid JSON only.]"
+            } else {
+                "\n\n[PREVIOUS ATTEMPT INVALID: $reasonHint State ONLY ONE fact per sentence; split multiple examples, numbers, or 'A and B' into separate sentences, each with its own anchor and verbatim quote (up to 200 chars) covering every number in that sentence; drop unsupported facts. Output valid JSON only.]"
+            }
             val reply2 = transport.ask(
                 systemPrompt = sysPrompt,
                 userPrompt = userPrompt + repairNote,
@@ -600,7 +604,7 @@ internal object CollectionQaStanceEngine {
             appendLine("PER-BOOK STANCE RULES:")
             appendLine("- knowledge (按专业角度答): Explain principles, derivations, boundaries. Allowed layers: \"book\" and \"outside\" (\"通行讲法\" or \"史学\"). NEVER \"guess\".")
             appendLine("- life (按作者和原文答): Respond from the author's recorded words/experiences in \"book\". NEVER invent unrecorded facts. Allowed layers: \"book\", \"outside\", and \"guess\". Any \"guess\" paragraph MUST belong to a life-stance book, MUST appear immediately adjacent to a verified \"book\" paragraph of that same life-stance book (NEVER emit \"guess\" if no life-stance book is cited in \"book\"), MUST use third person ONLY (e.g. \"按他书里的办法推想……\"), and MUST NEVER contain 我/我们/I/my/we/our even if asked.")
-            appendLine("- classic (按思想和注疏答): Allowed layers: \"book\" and \"outside\" (\"注家读法\" or \"今人解读\"). NEVER \"guess\". Blocks tagged [原文] are main text; [注]/[按语] are in-book commentary. NEVER mix [原文] and [注]/[按语] anchors in ONE \"book\" sentence! Absent commentators (e.g., 朱熹 on plain Lunyu) belong ONLY in \"outside\" and NEVER in \"book\" sentences. When the question asks ONLY what an absent commentator says, omit \"book\" paragraphs and put the explanation in an \"outside\" paragraph (kind \"注家读法\").")
+            appendLine("- classic (按思想和注疏答): Allowed layers: \"book\" and \"outside\" (\"注家读法\" or \"今人解读\"). NEVER \"guess\". Blocks tagged [原文] are main text; [注]/[按语] are in-book commentary. NEVER mix [原文] and [注]/[按语] anchors in ONE \"book\" sentence! Absent commentators (e.g., 朱熹 on plain Lunyu) belong ONLY in \"outside\" and NEVER in \"book\" sentences. When the question asks ONLY what an absent commentator says, omit \"book\" paragraphs and put the explanation in an \"outside\" paragraph (kind \"注家读法\"). Quote commentators' original words with 「」 ONLY (never ASCII \"). Outside-only 注家读法 example: {\"paragraphs\":[{\"layer\":\"outside\",\"bookId\":\"<bookId>\",\"kind\":\"注家读法\",\"text\":\"朱熹把「习」解释为「鸟数飞也」，指反复练习直到纯熟。\"}],\"boundary\":null}.")
             appendLine("- esoteric (按本书体系答): Reason strictly within the book's symbolic framework without predicting real-world outcomes. Allowed layers: \"book\" and \"outside\" (\"今人解读\" or \"史学\"). NEVER \"guess\".")
             appendLine("- original (只按原文答): Allowed layer: \"book\" ONLY! NEVER output \"outside\" or \"guess\" for an original-stance book. If the supplied blocks do not cover what the question asks, output {\"paragraphs\":[],\"boundary\":null}.")
             appendLine("- FICTION GUARD (overrides stance): For any book with guard \"fiction\", NEVER reveal or hint at plot events beyond its readThroughPage — NOT EVEN in \"outside\" or \"guess\"! If asked about later plot, omit \"book\" sentences for that book.")

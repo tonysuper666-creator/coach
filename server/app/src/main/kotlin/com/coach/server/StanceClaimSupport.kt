@@ -439,6 +439,48 @@ internal object StanceClaimSupport {
         return checkChineseClaimAgainstEnglishEvidence(toSimplified(evidenceQuote), claimText)
     }
 
+    /**
+     * 高危直接回答的逐分句引文核验（TON-1982）：
+     * - 严格只对照本句实际引用的 `citations`（不放宽到整块兜底）；
+     * - 中文↔中文时额外检查分句实词覆盖率，避免把一条无依据的现实操作分句借一个熟词混进「本书」。
+     */
+    internal fun isHighRiskClauseGrounded(
+        clauseText: String,
+        citations: List<CheckedStanceCitation>,
+        attributionFramingTerms: List<String> = emptyList(),
+    ): Boolean {
+        if (citations.isEmpty()) return false
+        val evidenceQuote = citations.joinToString(" ") { it.quote }.trim()
+        if (evidenceQuote.isEmpty()) return false
+        if (!isSupported(clauseText, citations, emptyList())) return false
+
+        val clauseHasCjk = hasCjk(clauseText)
+        val evHasCjk = hasCjk(evidenceQuote)
+        if (!clauseHasCjk || !evHasCjk) return true
+
+        var stripped = toSimplified(clauseText)
+        for (term in attributionFramingTerms) {
+            stripped = stripped.replace(term, "")
+        }
+        val clauseChars = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhStopChars }.toSet()
+        if (clauseChars.isEmpty()) return true
+
+        val evSimp = toSimplified(evidenceQuote)
+        val evChars = evSimp.filter { it in '\u4e00'..'\u9fff' && it !in zhStopChars }.toSet()
+        if (evChars.isEmpty()) return true
+
+        val glossChars = HashSet<Char>()
+        for (evCh in evChars) {
+            classicalGlosses[evCh]?.forEach { gloss ->
+                for (gCh in gloss) {
+                    if (gCh in '\u4e00'..'\u9fff' && gCh !in zhStopChars) glossChars += gCh
+                }
+            }
+        }
+        val supportedCount = clauseChars.count { it in evChars || it in glossChars }
+        return supportedCount >= 1 && supportedCount * 4 >= clauseChars.size
+    }
+
     private fun checkChineseClaimAgainstEnglishEvidence(claimSimp: String, englishText: String): Boolean {
         val rawWords = latinTokenRegex.findAll(englishText)
             .map { it.value.lowercase(Locale.ROOT) }

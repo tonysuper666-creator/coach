@@ -330,52 +330,68 @@ internal fun isEsotericHighRiskQuestion(spec: StanceRequestSpec, question: Strin
         EsotericRiskKeywords.matches(question)
 
 /**
- * 高危直接回答的逐句过滤（TON-1976 §3.7 / TON-1982）：
- * - 即使出处有效，给读者具体看病、法律或投资建议的句子也必须丢弃；
- * - 无法判定为「仅解释书中说法」的句子同样丢弃（fail-closed）；
- * - 仅保留明确归属于原文/书中说法且不含高危决策/行动建议的 `book` 句子。
+ * 高危直接回答的逐句与逐分句过滤（TON-1976 §3.7 / TON-1982）：
+ * - 对照整句和引文：保留有原文依据的术语/文本解释（如引文本身含「吉凶」时，仅解释该词的句子予以保留）；
+ * - 逐分句核验：只要任一分句转为现实操作、给出具体医疗/法律/投资或个人财务指令，或无法判定为有引文依据的书中说法，
+ *   立即丢弃整句（fail-closed），即使整句带有合法 anchor。
  */
 internal object EsotericHighRiskSentenceFilter {
+    private val clauseSplitRegex = Regex("""(?:[，,；;：:]+|——+)""")
+
     private val extraDomainZh: List<String> = listOf(
-        // 投资与交易
+        // 投资、财务与资产操作
         "股市", "买进", "抛售", "入场", "进场", "投资", "理财", "资产配置",
         "赚钱", "亏损", "盈利", "收益", "行情", "大盘", "牛市", "熊市",
+        "积蓄", "存款", "身家", "本金", "资金", "现金", "黄金", "白银", "房产", "楼市", "债市", "币圈",
+        "换成", "兑换", "买入", "卖出", "购入", "梭哈", "全仓", "半仓", "重仓", "轻仓",
+        "套现", "变现", "转账", "汇款", "借钱", "贷款", "抵押", "押注", "下注", "下单", "开户", "平仓", "补仓",
+        "银行", "账户", "钱包", "割肉", "追高", "解套",
         // 医疗与用药
         "药物", "疗法", "治疗", "痊愈", "治愈", "降血压", "调理血压", "血压",
-        "不吃药", "替代药物", "心念调", "靠心念", "停服",
+        "不吃药", "替代药物", "心念调", "靠心念", "停服", "停掉", "停用", "自行停药",
+        "看医生", "去医院", "别吃药", "不用吃药", "放弃治疗", "减量", "加量",
         // 法律与纠纷
-        "签约", "打官司", "维权", "举证", "上诉", "法律", "赔偿",
+        "签约", "打官司", "维权", "举证", "上诉", "法律", "赔偿", "撤诉", "解约",
+        "签协议", "签字", "报警", "立案", "公证", "和解",
     )
 
     private val extraDomainEnRegex = Regex(
-        """(?i)\b(?:stock|stocks|fund|funds|etf|crypto|bitcoin|invest|investment|portfolio|trade|trading|buy|sell|medication|medicine|drug|drugs|prescription|dosage|blood pressure|hypertension|therapy|cure|heal|doctor|surgery|lawsuit|sue|litigation|contract|lawyer|attorney|court|legal)\b""",
+        """(?i)\b(?:stock|stocks|fund|funds|etf|crypto|bitcoin|invest|investment|portfolio|trade|trading|buy|sell|gold|silver|savings|cash|exchange|convert|withdraw|deposit|mortgage|loan|bank|account|medication|medicine|drug|drugs|prescription|dosage|blood pressure|hypertension|therapy|cure|heal|doctor|surgery|lawsuit|sue|litigation|contract|lawyer|attorney|court|legal)\b""",
+    )
+
+    /** 仅当引文本身也出现该词时才允许保留的术语（未在引文出现则视为脱离原文的占断/预测，直接丢弃）。 */
+    private val quoteGroundedOnlyTermsZh: List<String> = listOf(
+        "吉凶", "凶吉", "运势", "祸福", "吉兆", "凶兆",
     )
 
     private val adviceZhKeywords: List<String> = listOf(
         "建议", "推荐", "不妨", "最好", "务必", "切勿", "切忌",
         "放心", "果断", "趁机", "逢低", "逢高", "择机",
-        "赶紧", "赶快", "立刻", "马上", "抓紧", "出手",
+        "赶紧", "赶快", "立刻", "马上", "立即", "抓紧", "趁早", "早点", "出手",
+        "明早", "明天", "明日", "今晚", "今天", "今日", "下周", "下月", "下个月", "尽快",
         "应当", "应该", "必须", "适合", "值得", "不宜", "宜于",
-        "不要", "不必", "无需", "不用", "别再",
+        "不要", "不必", "无需", "不用", "别再", "去买", "去卖", "去投", "去借", "去贷", "去签", "去告", "去停",
+        "改吃", "改用", "停吃", "别买", "别卖", "别停", "动用", "拿出", "押上",
         "你", "您", "咱们", "读者",
         "现实中", "在现实", "具体决定", "做出决定", "做决定",
-        "替你", "为你", "帮你", "操作", "运势", "吉凶",
+        "替你", "为你", "帮你", "操作",
         "会涨", "会跌", "会好转", "会痊愈", "能治好", "可替代",
     )
 
     private val adviceZhPatterns: List<Regex> = listOf(
-        Regex("""(?:现在|此时|当下|据此|由此|因此|所以|故而|照此|按此)[^，。！？\n]{0,8}(?:可以|能|宜|买|卖|投|停|吃|起诉|签|决定|行动|持有|观望)"""),
-        Regex("""(?:可以|能够|能)[^，。！？\n]{0,4}(?:买|卖|投|停|不吃|起诉|签约|治|调理|治愈|代替)"""),
-        Regex("""宜(?:买|卖|投|入|进|持|停|诉|签)"""),
+        Regex("""(?:现在|此时|当下|据此|由此|因此|所以|故而|照此|按此|于是|然后|接着)[^，。！？\n]{0,8}(?:可以|能|宜|买|卖|投|换|转|取|存|停|吃|起诉|签|决定|行动|持有|观望)"""),
+        Regex("""(?:可以|能够|能)[^，。！？\n]{0,4}(?:买|卖|投|换|转|取|停|不吃|起诉|签约|治|调理|治愈|代替)"""),
+        Regex("""宜(?:买|卖|投|换|入|进|持|停|诉|签)"""),
+        Regex("""把[^，。！？\n]{1,10}(?:换成|转成|转为|投入|存入|取出|拿去|押在|买成|卖掉)"""),
     )
 
     private val adviceEnRegex = Regex(
-        """(?i)\b(?:should|ought|recommend|advise|suggest|must|you|your|yours|yourself|don't|do not|go ahead|decision|decide)\b""",
+        """(?i)\b(?:should|ought|recommend|advise|suggest|must|you|your|yours|yourself|don't|do not|go ahead|decision|decide|tomorrow|tonight|immediately|right now|better to|time to)\b""",
     )
 
     private val zhBookAttributionSubjects: List<String> = listOf(
         "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞",
-        "象传", "象曰", "彖传", "彖曰", "文言", "易传", "作者",
+        "象传", "象曰", "彖传", "彖曰", "文言传", "文言", "易传", "作者",
         "本段", "该段", "这段", "这一段", "本节", "这一节", "该节",
         "本章", "这一章", "该章", "本处", "这一处", "此处", "该处",
         "这句", "这一句", "文本", "典籍", "传文", "注疏", "注文",
@@ -389,6 +405,26 @@ internal object EsotericHighRiskSentenceFilter {
         "强调", "认为", "描述", "表达", "对应", "揭示", "展开", "围绕", "概括", "阐述", "归结",
     )
 
+    /** 仅用于引入或标注原文归属的元话语词汇（最长优先，供纯归属分句与中文实词覆盖率判定扣除）。 */
+    private val zhAttributionFramingTerms: List<String> = listOf(
+        "这一段", "这一节", "这一章", "这一处", "这一句", "这一爻", "这一卦",
+        "文言传", "体系里", "体系中", "说的是", "写的是", "指的是", "讲的是",
+        "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞",
+        "象传", "象曰", "彖传", "彖曰", "文言", "易传", "作者",
+        "本段", "该段", "这段", "本节", "该节", "本章", "该章", "本处", "此处", "该处",
+        "这句", "此爻", "一爻", "此卦", "文本", "典籍", "传文", "注疏", "注文", "格言", "体系",
+        "初九", "九二", "九三", "九四", "九五", "上九", "初六", "六二", "六三", "六四", "六五", "上六",
+        "解释", "说明", "提到", "指出", "认为", "描述", "表述", "阐述", "记载", "记述",
+        "强调", "表达", "概括", "作为", "写作", "意思", "含义", "所选", "提醒", "借",
+        "时写", "时说", "时讲", "还说", "还写", "又说", "又写", "并解",
+    ).sortedByDescending { it.length }
+
+    private val zhFramingResidualStopChars: Set<Char> = (
+        "的了在是有和与这那一个中里上下之其为以而于也者则故此被把将对从向到" +
+            "说讲写指称原文书句段作者注认表示出来去着过得地并及或但且因所即乃亦无不非未" +
+            "一二三四五六七八九十两时"
+        ).toSet()
+
     private val enBookAttributionSubjectRegex = Regex(
         """(?i)\b(?:the book|the text|the passage|the author|this section|this chapter|the original|this verse|this line|the commentary)\b""",
     )
@@ -396,21 +432,76 @@ internal object EsotericHighRiskSentenceFilter {
         """(?i)\b(?:says|states|describes|explains|mentions|notes|defines|presents|refers|treats|writes|depicts|calls|frames)\b""",
     )
 
-    fun isPureBookExplanation(rawSentence: String): Boolean {
-        val text = rawSentence.trim()
-        if (text.isEmpty()) return false
-        if (EsotericRiskKeywords.matches(text)) return false
-        if (extraDomainZh.any { it in text }) return false
-        if (extraDomainEnRegex.containsMatchIn(text)) return false
-        if (adviceZhKeywords.any { it in text }) return false
-        if (adviceZhPatterns.any { it.containsMatchIn(text) }) return false
-        if (adviceEnRegex.containsMatchIn(text)) return false
+    private val enPureAttributionClauseRegex = Regex(
+        """(?i)^(?:the\s+(?:book|text|passage|author|original|commentary)|this\s+(?:section|chapter|verse|line))\s+(?:says|states|notes|writes|explains|mentions|adds)(?:\s+that)?$""",
+    )
 
-        val hasZhAttribution = zhBookAttributionSubjects.any { it in text } &&
-            zhBookAttributionPredicates.any { it in text }
+    private fun isPureAttributionFramingClause(clauseSimp: String): Boolean {
+        val clean = clauseSimp.trim().trimEnd('。', '！', '？', '.', '!', '?')
+        if (clean.isEmpty()) return true
+        if (enPureAttributionClauseRegex.matches(clean)) return true
+        val hasSubject = zhBookAttributionSubjects.any { it in clean } ||
+            "一爻" in clean || "此爻" in clean || "这一爻" in clean
+        if (!hasSubject) return false
+        var stripped = clean
+        for (term in zhAttributionFramingTerms) {
+            stripped = stripped.replace(term, "")
+        }
+        val residual = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhFramingResidualStopChars }
+        return residual.isEmpty() && !Regex("[A-Za-z0-9]").containsMatchIn(stripped)
+    }
+
+    private fun containsForbiddenHighRiskContent(textSimp: String, evidenceSimp: String): Boolean {
+        if (EsotericRiskKeywords.matches(textSimp)) return true
+        if (extraDomainZh.any { it in textSimp && it !in evidenceSimp }) return true
+        if (extraDomainEnRegex.containsMatchIn(textSimp)) return true
+        if (quoteGroundedOnlyTermsZh.any { it in textSimp && it !in evidenceSimp }) return true
+        if (adviceZhKeywords.any { it in textSimp }) return true
+        if (adviceZhPatterns.any { it.containsMatchIn(textSimp) }) return true
+        if (adviceEnRegex.containsMatchIn(textSimp)) return true
+        return false
+    }
+
+    fun isPureBookExplanation(
+        rawSentence: String,
+        citations: List<CheckedStanceCitation>,
+    ): Boolean {
+        val text = rawSentence.trim()
+        if (text.isEmpty() || citations.isEmpty()) return false
+        val evidenceQuote = citations.joinToString(" ") { it.quote }.trim()
+        if (evidenceQuote.isEmpty()) return false
+
+        val textSimp = StanceClaimSupport.toSimplified(text)
+        val evidenceSimp = StanceClaimSupport.toSimplified(evidenceQuote)
+
+        // 1. 整句必须明确归属于书中说法（无法判定归属则丢弃）
+        val hasZhAttribution = zhBookAttributionSubjects.any { it in textSimp } &&
+            zhBookAttributionPredicates.any { it in textSimp }
         val hasEnAttribution = enBookAttributionSubjectRegex.containsMatchIn(text) &&
             enBookAttributionPredicateRegex.containsMatchIn(text)
-        return hasZhAttribution || hasEnAttribution
+        if (!hasZhAttribution && !hasEnAttribution) return false
+
+        // 2. 整句禁止出现脱离原文的医疗/法律/投资、个人财务指令、时间/动作劝导或未在引文中出现的占断词
+        if (containsForbiddenHighRiskContent(textSimp, evidenceSimp)) return false
+
+        // 3. 逐分句核验：除纯引入归属分句外，每一条实质分句都必须独立受本句引文支撑，
+        //    任一分句转为现实操作或脱离引文（无法判定）时丢弃整句。
+        val clauses = clauseSplitRegex.split(text)
+            .map { it.trim().trimEnd('。', '！', '？', '.', '!', '?').trim() }
+            .filter { it.isNotEmpty() }
+        if (clauses.isEmpty()) return false
+
+        var substantiveCount = 0
+        for (clause in clauses) {
+            val clauseSimp = StanceClaimSupport.toSimplified(clause)
+            if (containsForbiddenHighRiskContent(clauseSimp, evidenceSimp)) return false
+            if (isPureAttributionFramingClause(clauseSimp)) continue
+            substantiveCount++
+            if (!StanceClaimSupport.isHighRiskClauseGrounded(clause, citations, zhAttributionFramingTerms)) {
+                return false
+            }
+        }
+        return substantiveCount > 0
     }
 }
 
@@ -1305,8 +1396,8 @@ internal fun checkedStancePayload(
                         continue
                     }
 
-                    // 规则 7（TON-1982）：高危直接回答逐句丢弃具体建议与无法判定为仅解释书中说法的句子（即使出处有效）
-                    if (isHighRisk && !EsotericHighRiskSentenceFilter.isPureBookExplanation(text)) {
+                    // 规则 7（TON-1982）：高危直接回答逐句与逐分句核对引文，丢弃具体建议、现实操作或无法判定句（即使出处有效）
+                    if (isHighRisk && !EsotericHighRiskSentenceFilter.isPureBookExplanation(text, citations)) {
                         logDrop("HIGH_RISK_ADVICE", anchorIds)
                         droppedSentences++
                         continue

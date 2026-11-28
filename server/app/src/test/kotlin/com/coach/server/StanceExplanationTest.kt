@@ -467,6 +467,98 @@ class StanceExplanationTest {
     }
 
     /**
+     * QA-Astra 退回回归（TON-1982）：同一个有效引文下：
+     * 1. 仅解释引文中出现的「吉凶」一词的句子必须保留；
+     * 2. 前半句挂有效引文、后半分句转为现实财务/操作指令或脱离引文无法判定的句子必须整句丢弃；
+     * 3. 覆盖直接门禁调用、本地关键词命中入口、以及模型主动返回 boundary 入口。
+     */
+    @Test
+    fun highRiskKeepsGroundedSymbolGlossAndDropsAppendedRealWorldInstructionAcrossBothEntries() = runBlocking {
+        val bookHash = "d".repeat(64)
+        val quote = "青鸟是本章用来解释吉凶的一种意象。"
+        val pages = listOf(SourcePage("$bookHash:p1:0", 1, quote))
+        val pack = StanceSourcePack.fromSourcePack(SourcePack(pages), BookStance.ESOTERIC)
+
+        fun retainedDirect(text: String): Int {
+            val payload = """{"paragraphs":[{"layer":"book","sentences":[{"text":"$text","anchors":["S1"],"quote":"$quote"}]}],"boundary":"high_risk"}"""
+            val res = assertNotNull(
+                checkedStancePayload(
+                    payload = payload,
+                    pack = pack,
+                    stance = BookStance.ESOTERIC,
+                    guards = setOf(BookStanceGuard.ESOTERIC),
+                    forceHighRisk = true,
+                ),
+            )
+            return res.layers.filterIsInstance<CheckedStanceLayer.Book>().sumOf { it.sentences.size }
+        }
+
+        // 1. 附件两例直接验证 + 脱离引文的现实动作分句（无金融关键词亦须丢弃）
+        assertEquals(1, retainedDirect("本章将青鸟作为说明吉凶的意象。"), "有原文依据的「吉凶」术语解释必须保留")
+        assertEquals(0, retainedDirect("本章将青鸟写作意象，明早把全部积蓄换成黄金。"), "附带现实投资指令的分句必须丢弃整句")
+        assertEquals(0, retainedDirect("本章将青鸟写作意象，傍晚去城南办件私事。"), "脱离引文无法判定的分句必须丢弃整句")
+
+        // 2. 端到端覆盖「本地关键词命中」与「模型主动标记 boundary」两条入口
+        val modelJson = """
+            {
+              "paragraphs": [
+                {
+                  "layer": "book",
+                  "sentences": [
+                    {"text": "本章将青鸟作为说明吉凶的意象。", "anchors": ["S1"], "quote": "$quote"},
+                    {"text": "本章将青鸟写作意象，明早把全部积蓄换成黄金。", "anchors": ["S1"], "quote": "$quote"}
+                  ]
+                },
+                {
+                  "layer": "outside",
+                  "kind": "今人解读",
+                  "text": "书外内容在高危回答中必须去掉。"
+                }
+              ],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+
+        val entryCases = listOf(
+            "keyword_hit" to "青鸟代表吉凶，我该现在买股票吗？",
+            "model_self_boundary" to "青鸟在这一章代表什么，我个人接下来该怎么安排？",
+        )
+        assertTrue(EsotericRiskKeywords.matches(entryCases[0].second))
+        assertFalse(EsotericRiskKeywords.matches(entryCases[1].second))
+
+        for ((caseName, question) in entryCases) {
+            Harness().use { h ->
+                h.stub.stream(1, modelJson, StubTutor.terminal("complete"), StubTutor.DONE)
+                val reply = h.reader.explain(
+                    device = "d",
+                    course = "library",
+                    input = json(
+                        "requestId" to "ee21",
+                        "kind" to "ask",
+                        "question" to question,
+                        "stance" to "esoteric",
+                        "guards" to JsonArray(listOf(JsonPrimitive("esoteric"))),
+                    ),
+                    quote = "青鸟",
+                    pages = pages,
+                    scope = VisibleScope.learner(),
+                )
+                assertEquals(1, h.stub.requests, caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, reply.str("boundary"), caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("highRiskNotice"), caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("text").lineSequence().first(), caseName)
+                assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, reply.str("systemNotice"), caseName)
+                val layers = reply.getValue("layers").jsonArray
+                assertEquals(1, layers.size, "$caseName: outside 必须去掉，只剩 book 层")
+                val sents = layers.single().jsonObject.getValue("sentences").jsonArray
+                assertEquals(1, sents.size, "$caseName: 仅保留术语解释，附带投资指令句必须丢弃")
+                assertEquals("本章将青鸟作为说明吉凶的意象。", sents.single().jsonObject.str("text"), caseName)
+                assertEquals(1, reply.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int, caseName)
+            }
+        }
+    }
+
+    /**
      * 反例 5（TON-1976 §3）：请求不带 stance，走旧路径，返回结构和现在一样。
      */
     @Test

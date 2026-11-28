@@ -491,6 +491,7 @@ object ExamPointDrillGate {
         essayVotes: List<List<SupportVote>>,
         generatorModel: String,
         checkerModel: String,
+        topicId: String = "",
         topicTitle: String = "",
         requireChinese: Boolean = false,
     ): ExamPointAdmission {
@@ -537,7 +538,7 @@ object ExamPointDrillGate {
             }
             val finalReason = verdicts.last()
             if (finalReason == null) {
-                stored += storedChoice(draft, byPage, byBook)
+                stored += storedChoice(draft, byPage, byBook, "$topicId\u0000${draft.id}")
             } else {
                 drop(finalReason)
                 choiceCheckerDiscards[finalReason] = (choiceCheckerDiscards[finalReason] ?: 0) + 1
@@ -783,11 +784,14 @@ object ExamPointDrillGate {
         draft: ChoiceDraft,
         byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,
         byBook: Map<String, List<CourseMaterialTextBlock>>,
+        seed: String,
     ): JsonObject = buildJsonObject {
         put("id", draft.id)
         put("stem", draft.stem)
         put("options", buildJsonArray {
-            for (opt in draft.options) {
+            // The blind check already agreed on this draft, so its letter is final there.
+            // Storing reorders the same options so the key is not always A or B.
+            for (opt in ChoiceOptionOrder.reorder(draft.options, seed)) {
                 val verified = CourseQualityGates.verifyCitation(opt.citation!!, byPage, byBook)!!
                 add(buildJsonObject {
                     put("letter", opt.letter)
@@ -1015,6 +1019,7 @@ class ExamPointDrillPipeline(
             essayVotes = essayVotes,
             generatorModel = first.model,
             checkerModel = checkerModel,
+            topicId = topicId,
             topicTitle = topicTitle,
             requireChinese = requireChinese,
         ).toJson()

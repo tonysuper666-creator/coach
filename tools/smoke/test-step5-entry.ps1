@@ -997,6 +997,41 @@ $script:onClick = { $script:screen = $loadingFrame }
 $okInPlace = Click-Confirm 4 { param($l) Find-ConsentAllow $l } { param($l) Test-ConsentGone $l } -tries 3 -waitSec 1 -pauseMs 1
 Check 'step4-in-place-allow-clicks-until-loading' ($okInPlace -and $script:clicks.Count -eq 1) "ok=$okInPlace clicks=$($script:clicks.Count)"
 
+# 56. 150% 并排抽屉的「×」没被 OCR 认出，且第一次点击没关上。重新定位，直到新帧的底栏读到实际页码。
+$landed154 = @((New-Line '154/620' 1750 1301 90 22))
+$script:hud = $null
+$script:screen = $wideRightReady + @(
+    (New-Line '收起' 2080 151 36 22),
+    (New-Line '出处1 · 第154页 · 第2段' 1690 800 250 22)
+)
+$script:clicks.Clear()
+$script:onClick = {
+    if ($script:clicks.Count -eq 2 -and $script:clicks[1] -eq '2088,89') { $script:screen = $landed154 }
+}
+Confirm-Step5CiteLanding '154' 2160 1350 1.5
+Check 'step5-cite-closes-drawer-at-scaled-header-point-and-rechecks' (($script:clicks -join '|') -eq '2088,89|2088,89') "clicks=$($script:clicks -join '|')"
+
+$script:screen = $landed154
+$script:clicks.Clear(); $script:onClick = $null
+Confirm-Step5CiteLanding '154' 2160 1350 1.5
+Check 'step5-cite-already-closed-uses-reader-counter-without-clicking' ($script:clicks.Count -eq 0)
+
+$script:screen = $bottomSheetReady + @((New-Line '154/620' 560 510 80 20))
+$script:clicks.Clear()
+$err = ''
+try { Confirm-Step5CiteLanding '154' 752 552 1.0 } catch { $err = "$_" }
+Check 'step5-cite-open-bottom-drawer-cannot-pass-as-reader-counter' ($script:clicks.Count -gt 0 -and $script:clicks[0] -eq '704,291' -and $err -like '*抽屉仍未收起*') "err=$err"
+
+$script:screen = @((New-Line '154/620' 250 120 90 22))
+$err = ''
+try { Confirm-Step5CiteLanding '154' 2160 1350 1.5 } catch { $err = "$_" }
+Check 'step5-cite-body-fraction-cannot-substitute-for-footer' ($err -like '*读不到底栏页码*') "err=$err"
+
+$script:screen = @((New-Line '153/620' 1750 1301 90 22))
+$err = ''
+try { Confirm-Step5CiteLanding '154' 2160 1350 1.5 } catch { $err = "$_" }
+Check 'step5-cite-rejects-wrong-physical-page' ($err -like '*底栏停在第 153 页*出处写的是第 154 页*') "err=$err"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

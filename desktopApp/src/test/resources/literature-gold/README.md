@@ -28,7 +28,7 @@ With the two Pollock pages added, the classifier at `30cff15f` recovered 1/29 sc
 
 With the offset-crop pages added, `e4db45c6` recovered 5/16 body sentences on the new pages and admitted two notes. The combined baseline was 148/159 body sentences and two note leaks.
 
-On the first four printed-notes pages, `6c027723` recovered 40/40 body sentences and admitted all eight notes.
+On the six printed-notes pages, `6c027723` recovered 60/60 body sentences and admitted all 12 notes. The combined baseline was 219/219 and 12 leaks.
 
 ## Private PDF acceptance
 

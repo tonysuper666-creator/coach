@@ -912,64 +912,191 @@ internal object LiteraturePdfLayout {
 
     private enum class ScanMark { STOP, RAISED_CALLOUT }
 
+    private fun darkPixel(image: BookBitmap, x: Int, y: Int): Boolean {
+        val rgb = bookBitmapPixel(image, x, y)
+        return ((rgb shr 16 and 255) + (rgb shr 8 and 255) + (rgb and 255)) < 3 * 140
+    }
+
+    /** One lazy render shared by physical-line inspection and punctuation checks. */
+    private class ScanPage(pdf: BookPdfDocument, page: Int, direction: Int) : AutoCloseable {
+        private val source = pdf.getPage(page - 1)
+        val rotation = Math.floorMod(source.rotation, 360)
+        private val turn = Math.floorMod(rotation - direction, 360)
+        val horizontal = direction % 180 == 0 && turn % 180 == 0
+        val scale = minOf(4f, 3000f / maxOf(source.cropBox.width, source.cropBox.height))
+        private val rendered = lazy {
+            if (source.cropBox.width <= 0 || source.cropBox.height <= 0) null
+            else try {
+                newBookPdfRenderer(pdf).renderImage(page - 1, scale)
+            } catch (_: java.io.IOException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val bitmap: BookBitmap? get() = rendered.value
+
+        fun ink(image: BookBitmap, x: Int, y: Int): Boolean =
+            if (turn == 180) darkPixel(image, image.width - 1 - x, image.height - 1 - y) else darkPixel(image, x, y)
+
+        override fun close() {
+            if (rendered.isInitialized()) bitmap?.let(::releaseBookBitmap)
+        }
+    }
+
+    /** Searchable scans can use one nominal font height for both body and note type.
+     * Measure actual ink above the baseline of several words. Bound the horizontal
+     * samples per word and skip boxes without ink near the reported baseline.
+     */
+    private fun printedHeight(row: List<Word>, scan: ScanPage, image: BookBitmap): Float? {
+        val heights = row.filter { it.text.length >= 3 }.sortedByDescending { it.right - it.x }.take(5).mapNotNull { w ->
+            val x0 = (w.x * scan.scale).toInt().coerceAtLeast(0)
+            val x1 = (w.right * scan.scale).toInt().coerceAtMost(image.width - 1)
+            val y1 = (w.y * scan.scale).toInt().coerceAtMost(image.height - 1)
+            val y0 = ((w.y - w.pointSize) * scan.scale).toInt().coerceAtLeast(0)
+            if (x1 <= x0 || y1 <= y0) return@mapNotNull null
+            val xs = x0..x1 step maxOf(1, (x1 - x0) / 36)
+            fun occupied(y: Int): Boolean = xs.count { x -> scan.ink(image, x, y) } >= 2
+            val top = (y0..y1).firstOrNull(::occupied) ?: return@mapNotNull null
+            if (top == y0 || (maxOf(top, y1 - (w.pointSize * scan.scale * 0.20f).toInt())..y1).none(::occupied)) null
+                else (y1 - top + 1) / scan.scale
+        }.sorted()
+        return heights.getOrNull(heights.size / 2)
+    }
+
+    private fun printedRule(scan: ScanPage, image: BookBitmap, left: Float, right: Float,
+                            top: Float, bottom: Float, em: Float): Boolean {
+        val step = maxOf(1, scan.scale.toInt())
+        val x0 = (left * scan.scale).toInt().coerceAtLeast(0)
+        val x1 = (right * scan.scale).toInt().coerceAtMost(image.width - 1)
+        val clearance = maxOf(2, (em * scan.scale * 0.18f).toInt())
+        val minRun = maxOf(em * 4, (right - left) * 0.12f) * scan.scale
+        val y0 = (top * scan.scale).toInt().coerceAtLeast(clearance)
+        val y1 = (bottom * scan.scale).toInt().coerceAtMost(image.height - 1 - clearance)
+        for (y in y0..y1) {
+            var run = 0
+            for (x in x0..x1 step step) {
+                if (scan.ink(image, x, y) && !scan.ink(image, x, y - clearance) && !scan.ink(image, x, y + clearance)) {
+                    run += step
+                    if (run >= minRun) return true
+                } else run = 0
+            }
+        }
+        return false
+    }
+
+    /** A smaller printed block at the end of this reading column needs its own
+     * separator or repeated, aligned hanging marks before it can be classified as a note. */
+    private fun printedFooter(rows: List<List<Word>>, scan: ScanPage, marked: Set<Word>): List<Word> {
+        val lines = rows.filter { row ->
+            row.any { w -> w.text.any(Char::isLetter) } && !(row.size == 1 && folio.matches(row.first().text))
+        }
+        if (lines.size < 6) return emptyList()
+        fun advance(row: List<Word>) = row.sumOf { (it.right - it.x).toDouble() } / row.sumOf { it.text.length }
+        val upper = lines.take(lines.size / 2)
+        val sampleSize = minOf(5, upper.size)
+        val sample = (0 until sampleSize).map { upper[it * upper.lastIndex / (sampleSize - 1)] }
+        val normalWidth = sample.map(::advance).sorted()[sample.size / 2]
+        val em = sample.map { it[it.size / 2].pointSize }.sorted()[sample.size / 2]
+        // Word advances survive horizontal fitting even if every OCR word reports one em.
+        // This cheap prefilter never labels a line. The bitmap must confirm smaller print.
+        if (lines.takeLast(2).none { advance(it) < normalWidth * 0.94 || it[it.size / 2].pointSize < em * 0.93f }) return emptyList()
+        val image = scan.bitmap ?: return emptyList()
+        val body = sample.mapNotNull { printedHeight(it, scan, image) }.sorted()
+        if (body.size < 3) return emptyList()
+        val bodyInk = body[body.size / 2]
+        var start = lines.size
+        while (start > 0) {
+            val row = lines[start - 1]
+            if (row.zipWithNext().any { (a, b) -> b.x - a.right > em * 2 }) break
+            val height = printedHeight(row, scan, image) ?: break
+            if (height >= bodyInk * 0.88f) break
+            start--
+        }
+        if (start == 0 || start > lines.size - 2) return emptyList()
+        if ((start until lines.size).all { i -> lines[i].all { it in marked } }) return emptyList()
+        val markers = (start until lines.size).filter { printedNoteMarker(lines[it], scan, image, em) }
+        for (i in start until lines.lastIndex) {
+            val row = lines[i]
+            val next = lines[i + 1]
+            val y = row[row.size / 2].y
+            val prior = lines[i - 1]
+            val top = maxOf(prior[prior.size / 2].y + em * 0.30f, y - em * 6)
+            val left = minOf(row.first().x, next.first().x)
+            val right = maxOf(row.last().right, next.last().right)
+            val ruled = printedRule(scan, image, left, right, top, y - bodyInk * 1.1f, em)
+            val repeatedMark = i in markers && markers.any { j ->
+                val other = lines[j]
+                j > i && abs(other[0].x - row[0].x) < em * 0.5f &&
+                    abs(other[1].x - row[1].x) < em * 0.5f
+            }
+            if (ruled || repeatedMark) return lines.subList(i, lines.size).flatten()
+        }
+        return emptyList()
+    }
+
+    private fun printedNoteMarker(row: List<Word>, scan: ScanPage, image: BookBitmap, em: Float): Boolean {
+        if (row.size < 2) return false
+        val mark = row[0]
+        val word = row[1]
+        if (mark.text.length > 3 || word.x - mark.right !in -1f..em || mark.right - mark.x > em * 1.5f) return false
+        if (word.y - mark.y in (em * 0.10f)..(em * 0.8f)) return true
+        // Some OCR layers put a superscript on the prose baseline and even read it
+        // as a letter. Check that the mark is printed above a clear baseline strip.
+        val xs = (mark.x * scan.scale).toInt().coerceAtLeast(0)..
+            (mark.right * scan.scale).toInt().coerceAtMost(image.width - 1)
+        val baseline = (word.y * scan.scale).toInt()
+        val top = ((word.y - em) * scan.scale).toInt()
+        if (top < 0 || baseline >= image.height) return false
+        val lower = maxOf(top, baseline - maxOf(1, (em * 0.13f * scan.scale).toInt()))
+        fun hasInk(y: Int) = xs.any { x -> scan.ink(image, x, y) }
+        return (lower..baseline).none(::hasInk) && (top until lower).any(::hasInk)
+    }
+
     /** Consult the visible scan only for ambiguous punctuation next to a potential sentence
      * break. Keep the stored quote verbatim. The raster supplies boundary evidence, not text.
      */
-    private fun scanPunctuation(pdf: BookPdfDocument, page: Int, rows: List<Row>): Map<Word, ScanMark> {
+    private fun scanPunctuation(scan: ScanPage, rows: List<Row>): Map<Word, ScanMark> {
         val ambiguous = rows.flatMap { row -> row.words.zipWithNext().filter { (word, next) ->
             val gap = next.x - word.right
             word.text.length >= 2 && (word.text.last() in "’'*," && next.text.first().isUpperCase() &&
                 gap in word.pointSize * 0.8f..word.pointSize * 2f ||
                 word.text.last() in "!?" && next.text.first().isLowerCase() && gap < word.pointSize)
         } }
-        if (ambiguous.isEmpty()) return emptyMap()
-        val pdfPage = pdf.getPage(page - 1)
-        val box = pdfPage.cropBox
-        if (pdfPage.rotation != 0 || box.width <= 0 || box.height <= 0) return emptyMap()
-        val scale = minOf(4f, 3000f / maxOf(box.width, box.height))
-        val bitmap = try {
-            newBookPdfRenderer(pdf).renderImage(page - 1, scale)
-        } catch (_: java.io.IOException) {
-            return emptyMap()
-        } catch (_: IllegalArgumentException) {
-            return emptyMap()
-        }
-        try {
-            fun ink(x: Int, y: Int): Boolean {
-                val rgb = bookBitmapPixel(bitmap, x, y)
-                return ((rgb shr 16 and 255) + (rgb shr 8 and 255) + (rgb and 255)) < 3 * 140
-            }
-            return buildMap {
-                for ((w, _) in ambiguous) {
-                    val em = w.pointSize * scale
-                    if (em !in 14f..160f) continue
-                    val right = w.right * scale
-                    val baseline = w.y * scale
-                    if (right !in 0f..bitmap.width.toFloat() || baseline !in 0f..bitmap.height.toFloat()) continue
-                    val x0 = (right - em * 0.42f).toInt().coerceAtLeast(0)
-                    val x1 = (right + em * 0.14f).toInt().coerceAtMost(bitmap.width - 1)
-                    val top = (baseline - em * 0.26f).toInt().coerceAtLeast(0)
-                    val bottom = (baseline + em * 0.18f).toInt().coerceAtMost(bitmap.height - 1)
-                    val occupied = (x0..x1).filter { x -> (top..bottom).any { y -> ink(x, y) } }
-                    if (w.text.last() in "!?") {
-                        val high = (baseline - em * 0.78f).toInt().coerceAtLeast(0)
-                        val tip = (right - em * 0.18f).toInt().coerceAtLeast(x0)..x1
-                        val low = (baseline - em * 0.17f).toInt().coerceAtLeast(top)
-                        if (tip.none { x -> (low..bottom).any { y -> ink(x, y) } } &&
-                            tip.any { x -> (high until top).any { y -> ink(x, y) } }) put(w, ScanMark.RAISED_CALLOUT)
-                        continue
-                    }
-                    val last = occupied.lastOrNull() ?: continue
-                    val first = occupied.zipWithNext().lastOrNull { (a, b) -> b - a > 1 }?.second ?: occupied.first()
-                    if (first <= x0 || last >= x1) continue
-                    val ys = (top..bottom).filter { y -> (first..last).any { x -> ink(x, y) } }
-                    val width = last - first + 1
-                    val height = ys.last() - ys.first() + 1
-                    if (width.toFloat() in em * 0.06f..em * 0.28f && height.toFloat() in em * 0.06f..em * 0.29f &&
-                        width.toFloat() / height in 0.60f..1.6f && abs(ys.last() - baseline) < em * 0.15f) put(w, ScanMark.STOP)
+        if (ambiguous.isEmpty() || scan.rotation != 0) return emptyMap()
+        val scale = scan.scale
+        val bitmap = scan.bitmap ?: return emptyMap()
+        fun ink(x: Int, y: Int) = darkPixel(bitmap, x, y)
+        return buildMap {
+            for ((w, _) in ambiguous) {
+                val em = w.pointSize * scale
+                if (em !in 14f..160f) continue
+                val right = w.right * scale
+                val baseline = w.y * scale
+                if (right !in 0f..bitmap.width.toFloat() || baseline !in 0f..bitmap.height.toFloat()) continue
+                val x0 = (right - em * 0.42f).toInt().coerceAtLeast(0)
+                val x1 = (right + em * 0.14f).toInt().coerceAtMost(bitmap.width - 1)
+                val top = (baseline - em * 0.26f).toInt().coerceAtLeast(0)
+                val bottom = (baseline + em * 0.18f).toInt().coerceAtMost(bitmap.height - 1)
+                val occupied = (x0..x1).filter { x -> (top..bottom).any { y -> ink(x, y) } }
+                if (w.text.last() in "!?") {
+                    val high = (baseline - em * 0.78f).toInt().coerceAtLeast(0)
+                    val tip = (right - em * 0.18f).toInt().coerceAtLeast(x0)..x1
+                    val low = (baseline - em * 0.17f).toInt().coerceAtLeast(top)
+                    if (tip.none { x -> (low..bottom).any { y -> ink(x, y) } } &&
+                        tip.any { x -> (high until top).any { y -> ink(x, y) } }) put(w, ScanMark.RAISED_CALLOUT)
+                    continue
                 }
+                val last = occupied.lastOrNull() ?: continue
+                val first = occupied.zipWithNext().lastOrNull { (a, b) -> b - a > 1 }?.second ?: occupied.first()
+                if (first <= x0 || last >= x1) continue
+                val ys = (top..bottom).filter { y -> (first..last).any { x -> ink(x, y) } }
+                val width = last - first + 1
+                val height = ys.last() - ys.first() + 1
+                if (width.toFloat() in em * 0.06f..em * 0.28f && height.toFloat() in em * 0.06f..em * 0.29f &&
+                    width.toFloat() / height in 0.60f..1.6f && abs(ys.last() - baseline) < em * 0.15f) put(w, ScanMark.STOP)
             }
-        } finally { releaseBookBitmap(bitmap) }
+        }
     }
 
     private val noteLabel = Regex("""(?:\d{1,3}[.)]?|\[\d{1,3}]|[*†‡§])""")
@@ -1195,13 +1322,17 @@ internal object LiteraturePdfLayout {
             }
             else -> emptyList()
         }
-        val noteWords = rawSlices.groupBy { it.side }.values.flatMapTo(HashSet()) { slices ->
-            val members = slices.flatMapTo(HashSet()) { it.words }
-            val physical = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
-            columnNotes(physical, readingRules, scanLayer)
+        val scan = if (scanLayer) ScanPage(pdf, page, textDirection) else null
+        val noteWords = HashSet<Word>()
+        val punctuation = scan.use {
+            for (slices in rawSlices.groupBy { it.side }.values) {
+                val members = slices.flatMapTo(HashSet()) { it.words }
+                val physical = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
+                noteWords += columnNotes(physical, readingRules, scanLayer)
+                if (scan != null && scan.horizontal) noteWords += printedFooter(physical, scan, noteWords)
+            }
+            if (scan == null) emptyMap() else scanPunctuation(scan, rows)
         }
-
-        val punctuation = if (scanLayer) scanPunctuation(pdf, page, rows) else emptyMap()
         return rawSlices.mapNotNull { slice ->
             val stops = mutableSetOf<Int>()
             val callouts = mutableSetOf<Int>()

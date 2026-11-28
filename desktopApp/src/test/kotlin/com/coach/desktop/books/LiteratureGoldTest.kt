@@ -199,6 +199,8 @@ class LiteratureGoldTest {
         rotate180: Boolean = false,
         includeBottomCaption: Boolean = false,
         includeMidPageQuote: Boolean = false,
+        includeBottomQuoteAboveNotes: Boolean = false,
+        lastBodyLineShortLowercase: Boolean = false,
         singleFootnote: Boolean = false,
     ) {
         val pageW = 420f
@@ -282,9 +284,45 @@ class LiteratureGoldTest {
                     y += 11.4f
                 }
             } else {
-                for (i in 15..22) {
+                for (i in 15..21) {
                     bodyRow(y, "Later observers compared ledger record $i against surviving museum inventories.")
                     y += 11.4f
+                }
+                if (lastBodyLineShortLowercase) {
+                    // Normal-width body line whose words lack ascenders (short measured ink height)
+                    // and whose first word is a short lowercase word aligned with note markers below,
+                    // even with a slight upward OCR baseline jitter on that first word.
+                    bodyRow(y, "Later observers compared ledger record 22 against surviving museum inventories,")
+                    y += 11.4f
+                    val ws = mutableListOf<DrawWord>()
+                    val firstW = measureVisual(bodyFont, "in")
+                    ws += DrawWord(40f, firstW, 10.5f, "in")
+                    var x = 52f
+                    for (w in listOf("common", "rooms", "some", "more", "summer", "coins", "came", "soon.")) {
+                        val width = measureVisual(bodyFont, w)
+                        ws += DrawWord(x, width, 10.5f, w)
+                        x += width + 3.2f
+                    }
+                    drawLines += DrawLine(y, ws, bodyFont)
+                    y += 11.4f
+                } else {
+                    bodyRow(y, "Later observers compared ledger record 22 against surviving museum inventories.")
+                    y += 11.4f
+                }
+                if (includeBottomQuoteAboveNotes) {
+                    y += 12f
+                    for (i in 1..4) {
+                        var x = 52f
+                        val text = "Bottom extract line $i preserves an authentic primary source passage."
+                        val ws = text.split(' ').map { w ->
+                            val width = measureVisual(noteFont, w)
+                            val dw = DrawWord(x, width, 10.5f, w)
+                            x += width + 2.8f
+                            dw
+                        }
+                        drawLines += DrawLine(y, ws, noteFont)
+                        y += 10.0f
+                    }
                 }
             }
 
@@ -339,7 +377,13 @@ class LiteratureGoldTest {
                     for (dl in drawLines) {
                         for ((idx, dw) in dl.words.withIndex()) {
                             val isSup = dl.supFirst && idx == 0
-                            val wy = if (isSup) dl.y - 2.6f else dl.y
+                            // Simulate a 1.5pt OCR baseline jitter on a short lowercase first word of the last body line.
+                            val jitter = lastBodyLineShortLowercase && idx == 0 && dw.text == "in" && !dl.supFirst
+                            val wy = when {
+                                isSup -> dl.y - 2.6f
+                                jitter -> dl.y - 1.5f
+                                else -> dl.y
+                            }
                             val rawPdfW = pdfFont.getStringWidth(dw.text) / 1000f * dw.pt
                             val sx = if (rawPdfW > 0f) dw.pt * (dw.width / rawPdfW) else dw.pt
                             cs.beginText()
@@ -396,6 +440,32 @@ class LiteratureGoldTest {
             assertTrue(cands3.any { "specimen batch 5" in it }, "180-deg rotated body lost: $cands3")
             assertFalse(cands3.any { "Archive register" in it || "Catalog appendix" in it },
                 "180-deg rotated footnote leaked: $cands3")
+
+            // 4. Small-type bottom block quote directly above footnotes must stay body (gap breaks block).
+            val p4 = root.resolve("bottom-quote-above-notes.pdf")
+            buildTightScanPdf(
+                p4,
+                rotate180 = false,
+                includeBottomQuoteAboveNotes = true,
+                lastBodyLineShortLowercase = true,
+            )
+            val book4 = library.literatureBook(library.importBook(p4).id)
+            val cands4 = LiteraturePassages.extractCandidates(book4).map { it.anchor.quoteAnchor }
+            assertTrue(cands4.any { "summer coins came soon." in it }, "Body line before bottom quote lost: $cands4")
+            assertTrue(cands4.any { "Bottom extract line 2" in it }, "Bottom quote above footnotes lost: $cands4")
+            assertFalse(cands4.any { "Archive register" in it || "Catalog appendix" in it },
+                "Footnotes below bottom quote leaked: $cands4")
+
+            // 5. Last body line starting with a short lowercase word (even with low ink height & OCR y-jitter)
+            //    must never be treated as a footnote marker or dragged into the footnote block below the gap.
+            val p5 = root.resolve("short-lowercase-last-body.pdf")
+            buildTightScanPdf(p5, rotate180 = false, lastBodyLineShortLowercase = true)
+            val book5 = library.literatureBook(library.importBook(p5).id)
+            val cands5 = LiteraturePassages.extractCandidates(book5).map { it.anchor.quoteAnchor }
+            assertTrue(cands5.any { "summer coins came soon." in it },
+                "Last body line starting with lowercase word was falsely marked as footnote: $cands5")
+            assertFalse(cands5.any { "Archive register" in it || "Catalog appendix" in it },
+                "Footnotes leaked on lowercase-lead page: $cands5")
         } finally {
             root.toFile().deleteRecursively()
         }

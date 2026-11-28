@@ -1130,17 +1130,22 @@ internal object LiteraturePdfLayout {
             }
             return false
         }
+        fun isBodyWidth(k: Int) = advance(lines[k]) >= normalWidth * 0.97
         fun isSmallLine(k: Int): Boolean {
             if (hasWideBodyGutter(lines[k])) return false
             val h = lineInk(k)
             return if (h != null) h < bodyInk * 0.94f
                 else advance(lines[k]) < normalWidth * 0.94 || pointSize(lines[k]) < em * 0.93f
         }
+        // A line whose character advance matches body width cannot open a footnote block
+        // even if its ink height measured slightly short (e.g. few ascenders or light scan).
+        fun canStartSmallBlock(k: Int): Boolean = !isBodyWidth(k) && isSmallLine(k)
         fun continuesSmallBlock(k: Int): Boolean {
             if (hasWideBodyGutter(lines[k])) return false
             val dy = baseline(lines[k]) - baseline(lines[k - 1])
-            val gapBreak = bodyPitch != null && dy >= bodyPitch * 1.45f
-            if (gapBreak) return isSmallLine(k)
+            // Never bridge a vertical break (>= 1.45x body pitch): evaluate lines above and below
+            // the gap independently so prose or a quote above the gap cannot inherit note marks below.
+            if (bodyPitch != null && dy >= bodyPitch * 1.45f) return false
             if (isSmallLine(k)) return true
             // Allow 1-pixel baseline quantization jitter on an interior line when leading and width stay compact.
             val h = lineInk(k)
@@ -1152,7 +1157,7 @@ internal object LiteraturePdfLayout {
         val result = mutableListOf<Word>()
         var cursor = lowerStart
         while (cursor < lines.size) {
-            if (!isSmallLine(cursor)) {
+            if (!canStartSmallBlock(cursor)) {
                 cursor++
                 continue
             }
@@ -1183,7 +1188,19 @@ internal object LiteraturePdfLayout {
                         abs(other[1].x - row[1].x) < em * 0.5f
                 }
             }
+            // OCR occasionally places a note's superscript marker on its own 1-word baseline right above the note text.
+            fun isStandaloneRaisedMarker(idx: Int): Boolean {
+                if (idx >= blockEnd) return false
+                val row = lines[idx]
+                if (row.size != 1) return false
+                val mark = row[0]
+                val nextFirst = lines[idx + 1][0]
+                if (mark.text.length > 3 || mark.text.all(Char::isLowerCase)) return false
+                return nextFirst.x - mark.right in -1f..em && mark.right - mark.x <= em * 1.5f &&
+                    nextFirst.y - mark.y in (em * 0.10f)..(em * 0.8f) && mark.pointSize < nextFirst.pointSize * 0.85f
+            }
             for (i in blockStart until blockEnd) {
+                if (isBodyWidth(i)) continue
                 val row = lines[i]
                 val next = lines[i + 1]
                 val y = baseline(row)
@@ -1199,7 +1216,8 @@ internal object LiteraturePdfLayout {
                     (i == blockStart && i + 1 in markers && hasAlignedPartner(i + 1) &&
                         bodyPitch != null && gapAbove >= bodyPitch * 1.45f &&
                         abs(row[0].x - lines[i + 1][1].x) < em * 0.5f)
-                val singleFooterNote = i == blockStart && i in markers && i >= lines.size / 2 &&
+                val singleFooterNote = i == blockStart && (i in markers || isStandaloneRaisedMarker(i)) &&
+                    i >= lines.size / 2 &&
                     blockEnd == lines.lastIndex &&
                     bodyPitch != null && gapAbove >= bodyPitch * 1.45f &&
                     abs(row[0].x - colLeft) <= em * 1.5f &&
@@ -1224,17 +1242,32 @@ internal object LiteraturePdfLayout {
         val mark = row[0]
         val word = row[1]
         if (mark.text.length > 3 || word.x - mark.right !in -1f..em || mark.right - mark.x > em * 1.5f) return false
-        if (word.y - mark.y in (em * 0.10f)..(em * 0.8f)) return true
-        // Some OCR layers put a superscript on the prose baseline and even read it
-        // as a letter. Check that the mark is printed above a clear baseline strip.
-        val xs = (mark.x * scan.scale).toInt().coerceAtLeast(0)..
+        // Ordinary short lowercase words at line start ("to", "in", "of", "the", "a") are prose, not note markers.
+        if (mark.text.all(Char::isLowerCase)) return false
+        // Measure the printed ink baseline of the following word so a slightly shifted OCR baseline
+        // cannot make a normal baseline word look raised.
+        val mxs = (mark.x * scan.scale).toInt().coerceAtLeast(0)..
             (mark.right * scan.scale).toInt().coerceAtMost(scan.readingWidth(image) - 1)
         val baseline = (word.y * scan.scale).toInt()
         val top = ((word.y - em) * scan.scale).toInt()
-        if (top < 0 || baseline >= scan.readingHeight(image)) return false
-        val lower = maxOf(top, baseline - maxOf(1, (em * 0.13f * scan.scale).toInt()))
-        fun hasInk(y: Int) = xs.any { x -> scan.ink(image, x, y) }
-        return (lower..baseline).none(::hasInk) && (top until lower).any(::hasInk)
+        if (top < 0 || baseline >= scan.readingHeight(image) || mxs.isEmpty()) return false
+        val wxs = (word.x * scan.scale).toInt().coerceAtLeast(0)..
+            (word.right * scan.scale).toInt().coerceAtMost(scan.readingWidth(image) - 1)
+        val baseLo = maxOf(top, baseline - (em * 0.25f * scan.scale).toInt())
+        val baseHi = minOf(scan.readingHeight(image) - 1, baseline + (em * 0.15f * scan.scale).toInt())
+        val wordBase = if (!wxs.isEmpty()) {
+            val wStep = maxOf(1, (wxs.last - wxs.first) / 24)
+            (baseLo..baseHi).lastOrNull { y -> (wxs.first..wxs.last step wStep).any { x -> scan.ink(image, x, y) } }
+                ?: baseline
+        } else baseline
+        val refBase = minOf(baseline, wordBase)
+        val lower = maxOf(top, refBase - maxOf(1, (em * 0.16f * scan.scale).toInt()))
+        fun hasInk(y: Int) = mxs.any { x -> scan.ink(image, x, y) }
+        val visuallyRaised = (lower..refBase).none(::hasInk) && (top until lower).any(::hasInk)
+        if (word.y - mark.y in (em * 0.10f)..(em * 0.8f)) {
+            return mark.pointSize < word.pointSize * 0.85f || visuallyRaised
+        }
+        return visuallyRaised
     }
 
     /** Consult the visible scan only for ambiguous punctuation next to a potential sentence

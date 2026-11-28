@@ -624,8 +624,7 @@ function Find-Step2ReaderBack($lines, [int]$winW, [int]$winH = 0) {
         if ($m.Y -gt $maxY) { continue }
         if ($banner -and $m.Y -le $banner.Y1) { continue }
         $compact = ($l.Text -replace '\s', '')
-        $isToolbarLabel = ($compact -match '^(?:[←<+\-·•]*)?书架$') -or ($compact -match '书架.*(?:目录|伴读|收起)')
-        if (-not $isToolbarLabel) { continue }
+        if ($compact -notmatch '^[\p{P}\p{S}]{0,3}书架(?:.*(?:目录|伴读|收起))?$') { continue }
         $cands += $m
     }
     if (-not $cands.Count) { return $null }

@@ -180,12 +180,22 @@ internal object BookPdfLoader {
         extract: (BookPdfDocument) -> P,
         commitAndTarget: (P) -> Pair<File?, R>,
     ): R {
-        val doc = loadFast(stageFile)
+        val inMemory = stageFile.isFile && stageFile.length() in 1L..IN_MEMORY_PDF_LIMIT
+        val doc = if (inMemory) {
+            Loader.loadPDF(Files.readAllBytes(stageFile.toPath()))
+        } else {
+            Loader.loadPDF(stageFile, mixedMemory)
+        }
         var transferred = false
         try {
             val payload = extract(doc)
+            if (!inMemory) {
+                // File-backed RandomAccessReadBufferedFile keeps stageFile's Path for per-thread rafCopies;
+                // close it before moving stageFile so no handle is held and docCache never points at a moved path.
+                runCatching { doc.close() }
+            }
             val (target, result) = commitAndTarget(payload)
-            if (target != null && target.isFile) {
+            if (inMemory && target != null && target.isFile) {
                 seedCache(target, doc)
                 transferred = true
             }

@@ -3354,7 +3354,7 @@ internal class TextbookLibrary(
             book = book,
             expectedChapterId = chapterId,
             candidates = listOf(ConceptQuoteCandidate(section.title, pageNo, quote, scoreRatio = score)),
-            kind = if (mode == QuestionMode.CHOICE) ConceptAnswerKind.MCQ else ConceptAnswerKind.RUBRIC,
+            kind = ConceptMasteryMap.kindForLesson(section, mode),
             signal = LearnerSignalType.POST_QUIZ_T1,
             guessed = answer.guessed,
             questionId = "${section.id}:${mode.name}",

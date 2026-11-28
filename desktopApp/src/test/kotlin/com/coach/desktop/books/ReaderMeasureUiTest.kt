@@ -17,6 +17,7 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 internal fun ComposeUiTest.openReaderTypeSettings() {
     if (onAllNodesWithTag("v7-type-menu").fetchSemanticsNodes().isEmpty()) {
+        revealReaderHud()
         onNodeWithTag("immersive-more-menu").performSemanticsAction(SemanticsActions.OnClick)
     }
     onNodeWithTag("v7-type-menu").performSemanticsAction(SemanticsActions.OnClick)

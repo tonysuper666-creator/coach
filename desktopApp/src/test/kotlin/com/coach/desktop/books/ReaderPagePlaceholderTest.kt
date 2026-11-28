@@ -1,5 +1,6 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.test.*
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -86,6 +87,7 @@ class ReaderPagePlaceholderTest {
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
             onNodeWithTag("home-read").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            openOriginalPage()
             waitUntil(timeoutMillis = 20_000) {
                 runCatching { onNodeWithTag("remote-image").fetchSemanticsNode() }.isSuccess
             }
@@ -102,10 +104,12 @@ class ReaderPagePlaceholderTest {
         library.importBook(file)
         val controller = TextbookController(library)
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            setContent { Box(SinglePageReaderWindow) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
             onNodeWithTag("home-read").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            openOriginalPage()
+            revealReaderHud()
             // 从竖页翻到横页：纸得是这一页的，不是上一页留下来的那张。
             waitUntil(timeoutMillis = 20_000) {
                 runCatching { onNodeWithTag("next-page").assertIsEnabled() }.isSuccess
@@ -120,6 +124,12 @@ class ReaderPagePlaceholderTest {
             assertTrue(aspect > 1f, "第 2 页是横页，应该铺横纸，实际 $aspect")
             assertEquals(842f / 595f, aspect, 0.01f)
         }
+    }
+
+    private fun ComposeUiTest.openOriginalPage() {
+        revealReaderHud()
+        onNodeWithTag("immersive-more-menu").performClick()
+        onNodeWithTag("view-mode-original").performClick()
     }
 
     /** 一本两页的书：第 1 页 A4 竖的，第 2 页 842x595 横的。 */

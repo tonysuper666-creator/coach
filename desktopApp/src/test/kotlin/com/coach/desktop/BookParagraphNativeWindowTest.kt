@@ -53,6 +53,7 @@ class BookParagraphNativeWindowTest {
                 pdf.save(file.toFile())
             }
             val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+            BookHudPreferenceStore(controller.library.directory).setPinned(true)
             runBlocking {
                 controller.importBook(file)
                 controller.chooseLearningPath(LearningPath.READ)

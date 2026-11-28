@@ -273,6 +273,7 @@ class Ton1848CompanionFixesTest {
                 waitUntil(timeoutMillis = 10_000) { visibleRanges().any { start in it.startUtf16 until it.endUtf16 } }
                 assertTrue(visibleRanges().none { old.start in it.startUtf16 until it.endUtf16 })
                 assertTrue(selectScreenExplainBlocks(book, page.number, visibleRanges = emptyList()).isEmpty())
+                revealReaderHud()
                 onNodeWithTag("immersive-companion-toggle").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("explain-text").fetchSemanticsNodes().isNotEmpty() }
                 waitForIdle()

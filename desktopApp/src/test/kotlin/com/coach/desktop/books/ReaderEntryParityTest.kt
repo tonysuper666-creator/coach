@@ -45,6 +45,7 @@ class ReaderEntryParityTest {
                 setContent { TextbookWorkspace(controller) { null } }
                 waitUntil(timeoutMillis = 20_000) { onAllNodesWithContentDescription("mixed 第 1 页").fetchSemanticsNodes().isNotEmpty() }
                 onAllNodesWithTag("reader-text").assertCountEquals(0)
+                revealReaderHud()
                 onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("view-mode-text").assertExists()
             }

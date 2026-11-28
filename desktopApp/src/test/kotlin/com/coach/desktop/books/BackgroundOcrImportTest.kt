@@ -259,6 +259,7 @@ class BackgroundOcrImportTest {
                     // Verify page 1 is already recognized, readable, and explainable while later pages remain pending!
                     assertFalse(controller.state.value.busy)
                     assertEquals(false, controller.state.value.book!!.page(1)!!.ocrPending)
+                    revealReaderHud()
                     onNodeWithTag("immersive-companion-toggle").performClick()
                     waitUntil(timeoutMillis = 5_000) {
                         onAllNodesWithTag("companion-tab-explain").fetchSemanticsNodes().isNotEmpty()
@@ -278,6 +279,7 @@ class BackgroundOcrImportTest {
                     shot("reader-ocr-pending-light")
 
                     // 2. Return to shelf during OCR — response time must be well under 1 second!
+                    revealReaderHud()
                     val backStart = System.nanoTime()
                     onNodeWithTag("immersive-back").performClick()
                     waitUntil(timeoutMillis = 1_000) { controller.state.value.screen == BookScreen.HOME }

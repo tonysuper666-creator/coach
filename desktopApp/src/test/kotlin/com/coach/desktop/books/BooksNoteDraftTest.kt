@@ -38,6 +38,7 @@ class BooksNoteDraftTest {
     private fun ComposeUiTest.notes() {
         // 2.0（TON-1784）：批注在伴读面板的「批注」页签里，不再有单独的批注开关。
         if (onAllNodesWithTag("companion-tab-notes").fetchSemanticsNodes().isEmpty()) {
+            revealReaderHud()
             onNodeWithTag("immersive-companion-toggle").performClick()
         }
         waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("companion-tab-notes").fetchSemanticsNodes().isNotEmpty() }

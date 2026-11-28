@@ -20,6 +20,7 @@ class ParagraphPageAnchorTest {
             val library = TextbookLibrary(root.resolve("library"))
             val book = library.importBook(input)
             library.save(book.copy(promptSeen = true))
+            BookHudPreferenceStore(library.directory).setPinned(true)
             // Exercise the page-scoped explanation. Read-through can legitimately explain the whole section.
             StudyModeStore.save(library, BookStudyPreference(book.id, BookStudyMode.BOOK_MAP))
             val controller = TextbookController(library)

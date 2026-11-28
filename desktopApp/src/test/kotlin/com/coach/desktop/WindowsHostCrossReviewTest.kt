@@ -18,6 +18,7 @@ class WindowsHostCrossReviewTest {
     private fun fixture(): Fixture {
         val root = Files.createTempDirectory("coach-pr188-cross-review-")
         val library = TextbookLibrary(root.resolve("library"))
+        BookHudPreferenceStore(library.directory).setPinned(true)
         fun book(name: String, page: Int, lesson: Int, draft: String): Textbook {
             val source = root.resolve("$name.txt")
             Files.writeString(source, (1..3).joinToString("\u000c") {

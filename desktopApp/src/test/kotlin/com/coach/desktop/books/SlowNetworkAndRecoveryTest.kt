@@ -579,6 +579,7 @@ class SlowNetworkAndRecoveryTest {
                 assertTrue(explainCalls.get() > explainsBefore)
 
                 // Return to Home and confirm top-bar offline badge also disappeared automatically.
+                revealReaderHud()
                 onNodeWithTag("immersive-back").performClick()
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.HOME }
                 onAllNodesWithTag("host-offline-badge").assertCountEquals(0)

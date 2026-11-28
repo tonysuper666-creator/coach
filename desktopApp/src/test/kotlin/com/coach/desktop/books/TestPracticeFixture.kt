@@ -3,13 +3,17 @@ package com.coach.desktop.books
 import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -57,6 +61,25 @@ internal fun testPracticeFixture(book: Textbook, lesson: BookLesson, mode: Quest
  */
 internal val SinglePageReaderWindow = Modifier.size(600.dp, 760.dp)
 
+@OptIn(ExperimentalTestApi::class)
+internal fun ComposeUiTest.revealReaderHud() {
+    val hud = onAllNodesWithTag("immersive-top-hud")
+    if (hud.fetchSemanticsNodes().isNotEmpty()) return
+    onNodeWithTag("textbook-reader").performKeyInput { pressKey(Key.Tab) }
+    waitForIdle()
+    if (hud.fetchSemanticsNodes().isEmpty()) {
+        if (onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty()) {
+            onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+            onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+            waitForIdle()
+        }
+        if (hud.fetchSemanticsNodes().isEmpty()) {
+            onNodeWithTag("textbook-reader").performMouseInput { click(center) }
+        }
+        waitUntil(timeoutMillis = 5_000) { hud.fetchSemanticsNodes().isNotEmpty() }
+    }
+}
+
 /**
  * 2.0 沉浸阅读器的「下一页 / 上一页」按屏翻：一张导入页可能要翻好几屏。
  * 旧测试按「点一次 = 换一张导入页」写；这里按当前规格点到目标状态为止，次数有上限。
@@ -72,6 +95,7 @@ internal fun ComposeUiTest.turnUntil(
     repeat(maxTurns) {
         waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy }
         if (done(controller.state.value)) return
+        revealReaderHud()
         onNodeWithTag(tag).click()
         waitForIdle()
     }
@@ -111,6 +135,7 @@ internal fun generatedChoiceBlock(lesson: BookLesson): SourceBlock =
 @OptIn(ExperimentalTestApi::class)
 internal fun ComposeUiTest.jumpToPage(controller: TextbookController, page: Int) {
     waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy }
+    revealReaderHud()
     onNodeWithTag("reader-page-number").performClick()
     waitUntil(timeoutMillis = 5_000) { onAllNodesWithTag("page-jump").fetchSemanticsNodes().isNotEmpty() }
     onNodeWithTag("page-jump").performTextReplacement(page.toString())

@@ -100,6 +100,7 @@ class WindowsLegacyStartLabelTest {
         val root = Files.createTempDirectory("coach-chosen-walk-label-")
         val directory = root.resolve("library")
         val library = TextbookLibrary(directory)
+        BookHudPreferenceStore(directory).setPinned(true)
         val seed = TextbookController(library)
 
         seed.importBook(learningPathTextbook(root, "Synthetic read shelf"))

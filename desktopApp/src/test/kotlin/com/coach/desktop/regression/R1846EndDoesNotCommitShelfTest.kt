@@ -20,6 +20,7 @@ import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.WindowsTextbookHost
 import com.coach.desktop.books.BookScreen
+import com.coach.desktop.books.BookHudPreferenceStore
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import java.nio.file.Files
@@ -53,6 +54,7 @@ class R1846EndDoesNotCommitShelfTest {
             val pdf = root.resolve("field-guide.pdf")
             writePdf(pdf, totalPages)
             val library = TextbookLibrary(root.resolve("library"), lazyPdfExtras = false)
+            BookHudPreferenceStore(library.directory).setPinned(true)
             val imported = library.importBook(pdf)
             val startPage = 4
             assertEquals(startPage, imported.readingPage, "import should open at chapter 1")

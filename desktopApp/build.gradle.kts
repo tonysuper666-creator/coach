@@ -154,6 +154,13 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 tasks.test {
+    if (System.getProperty("os.name").startsWith("Windows")) {
+        // Release accumulated reader rendering and window state between batches.
+        // Native window tests share the desktop, so run one batch at a time.
+        maxParallelForks = 1
+        forkEvery = 16
+    }
+
     // 测试不借用这台机器上的配对：默认讲解器读 user.home 下的 Coach/client，开发机上有真实配对时，
     // 合成教材会被送去 Coach 服务分节、改写章节标题（结果随 AI 变、还花真实额度）。
     // 普通测试一律放进构建目录里的空 home；显式打开的真机 / 真服务验收保持原样。

@@ -35,6 +35,7 @@ import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.WorkspaceBusyBar
 import com.coach.desktop.books.classifyShellError
+import com.coach.desktop.books.revealReaderHud
 import com.coach.desktop.books.shellErrorMessage
 import com.coach.desktop.books.exam.LocalExamController
 import com.coach.desktop.books.exam.LocalExamUi
@@ -453,6 +454,7 @@ class WindowShellPolishTest {
                 assertTrue(onAllNodesWithTag("book-error").fetchSemanticsNodes().isEmpty())
 
                 // 2. Non-recoverable import failure -> V7 zhu alert, no retry button, and immediate release
+                revealReaderHud()
                 onNodeWithTag("immersive-back").performClick()
                 waitUntil(timeoutMillis = 10_000) {
                     !controller.state.value.busy && controller.state.value.screen == BookScreen.HOME

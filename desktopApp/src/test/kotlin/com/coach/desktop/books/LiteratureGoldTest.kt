@@ -9,6 +9,21 @@ import kotlin.test.assertTrue
 class LiteratureGoldTest {
     private data class Label(val page: Int, val role: String, val sentence: String)
 
+    @Test fun quoteCropCoversTheVisibleLineOnBothCroppedScans() {
+        val path = Path.of(checkNotNull(javaClass.getResource("/literature-gold/offset-crop.pdf")).toURI())
+        org.apache.pdfbox.Loader.loadPDF(path.toFile()).use { pdf ->
+            for (page in 1..2) {
+                val rect = kotlin.test.assertNotNull(LiteraturePdfLayout.locateQuoteCropRect(
+                    pdf, page, "The engineers marked the highest level on the bridge."
+                ), "Missing quote crop on page $page")
+                // Both facsimiles display this line at x=24, baseline y=440 in a 420 × 604 crop.
+                assertTrue(rect.left <= 24f / 420 && rect.right >= 270f / 420, "Page $page: $rect")
+                assertTrue(rect.top in (402f / 604)..(432f / 604) &&
+                    rect.bottom in (440f / 604)..(458f / 604), "Page $page: $rect")
+            }
+        }
+    }
+
     @Test fun forcedCitationsToBothPdfFootersFailBeforeOcr() {
         val root = Files.createTempDirectory("literature-footer")
         try {

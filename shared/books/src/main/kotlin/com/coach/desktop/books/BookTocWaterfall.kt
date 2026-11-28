@@ -1548,7 +1548,10 @@ internal object BookTocWaterfall {
                     val active = currentGroup
                     val activeNode = active?.tocNodeId?.let(nodeById::get)
                     if (activeNode != null && block.page > activeNode.endPage) {
-                        val nextNode = bodyNodes.drop(currentNodeIdx + 1).firstOrNull { block.page in it.startPage..it.endPage }
+                        val nextNode = bodyNodes.drop(currentNodeIdx + 1).firstOrNull {
+                            block.page in it.startPage..it.endPage &&
+                                (!it.usesSourceOffset || block.page > it.startPage || block.start >= it.startOffset)
+                        }
                         if (nextNode != null && nextNode.id !in consumedNodes) {
                             currentNodeIdx = bodyNodes.indexOf(nextNode)
                             activateNode(nextNode)

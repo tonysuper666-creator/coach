@@ -238,4 +238,44 @@ class BookTocWaterfallTest {
         assertEquals(2, applied.tocNodes.size)
         assertEquals(HeadingSource.MODEL_HAIKU.name, applied.source)
     }
+
+    @Test
+    fun midPageSourceOffsetChapterDoesNotActivateBeforeStartOffsetInWaterfall() {
+        val page1 = BookPage(
+            1,
+            "第一章 管晏\n" +
+                "管仲夷吾者潁上人也少時常與鮑叔牙遊。\n\n" +
+                "太史公曰管仲世所謂賢臣然孔子小之。",
+        )
+        val ch2StartText = "第二章 老子韓非\n老子者楚苦縣厲鄉曲仁里人也。\n\n韓非者韓之諸公子也喜刑名法術之學。\n\n凡說之難非吾知之有以說之之難也。"
+        val ch1ContText = "管仲既任政相齊以區區之齊在海濱通貨積財富國彊兵。\n\n鮑叔終善遇之不以為言天下不多管仲之賢而多鮑叔能知人也。\n\n"
+        val page2Text = ch1ContText + ch2StartText
+        val ch2Offset = page2Text.indexOf("第二章 老子韓非")
+        val pages = listOf(page1, BookPage(2, page2Text))
+        val outline = listOf(
+            BookOutlineItem("第一章 管晏", level = 1, page = 1, source = HeadingSource.EPUB_TOC, startOffset = 0),
+            BookOutlineItem("第二章 老子韓非", level = 1, page = 2, source = HeadingSource.EPUB_TOC, startOffset = ch2Offset),
+        )
+        val structure = BookStructurePlanner.plan(bookId, "合卷测试", "epub", pages, outline)
+        val book = Textbook(
+            id = bookId,
+            title = "合卷测试",
+            format = "epub",
+            pages = pages,
+            readingPage = 1,
+            lessonIndex = 0,
+            learning = false,
+            promptSeen = false,
+            questionMode = QuestionMode.CHOICE,
+            structure = structure,
+        )
+        val targetOffset = page2Text.indexOf("凡說之難")
+        assertEquals("第二章 老子韓非", BookChapterResolver.chapterForPage(book, 2, targetOffset)?.title)
+        assertEquals("第一章 管晏", BookChapterResolver.chapterForPage(book, 2, 0)?.title)
+        val secIdx = book.lessons.indexOfFirst { l -> l.blocks.any { it.page == 2 && targetOffset in it.start until it.end } }
+        assertTrue(secIdx >= 0)
+        assertEquals("第二章 老子韓非", BookChapterResolver.chapterForLesson(book, secIdx)?.title)
+        assertEquals("第二章 老子韓非", ChapterCompanionGrouping.groupForSection(book, secIdx)?.chapterTitle)
+        assertTrue(book.chapterSpans.first { it.title == "第二章 老子韓非" }.sectionIndices.isNotEmpty())
+    }
 }

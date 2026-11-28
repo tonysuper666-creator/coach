@@ -115,7 +115,30 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     private companion object {
         /** 原文页、答后讲解、选段提问各有一个 explainer；谁先碰到 401，其他的读到同一份凭据时也算停用。 */
         val stopped: MutableSet<Triple<String, String, String>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        val importSyncLocks: java.util.concurrent.ConcurrentHashMap<Pair<String, String>, Mutex> =
+            java.util.concurrent.ConcurrentHashMap()
         fun DesktopIdentity.key() = Triple(serverUrl, credentials.deviceId, credentials.token)
+    }
+
+    private suspend fun ensurePersonalImportSynced(
+        paired: DesktopIdentity,
+        snapshot: JsonObject,
+        http: CourseHttp,
+    ) {
+        val lib = library ?: return
+        val bookId = snapshot["book"]?.jsonPrimitive?.contentOrNull?.takeIf { Regex("[0-9a-f]{64}").matches(it) } ?: return
+        val serverKey = "${paired.serverUrl}|${paired.credentials.deviceId}"
+        val mutex = importSyncLocks.computeIfAbsent(serverKey to bookId) { Mutex() }
+        mutex.withLock {
+            val (digest, synced) = withContext(Dispatchers.IO) {
+                lib.localPagesDigest(bookId) to lib.syncedPersonalImportDigest(serverKey, bookId)
+            }
+            if (digest != null && digest != synced) {
+                if (http.resetPersonalImportBook(bookId)) {
+                    withContext(Dispatchers.IO) { lib.markPersonalImportSynced(serverKey, bookId, digest) }
+                }
+            }
+        }
     }
 
     open suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
@@ -248,6 +271,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             ) { timeoutMs ->
                 val http = newHttp(paired, timeoutMs)
                 try {
+                    if (snapshot != null) ensurePersonalImportSynced(paired, snapshot, http)
                     http.companionChapter(wire)
                 } finally {
                     http.close()
@@ -484,6 +508,7 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
                 val http = newHttp(paired, timeoutMs)
                 try {
                     withReaderRetry({ stillCurrent() }) {
+                        if (snapshot != null) ensurePersonalImportSynced(paired, snapshot, http)
                         if (progress == null) http.explainLibrary(wire) else http.explainLibrary(wire) { partial ->
                             if (!verifiedStream) {
                                 check(stillCurrent())

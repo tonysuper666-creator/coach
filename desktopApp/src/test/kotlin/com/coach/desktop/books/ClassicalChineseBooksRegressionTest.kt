@@ -346,6 +346,19 @@ class ClassicalChineseBooksRegressionTest {
             val shijiEpub = lib.importBook(corpusRoot.resolve("shiji/shiji.epub"))
             val shijiEpubChapters = shijiEpub.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
             assertTrue(shijiEpubChapters.size in 127..130, "史记 EPUB 应覆盖全部127独立卷/130篇，实际: ${shijiEpubChapters.size}")
+            val p92 = shijiEpub.page(92)?.text.orEmpty()
+            val hanFeiPos = p92.indexOf("凡說之難")
+            assertTrue(hanFeiPos > 0, "第92页应包含老子韓非列傳正文")
+            assertEquals("史記 老子韓非列傳", BookChapterResolver.chapterForPage(shijiEpub, 92, hanFeiPos)?.title)
+            assertEquals("史記 老子韓非列傳", BookBoundaries.effectiveChapterForFooter(shijiEpub, 92, hanFeiPos)?.title)
+            val secIdx92 = shijiEpub.lessons.indexOfFirst { l -> l.blocks.any { it.page == 92 && hanFeiPos in it.start until it.end } }
+            assertTrue(secIdx92 >= 0, "第92页目标段落应归属到切分小节")
+            assertEquals("史記 老子韓非列傳", BookChapterResolver.chapterForLesson(shijiEpub, secIdx92)?.title)
+            assertEquals("史記 老子韓非列傳", ChapterCompanionGrouping.groupForSection(shijiEpub, secIdx92)?.chapterTitle)
+            val laoSpan = shijiEpub.chapterSpans.firstOrNull { "老子韓非列傳" in it.title }
+            assertNotNull(laoSpan)
+            assertTrue(laoSpan.sectionIndices.isNotEmpty(), "老子韓非列傳应包含伴读小节")
+            assertEquals("史記 管晏列傳", BookChapterResolver.chapterForPage(shijiEpub, 92, 0)?.title)
             assertTrue(shijiEpubChapters.none { Regex("""（\d+/\d+）$""").containsMatchIn(it.title) })
             assertTrue(shijiEpubChapters.none { "GUTENBERG" in it.title.uppercase() })
             assertTrue("历史书" in ReadingMethodSelector.choose(ReadingMethodSignalsReader.fromBook(shijiEpub)).reason)

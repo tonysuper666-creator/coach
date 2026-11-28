@@ -623,6 +623,16 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         MockReply(null, "等待联网", retryable = true, code = "offline")
     }
 
+    /** Clears stale server-side personal import source snapshots after client re-import or parser upgrade. */
+    suspend fun resetPersonalImportBook(bookId: String): Boolean = try {
+        val response = http.delete("$base/v1/library/personal-imports/${bookId.encodeURLPathPart()}")
+        response.status.isSuccess()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        false
+    }
+
     /** 2.0-W2-B: 按节并发批量生成单书章节伴读五模块（要点/读前自测/推导模板/选做练习/章末习题三级提示）。 */
     suspend fun companionChapter(input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/library/companion/chapter") {

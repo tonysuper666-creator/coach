@@ -111,7 +111,7 @@ internal object ConceptMasteryMap {
             val name = displayName(candidate.name, candidate.quote) ?: continue
             val page = book.page(candidate.page) ?: continue
             val range = locateQuote(page.text, candidate.quote, candidate.startUtf16) ?: continue
-            val owner = BookChapterResolver.chapterForPage(book, candidate.page)
+            val owner = BookChapterResolver.chapterForPage(book, candidate.page, range.first)
                 ?: book.chapterSpans.firstOrNull { candidate.page in it.firstPage..it.lastPage }
                 ?: continue
             if (candidate.page !in owner.firstPage..owner.lastPage) continue
@@ -288,7 +288,7 @@ internal object ConceptMasteryMap {
         val hint = (obj["start"] as? JsonPrimitive)?.intOrNull ?: -1
         val page = book.page(event.page) ?: return null
         val range = locateQuote(page.text, quote, hint) ?: return null
-        val owner = BookChapterResolver.chapterForPage(book, event.page)
+        val owner = BookChapterResolver.chapterForPage(book, event.page, range.first)
             ?: book.chapterSpans.firstOrNull { event.page in it.firstPage..it.lastPage }
             ?: return null
         if (owner.tocNodeId != chapterId) return null

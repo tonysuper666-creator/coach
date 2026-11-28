@@ -187,8 +187,17 @@ internal typealias BookPdfName = com.tom_roush.pdfbox.cos.COSName
 internal typealias BookPdfPage = com.tom_roush.pdfbox.pdmodel.PDPage
 internal typealias BookPdfForm = com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 internal typealias BookPdfImage = com.tom_roush.pdfbox.pdmodel.graphics.image.PDImage
+internal typealias BookPdfImageObject = com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject
 internal typealias BookPdfPoint = android.graphics.PointF
 internal typealias BookPdfFillRule = android.graphics.Path.FillType
+internal typealias BookPdfClipPath = android.graphics.Path
+internal fun BookPdfClipPath.addCurve(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) =
+    cubicTo(x1, y1, x2, y2, x3, y3)
+internal fun BookPdfClipPath.closeContour() = close()
+internal fun applyBookClip(state: com.tom_roush.pdfbox.pdmodel.graphics.state.PDGraphicsState, path: BookPdfClipPath, rule: BookPdfFillRule) =
+    state.intersectClippingPath(BookPdfClipPath(path).apply { fillType = rule })
+internal fun bookClipContains(clip: android.graphics.Region, x: Double, y: Double) =
+    clip.contains(kotlin.math.floor(x).toInt(), kotlin.math.floor(y).toInt())
 internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = BookPdfPoint(x, y)
 internal fun bookBitmapPixel(bitmap: BookBitmap, x: Int, y: Int) = bitmap.getPixel(x, y)
 

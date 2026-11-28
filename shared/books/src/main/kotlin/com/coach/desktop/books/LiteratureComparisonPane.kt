@@ -262,17 +262,25 @@ internal fun LiteratureComparisonPane(
                         }
                     }
                     Text("与其他几篇的关系", style = MaterialTheme.typography.labelMedium)
-                    if (row.relations.isEmpty()) Text(COMPARISON_PENDING)
+                    if (row.relations.isEmpty()) Text(COMPARISON_NO_DIALOGUE)
                     row.relations.forEachIndexed { index, relation ->
-                        val kind = relation.kind?.zh()?.let { "$it " }.orEmpty()
-                        CellEditor(
-                            label = "$kind${relation.otherLabel}",
-                            cell = relation.cell,
-                            fieldTag = "comparison-relation-${row.bookId}-$index",
-                            sourceTag = "comparison-source-${row.bookId}-relation-$index",
-                            onSource = onSource,
-                        ) { text ->
-                            applyEdit { it.editRelation(row.bookId, index, text) }
+                        if (relation.noDialogue) {
+                            Text(
+                                "与 ${relation.otherLabel}：$COMPARISON_NO_DIALOGUE",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.testTag("comparison-relation-${row.bookId}-$index"),
+                            )
+                        } else {
+                            val kind = relation.kind?.zh()?.let { "$it " }.orEmpty()
+                            CellEditor(
+                                label = "$kind${relation.otherLabel}",
+                                cell = relation.cell,
+                                fieldTag = "comparison-relation-${row.bookId}-$index",
+                                sourceTag = "comparison-source-${row.bookId}-relation-$index",
+                                onSource = onSource,
+                            ) { text ->
+                                applyEdit { it.editRelation(row.bookId, index, text) }
+                            }
                         }
                     }
                 }

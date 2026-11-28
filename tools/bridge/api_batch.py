@@ -21,13 +21,15 @@ from api_route import ApiFailure, cost, route, vendor
 
 GUIDE_TASK = "literature_guide"
 COMPARISON_TASK = "literature_comparison"
+QUIZ_TASK = "literature_quiz"
 SAYINGS_TASK = "concept_sayings"
 BOOK_MAP_TASK = "book_map_batch"
 # Friends may submit these as Haiku Batch jobs; each result is namespaced and reserved against the friend's own grant.
-FRIEND_BATCH_TASKS = frozenset({GUIDE_TASK, COMPARISON_TASK, SAYINGS_TASK, BOOK_MAP_TASK})
+FRIEND_BATCH_TASKS = frozenset({GUIDE_TASK, COMPARISON_TASK, QUIZ_TASK, SAYINGS_TASK, BOOK_MAP_TASK})
 FRIEND_BATCH_LABELS = {
     GUIDE_TASK: "文献导读",
     COMPARISON_TASK: "文献对比",
+    QUIZ_TASK: "文献选择题",
     SAYINGS_TASK: "各书说法",
     BOOK_MAP_TASK: "全书地图",
 }

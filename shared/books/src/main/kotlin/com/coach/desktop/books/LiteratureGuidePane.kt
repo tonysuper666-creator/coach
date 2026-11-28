@@ -33,6 +33,10 @@ internal fun LiteratureGuidePane(
     var failures by remember(detail.courseId) { mutableStateOf<List<GuideItemFailure>>(emptyList()) }
     var busy by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf("") }
+    var quiz by remember(detail.courseId) { mutableStateOf<LiteratureQuizSet?>(null) }
+    var quizGaps by remember(detail.courseId) { mutableStateOf<List<String>>(emptyList()) }
+    var quizNotice by remember { mutableStateOf("") }
+    var quizBusy by remember { mutableStateOf(false) }
     val enabled = LocalReadingAiExplain.current
     val consent = remember(library) { ExplainConsent(library.directory) }
 
@@ -45,6 +49,82 @@ internal fun LiteratureGuidePane(
             if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) return result
             notice = "批处理正在生成。可以离开，回来后用同一组材料接着查看。"
             delay((result["retryAfterMs"] as? JsonPrimitive)?.longOrNull?.coerceIn(1000, 60000) ?: 60000)
+        }
+    }
+
+    suspend fun openQuiz(ids: List<String>, prompts: List<String>, metaSnapshot: Map<String, LiteraturePaperMeta>, generate: Boolean) {
+        quizBusy = true
+        quizNotice = ""
+        quizGaps = emptyList()
+        try {
+            val books = withContext(Dispatchers.IO) { ids.map(library::literatureBook) }
+            val input = withContext(Dispatchers.Default) { LiteratureInput(books, prompts, metaSnapshot) }
+            val key = LiteratureGuideStore.digest(input.request())
+            val cached = withContext(Dispatchers.IO) {
+                library.withCourseDatabase { LiteratureQuizStore.cached(it, detail.courseId, key) }
+            }
+            if (cached != null) {
+                val restored = LiteratureQuiz.restore(cached, books, prompts, key)
+                if (restored != null) {
+                    quiz = restored
+                    return
+                }
+            }
+            if (!generate) return
+            check(enabled && ids.all(consent::allowed)) { "请先在阅读设置中开启 AI 讲解。" }
+            explainer.load()
+            val paired = explainer.identity
+            val ocr = CachingOcrVerifier(object : LiteratureOcrVerifier {
+                override fun ocrPageText(book: Textbook, pdfPage: Int): String =
+                    library.ocrPdfPageForGuide(book.id, pdfPage)
+                override fun ocrQuoteCropText(book: Textbook, pdfPage: Int, quote: String): String? =
+                    library.ocrPdfQuoteCropForGuide(book.id, pdfPage, quote)
+            })
+            suspend fun poll(submission: JsonObject): JsonObject {
+                while (true) {
+                    check(explainer.identity == paired) { "连接已更换，请重新打开导读。" }
+                    check(ids.all(consent::allowed)) { "AI 讲解已关闭。" }
+                    val response = explainer.literatureQuiz(submission)
+                    val result = response.body ?: error(response.error ?: "连接失败，请重试。")
+                    if ((result["pending"] as? JsonPrimitive)?.booleanOrNull != true) return result
+                    quizNotice = "选择题正在批处理。可以离开，回来后接着查看。"
+                    delay((result["retryAfterMs"] as? JsonPrimitive)?.longOrNull?.coerceIn(1000, 60000) ?: 60000)
+                }
+            }
+            quizNotice = "正在生成选择题…"
+            val initial = withContext(Dispatchers.Default) { LiteratureQuiz.request(input) }
+            val firstReply = poll(initial.json)
+            quizNotice = "正在用本地 OCR 核对选择题出处…"
+            val first = withContext(Dispatchers.IO) { LiteratureQuiz.verify(initial.pool, firstReply, ocr) }
+            var resolution = LiteratureQuiz.resolve(input, first, null)
+            var calls = 1
+            if (resolution.saved == null) {
+                val repair = withContext(Dispatchers.Default) { LiteratureQuiz.repairRequest(input, first) }
+                if (repair != null) {
+                    quizNotice = "有的思考题还不足两道，正在补问一次…"
+                    val repairReply = poll(repair.json)
+                    val second = withContext(Dispatchers.IO) { LiteratureQuiz.verify(repair.pool, repairReply, ocr, repair.slots) }
+                    resolution = LiteratureQuiz.resolve(input, first, second)
+                    calls = 2
+                }
+            }
+            val saved = resolution.saved
+            withContext(Dispatchers.IO) {
+                LiteratureQuizDiagnostics.write(
+                    library.directory, detail.courseId, key, calls, saved != null, resolution.gaps,
+                )
+                if (saved != null) library.withCourseDatabase { LiteratureQuizStore.save(it, detail.courseId, saved) }
+            }
+            quiz = saved
+            quizGaps = if (saved == null) resolution.gaps else emptyList()
+            quizNotice = ""
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            quiz = null
+            quizNotice = e.message ?: "选择题没有生成。"
+        } finally {
+            quizBusy = false
         }
     }
 
@@ -62,6 +142,7 @@ internal fun LiteratureGuidePane(
                 if (restored != null) {
                     guide = restored
                     notice = ""
+                    openQuiz(ids, prompts, metaSnapshot, generate = false)
                     return
                 }
             }
@@ -140,6 +221,7 @@ internal fun LiteratureGuidePane(
                 guide = completed
                 failures = emptyList()
                 notice = ""
+                openQuiz(ids, prompts, metaSnapshot, generate = true)
             } else {
                 guide = null
                 failures = finalCheck.failures
@@ -193,7 +275,14 @@ internal fun LiteratureGuidePane(
                     }
                 }
                 if (guide != null) {
-                    V7TextButton({ guide = null; failures = emptyList(); notice = "" }) { Text("换一组材料") }
+                    V7TextButton({
+                        guide = null
+                        failures = emptyList()
+                        notice = ""
+                        quiz = null
+                        quizGaps = emptyList()
+                        quizNotice = ""
+                    }) { Text("换一组材料") }
                 }
             }
             val current = guide
@@ -335,6 +424,7 @@ internal fun LiteratureGuidePane(
                         }
                     }
                 }
+                LiteratureQuizSection(quiz, quizBusy, quizNotice, quizGaps, library, onSource)
             }
         }
     }

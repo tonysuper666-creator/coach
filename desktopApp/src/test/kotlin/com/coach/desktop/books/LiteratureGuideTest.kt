@@ -173,22 +173,27 @@ class LiteratureGuideTest {
 
             Ada Quentin to the recorded century as a whole. Shade reduced evaporation in this sample because the keepers closed the south windows.
         """.trimIndent()
-        val odnbQuotes = LiteraturePassages.extractCandidates(
-            Textbook(
-                "odnb-halves",
-                "Half Shape",
-                "pdf",
-                listOf(
-                    BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
-                    BookPage(2, page2, guideRegions = listOf(GuideRegion(page2))),
-                ),
+        val odnbBook = Textbook(
+            "odnb-halves",
+            "Half Shape",
+            "pdf",
+            listOf(
+                BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                BookPage(2, page2, guideRegions = listOf(GuideRegion(page2))),
             ),
-        ).map { it.anchor.quoteAnchor }
-        assertEquals(3, odnbQuotes.size)
-        assertTrue(odnbQuotes.none { "as a whole" in it || "Downloaded from" in it })
+        )
+        val odnbExcerpts = LiteraturePassages.extractCandidates(odnbBook)
+        val odnbQuotes = odnbExcerpts.map { it.anchor.quoteAnchor }
+        assertTrue(odnbQuotes.none { "Downloaded from" in it }, odnbQuotes.joinToString("\n"))
+        assertTrue(odnbQuotes.none { it.trim().startsWith("Niles Carter") }, odnbQuotes.joinToString("\n"))
         assertTrue(odnbQuotes.any { "visiting scholars" in it })
         assertTrue(odnbQuotes.any { "written down in the register" in it })
         assertTrue(odnbQuotes.any { "south windows" in it })
+        assertTrue(odnbQuotes.any { "catalog and then" in it && "as a whole" in it }, odnbQuotes.joinToString("\n"))
+        val joined = odnbExcerpts.first { "catalog and then" in it.anchor.quoteAnchor }
+        val joinedPage = odnbBook.page(joined.anchor.pdfPage)!!.text
+        assertEquals(joined.anchor.quoteAnchor, joinedPage.substring(joined.anchor.startUtf16, joined.anchor.endUtf16))
+        assertTrue("\n\n" in joined.anchor.quoteAnchor)
 
         val halvesOnly = """
             Downloaded from the public archive on 3 June 2006.
@@ -199,19 +204,308 @@ class LiteratureGuideTest {
 
             Ada Quentin to the recorded century as a whole.
         """.trimIndent()
-        assertTrue(
-            LiteraturePassages.extractCandidates(
-                Textbook(
-                    "halves-only",
-                    "Halves Only",
-                    "pdf",
-                    listOf(
-                        BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
-                        BookPage(2, halvesOnly, guideRegions = listOf(GuideRegion(halvesOnly))),
-                    ),
+        val halfQuotes = LiteraturePassages.extractCandidates(
+            Textbook(
+                "halves-only",
+                "Halves Only",
+                "pdf",
+                listOf(
+                    BookPage(1, page1, guideRegions = listOf(GuideRegion(page1))),
+                    BookPage(2, halvesOnly, guideRegions = listOf(GuideRegion(halvesOnly))),
                 ),
-            ).isEmpty(),
+            ),
+        ).map { it.anchor.quoteAnchor }
+        assertTrue(halfQuotes.any { "catalog and then" in it && "as a whole" in it }, halfQuotes.joinToString("\n"))
+        assertTrue(halfQuotes.none { "Downloaded from" in it || it.trim().startsWith("Niles Carter") }, halfQuotes.joinToString("\n"))
+    }
+
+    @Test fun joinsDoubleSpacedLinesKeepsAbbreviationsAndDropsFooterShapes() {
+        fun quotesOf(text: String) = LiteraturePassages.extractCandidates(
+            Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(GuideRegion(text))))),
+        ).map { it.anchor.quoteAnchor }
+
+        val spaced = """
+            The society kept a public
+
+            repository for visiting scholars
+
+            during that decade. The keepers
+
+            closed the south windows.
+        """.trimIndent()
+        val spacedQuotes = quotesOf(spaced)
+        assertTrue(spacedQuotes.any { "public" in it && "repository" in it && "visiting scholars" in it && "during that decade." in it }, spacedQuotes.joinToString("\n"))
+        assertTrue(spacedQuotes.any { "keepers" in it && "south windows" in it }, spacedQuotes.joinToString("\n"))
+        assertTrue(spacedQuotes.any { "\n\n" in it })
+
+        val abbrev = "The society printed the list in Ph.Tr. and the keepers compared those notes with the field book."
+        val abbrevQuotes = quotesOf(abbrev)
+        assertEquals(1, abbrevQuotes.size, abbrevQuotes.joinToString("\n"))
+        assertTrue("Ph.Tr." in abbrevQuotes.single() && "field book" in abbrevQuotes.single())
+
+        val abbrevBlank = "The society printed the list in Ph.Tr.\n\nand the keepers compared those notes with the field book."
+        val blankQuotes = quotesOf(abbrevBlank)
+        assertEquals(1, blankQuotes.size, blankQuotes.joinToString("\n"))
+        assertTrue("Ph.Tr." in blankQuotes.single() && "field book" in blankQuotes.single())
+
+        val ratio = "The measured ratio was 3.14 and the keepers recorded it in the field book."
+        assertEquals(1, quotesOf(ratio).size)
+
+        val body = "The repository kept a public record and later writers returned to that record."
+        val pageCite = "The implication is that the keeper moved the cabinets into one smaller room (Hunter, 1989), p. 21."
+        val seeVolume = "For the importance of the early lists of the same plants see V."
+        val onWhom = "Several apprentices learned the same beds (on whom see Hunter, The Gardeners, 1989)."
+        val mixed = listOf(
+            body,
+            "Visitors described the cabinets in enough detail to reconstruct the early arrangement.",
+            "Minutes from the weekly meeting still name the keeper who opened the doors.",
+            "Shade reduced evaporation in this sample because the keepers closed the south windows.",
+            pageCite,
+            seeVolume,
+            onWhom,
+        ).joinToString("\n\n")
+        val mixedQuotes = quotesOf(mixed)
+        assertTrue(mixedQuotes.any { "public record" in it }, mixedQuotes.joinToString("\n"))
+        assertTrue(mixedQuotes.none { "p. 21" in it || "see V." in it || "on whom see" in it }, mixedQuotes.joinToString("\n"))
+
+        val before = (1..8).joinToString("\n") { n ->
+            "The repository kept a public record number $n across the whole season."
+        }
+        val tail = (1..14).joinToString("\n") { n ->
+            "Visitors described cabinet number $n in enough detail to reconstruct the arrangement."
+        }
+        val noteSentence = "The later note says the keeper left the public cabinets open for visitors."
+        val noted = "$before\n56\n$noteSentence\n$tail"
+        val notedQuotes = quotesOf(noted)
+        assertTrue(notedQuotes.any { "public record number 1" in it }, notedQuotes.joinToString("\n"))
+        assertTrue(notedQuotes.none { "public cabinets open" in it }, notedQuotes.joinToString("\n"))
+        val noteStart = noted.indexOf(noteSentence)
+        val noteBook = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, noted, guideRegions = listOf(GuideRegion(noted)))))
+        val (noteHit, noteRule) = LiteratureCitationCheck.check(
+            listOf(GuideExcerpt(noteBook, BookCompanionAnchor(1, "n56", noteStart, noteStart + noteSentence.length, noteSentence), GuideRegion(noted))),
+            0,
+            "shape",
+            exactOcr,
         )
+        assertNull(noteHit)
+        assertTrue(noteRule.startsWith("footer_note:"))
+        assertTrue(noteRule.substringAfter(':') != "footer_note")
+
+        val folioQuotes = quotesOf("21\n$before")
+        assertEquals(8, folioQuotes.size, folioQuotes.joinToString("\n"))
+        assertTrue(folioQuotes.any { "public record number 1" in it })
+
+        val attached = "$before\nThe repository kept a public record of the weekly meeting.2\n" +
+            "The repository therefore kept a public record for the visitors who came that season."
+        val attachedQuotes = quotesOf(attached)
+        assertTrue(attachedQuotes.any { "weekly meeting" in it }, attachedQuotes.joinToString("\n"))
+        assertTrue(attachedQuotes.any { "visitors who came" in it }, attachedQuotes.joinToString("\n"))
+        val bodyAfterNote = "The repository therefore kept a public record for the visitors who came that season."
+        val bodyStart = attached.indexOf(bodyAfterNote)
+        val bodyBook = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, attached, guideRegions = listOf(GuideRegion(attached)))))
+        val (bodyHit, bodyRule) = LiteratureCitationCheck.check(
+            listOf(GuideExcerpt(bodyBook, BookCompanionAnchor(1, "body", bodyStart, bodyStart + bodyAfterNote.length, bodyAfterNote), GuideRegion(attached))),
+            0,
+            "shape",
+            exactOcr,
+        )
+        assertNotNull(bodyHit)
+        assertEquals("ok", bodyRule)
+
+        val carried = "The archive closed the public cabinet for the season. 19 The society kept a public repository for visiting scholars during that decade."
+        val carriedQuotes = quotesOf(carried)
+        assertEquals(2, carriedQuotes.size, carriedQuotes.joinToString("\n"))
+        assertTrue(carriedQuotes.all { it in carried })
+        assertTrue(carriedQuotes.none { it.trim().startsWith("19") })
+        assertTrue(carriedQuotes.any { "visiting scholars" in it })
+
+        val sig = "The plate is marked Sig. A later keeper described the specimen in the field book."
+        val sigQuotes = quotesOf(sig)
+        assertEquals(1, sigQuotes.size, sigQuotes.joinToString("\n"))
+        assertTrue("Sig. A later keeper" in sigQuotes.single())
+
+        val phil = "The list ends with the item published Phil. Records, after the manner of the Ph. Transactions. A later keeper was not the secretary of that society."
+        val philQuotes = quotesOf(phil)
+        assertTrue(philQuotes.none { it.startsWith("Records,") }, philQuotes.joinToString("\n"))
+        assertTrue(philQuotes.any { "published Phil. Records" in it && "Ph. Transactions." in it }, philQuotes.joinToString("\n"))
+        assertTrue(philQuotes.any { "later keeper was not the secretary" in it }, philQuotes.joinToString("\n"))
+
+        val glued = "The label read approx.more notes in the field book before the season closed."
+        val gluedQuotes = quotesOf(glued)
+        assertEquals(1, gluedQuotes.size, gluedQuotes.joinToString("\n"))
+        assertTrue("approx.more" in gluedQuotes.single())
+
+        val quoted = "The list ends with one item published Phil. Records, after the manner of the Ph. Transactions.' A later keeper was not the secretary of that society."
+        val quotedQuotes = quotesOf(quoted)
+        assertEquals(1, quotedQuotes.size, quotedQuotes.joinToString("\n"))
+        assertTrue("published Phil." in quotedQuotes.single() && "later keeper" in quotedQuotes.single())
+    }
+
+    @Test fun layoutFootnoteZoneDropsTheBottomNoteAndKeepsTheBodyAfterACallout() {
+        val body = "The repository kept a public record and later writers returned to that record."
+        val afterCallout = "The repository therefore kept a public record for the visitors who came that season."
+        val proseNote = "It remains useful to record that the same cabinets stayed in the smaller room."
+        val text = "$body" + "8\n$afterCallout\n\n$proseNote"
+        val noteStart = text.indexOf(proseNote)
+        val region = GuideRegion(text, footnoteRanges = listOf(noteStart until noteStart + proseNote.length))
+        val book = Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(region))))
+        val quotes = LiteraturePassages.extractCandidates(book).map { it.anchor.quoteAnchor }
+        assertTrue(quotes.any { "visitors who came" in it }, quotes.joinToString("\n"))
+        assertTrue(quotes.none { it.trim().startsWith("8") || "smaller room" in it }, quotes.joinToString("\n"))
+        val noteExcerpt = GuideExcerpt(
+            book,
+            BookCompanionAnchor(1, "note", noteStart, noteStart + proseNote.length, proseNote),
+            region,
+        )
+        val (noteHit, noteRule) = LiteratureCitationCheck.check(listOf(noteExcerpt), 0, "shape", exactOcr)
+        assertNull(noteHit)
+        assertTrue(noteRule.startsWith("footer_note:"), noteRule)
+        assertTrue("页脚" in noteRule, noteRule)
+        val bodyQuote = quotes.first { "visitors who came" in it }
+        val bodyStart = text.indexOf(bodyQuote)
+        assertTrue(bodyStart >= 0, quotes.joinToString("\n"))
+        val bodyExcerpt = GuideExcerpt(
+            book,
+            BookCompanionAnchor(1, "body", bodyStart, bodyStart + bodyQuote.length, bodyQuote),
+            region,
+        )
+        val (bodyHit, bodyRule) = LiteratureCitationCheck.check(listOf(bodyExcerpt), 0, "shape", exactOcr)
+        assertNotNull(bodyHit)
+        assertEquals("ok", bodyRule)
+    }
+
+    @Test fun layoutFootnoteRangesNeedASeparatorAndSmallerTypeBelowIt() {
+        val body = (0 until 8).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 40f + i * 12f, size = 10f, start = i * 20, end = i * 20 + 18)
+        }
+        val note = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 8f, start = 200, end = 240)
+        val noteNext = LiteraturePdfLayout.FootnoteLine(y = 166f, size = 8f, start = 241, end = 280)
+        // A gap under the body is not a separator. The same lines stay body until a rule is present.
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, bodyHeight = 10f).isEmpty())
+        val ruledNotes = LiteraturePdfLayout.layoutFootnoteRanges(body + note + noteNext, 10f, listOf(146f))
+        assertTrue(ruledNotes.any { 200 in it && 239 in it }, ruledNotes.toString())
+        assertTrue(ruledNotes.any { 241 in it }, ruledNotes.toString())
+        assertTrue(ruledNotes.none { it.first < 200 }, ruledNotes.toString())
+
+        val sameSize = LiteraturePdfLayout.FootnoteLine(y = 156f, size = 10f, start = 200, end = 240)
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + sameSize, 10f, listOf(146f)).isEmpty())
+
+        val tight = LiteraturePdfLayout.FootnoteLine(y = 136f, size = 8f, start = 200, end = 240)
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body + tight, 10f).isEmpty())
+
+        val ruled = LiteraturePdfLayout.FootnoteLine(y = 124f, size = 8f, start = 200, end = 240)
+        val byRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruled, 10f, listOf(118f))
+        assertTrue(byRule.any { 200 in it }, byRule.toString())
+        assertTrue(byRule.none { it.first < 200 }, byRule.toString())
+
+        val ruleLine = LiteraturePdfLayout.FootnoteLine(y = 118f, size = 10f, start = 180, end = 190, rule = true)
+        val afterRule = LiteraturePdfLayout.FootnoteLine(y = 126f, size = 8f, start = 200, end = 240)
+        val byTextRule = LiteraturePdfLayout.layoutFootnoteRanges(body.dropLast(1) + ruleLine + afterRule, 10f)
+        assertTrue(byTextRule.any { 200 in it }, byTextRule.toString())
+        assertTrue(byTextRule.none { 180 in it }, byTextRule.toString())
+
+        // Smaller lines above the rule stay body. The rule is the line between that block and the notes.
+        val quote = (0 until 3).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 136f + i * 10f, size = 9f, start = 700 + i * 30, end = 724 + i * 30)
+        }
+        val belowQuote = listOf(
+            LiteraturePdfLayout.FootnoteLine(y = 180f, size = 8f, start = 200, end = 240),
+            LiteraturePdfLayout.FootnoteLine(y = 190f, size = 8f, start = 241, end = 280),
+        )
+        val quoteRanges = LiteraturePdfLayout.layoutFootnoteRanges(body + quote + belowQuote, 10f, listOf(170f))
+        assertTrue(quoteRanges.any { 200 in it } && quoteRanges.any { 241 in it }, quoteRanges.toString())
+        assertTrue(quoteRanges.none { range -> quote.any { it.start in range } }, quoteRanges.toString())
+
+        val heading = (0 until 2).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 16f + i * 16f, size = 14f, start = i * 12, end = i * 12 + 8)
+        }
+        val underHeading = LiteraturePdfLayout.layoutFootnoteRanges(heading + body, 10f, listOf(48f))
+        assertTrue(underHeading.isEmpty(), underHeading.toString())
+
+        // A note block that starts above the old 55% cut is still a note when the rule is above it.
+        val longNotes = (0 until 10).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 150f + i * 12f, size = 8f, start = 1000 + i * 40, end = 1030 + i * 40)
+        }
+        val longPage = body + longNotes
+        val longSpan = longPage.maxOf { it.y } - longPage.minOf { it.y }
+        val oldBottomCut = longPage.minOf { it.y } + longSpan * 0.55f
+        assertTrue(longNotes.first().y < oldBottomCut, "note block starts above the old bottom cut")
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f).isEmpty())
+        val longRanges = LiteraturePdfLayout.layoutFootnoteRanges(longPage, 10f, listOf(140f))
+        assertTrue(longRanges.any { longNotes.first().start in it }, longRanges.toString())
+        assertTrue(longRanges.any { longNotes.last().start in it }, longRanges.toString())
+        assertTrue(longRanges.none { it.first < 1000 }, longRanges.toString())
+
+        val middle = LiteraturePdfLayout.FootnoteLine(y = 80f, size = 8f, start = 400, end = 440)
+        val afterMiddle = (0 until 4).map { i ->
+            LiteraturePdfLayout.FootnoteLine(y = 100f + i * 12f, size = 10f, start = 500 + i * 20, end = 518 + i * 20)
+        }
+        assertTrue(LiteraturePdfLayout.layoutFootnoteRanges(body.take(3) + middle + afterMiddle, 10f, listOf(74f)).isEmpty())
+
+        val folio = LiteraturePdfLayout.FootnoteLine(y = 280f, size = 10f, start = 1400, end = 1403)
+        val withFolio = LiteraturePdfLayout.layoutFootnoteRanges(longPage + folio, 10f, listOf(140f))
+        assertTrue(withFolio.any { longNotes.first().start in it }, withFolio.toString())
+        assertTrue(withFolio.none { 1400 in it }, withFolio.toString())
+
+        val glyphs = buildList {
+            repeat(40) { add((it * 12f) to 10f) }
+            repeat(80) { add((520f + it * 10f) to 8f) }
+        }
+        assertEquals(10f, LiteraturePdfLayout.proseBodyHeight(glyphs, columnMedian = 8f))
+        assertEquals(10f, LiteraturePdfLayout.proseBodyHeight(List(40) { (it * 12f) to 10f }, columnMedian = 10f))
+    }
+
+    @Test fun abbreviationSentencesStayWholeWhenANoteMarkFollowsTheClosingQuote() {
+        fun quotesOf(text: String) = LiteraturePassages.extractCandidates(
+            Textbook("shape", "Shape", "pdf", listOf(BookPage(1, text, guideRegions = listOf(GuideRegion(text))))),
+        ).map { it.anchor.quoteAnchor }
+
+        val intro = "The catalog lists three later notes for the same cabinet."
+        val second = "The second note was printed in the public record after the manner of the Ph. Transactions."
+        val third = "The keeper was not the clerk of the R. Society when the list cited Ph.Tr. N.143 before the public business of that society.\u201912"
+        val after = "Visitors described the cabinets in enough detail to reconstruct the early arrangement."
+        val page = listOf(intro, second, third, after).joinToString("\n\n")
+        val quotes = quotesOf(page)
+        assertTrue(quotes.any { "Ph. Transactions." in it && "N.143" !in it }, quotes.joinToString("\n"))
+        val cited = quotes.single { "N.143" in it }
+        assertTrue("clerk of the R. Society" in cited, cited)
+        assertFalse(cited.last().isDigit(), cited)
+        assertTrue(cited.endsWith("\u2019"), cited)
+        assertFalse("Visitors described" in cited, cited)
+        assertTrue(quotes.any { "Visitors described" in it && "N.143" !in it }, quotes.joinToString("\n"))
+        assertFalse(LiteraturePassages.isFootnoteSentence(cited))
+
+        val prefix = "The plate in the public catalog is marked Sig. Maren Solano "
+        val longBody = "recorded the same specimen in the field book "
+        val signature = prefix + longBody.repeat(18) + "before the season closed."
+        assertTrue(signature.length > 650, "length=${signature.length}")
+        assertTrue(signature.length <= 1300, "length=${signature.length}")
+        val signatureQuotes = quotesOf(signature)
+        assertEquals(1, signatureQuotes.size, signatureQuotes.joinToString("\n"))
+        assertTrue("marked Sig. Maren Solano" in signatureQuotes.single(), signatureQuotes.single())
+        assertTrue(signatureQuotes.single().endsWith("season closed."))
+
+        val plain = "The repository kept a public record " + "for the visitors who came ".repeat(28) + "before the season closed."
+        assertTrue(plain.length > 650, "length=${plain.length}")
+        assertTrue(quotesOf(plain).isEmpty(), quotesOf(plain).joinToString("\n"))
+
+        // The closing quote can sit before the period, and the note digits can be their own line.
+        val quoteThenPeriod = "The keeper was not the clerk of the R. Society when the list cited Ph.Tr. N.143 before the public business of that society\u2019.12"
+        val periodQuotes = quotesOf(quoteThenPeriod)
+        assertEquals(1, periodQuotes.size, periodQuotes.joinToString("\n"))
+        assertTrue("N.143" in periodQuotes.single() && periodQuotes.single().endsWith("\u2019."))
+        assertFalse(periodQuotes.single().last().isDigit())
+
+        val head = "The keeper was not the clerk of the R."
+        val tail = "Society when the list cited Ph.Tr. N.143 before the public business of that society\u2019."
+        val following = "Visitors described the cabinets in enough detail to reconstruct the early arrangement."
+        val split = "$head\n58\n$tail\n\n$following"
+        val splitQuotes = quotesOf(split)
+        val citedSplit = splitQuotes.single { "N.143" in it }
+        assertTrue("clerk of the R." in citedSplit && "Society when" in citedSplit, citedSplit)
+        assertTrue(citedSplit.endsWith("\u2019."), citedSplit)
+        assertFalse("Visitors described" in citedSplit, citedSplit)
+        assertTrue(splitQuotes.any { "Visitors described" in it && "N.143" !in it }, splitQuotes.joinToString("\n"))
     }
 
     @Test fun equalByteBudgetGuaranteesAtLeastFifteenSentencesPerPaper() {

@@ -539,8 +539,16 @@ internal typealias BookPdfName = org.apache.pdfbox.cos.COSName
 internal typealias BookPdfPage = org.apache.pdfbox.pdmodel.PDPage
 internal typealias BookPdfForm = org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject
 internal typealias BookPdfImage = org.apache.pdfbox.pdmodel.graphics.image.PDImage
+internal typealias BookPdfImageObject = org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 internal typealias BookPdfPoint = java.awt.geom.Point2D
 internal typealias BookPdfFillRule = Int
+internal typealias BookPdfClipPath = java.awt.geom.GeneralPath
+internal fun BookPdfClipPath.addCurve(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) =
+    curveTo(x1, y1, x2, y2, x3, y3)
+internal fun BookPdfClipPath.closeContour() = closePath()
+internal fun applyBookClip(state: org.apache.pdfbox.pdmodel.graphics.state.PDGraphicsState, path: BookPdfClipPath, rule: BookPdfFillRule) =
+    state.intersectClippingPath(BookPdfClipPath(path).apply { windingRule = rule })
+internal fun bookClipContains(clip: java.awt.geom.Area, x: Double, y: Double) = clip.contains(x, y)
 internal fun newBookPdfPoint(x: Float = 0f, y: Float = 0f): BookPdfPoint = java.awt.geom.Point2D.Float(x, y)
 internal fun bookBitmapPixel(bitmap: BookBitmap, x: Int, y: Int) = bitmap.getRGB(x, y)
 

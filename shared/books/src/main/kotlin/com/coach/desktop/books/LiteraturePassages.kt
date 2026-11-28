@@ -1,8 +1,5 @@
 package com.coach.desktop.books
 
-import java.text.BreakIterator
-import java.util.Locale
-
 /** Candidate sentence filtering and per-paper / cross-paper ranking for the one-page literature guide. */
 internal object LiteraturePassages {
     private val publisher = Regex(
@@ -21,6 +18,7 @@ internal object LiteraturePassages {
         """(?i)^(?:endnotes?|footnotes?|notes(?:\s+to\s+(?:pages?|chapters?|the\s+text))?|参考文献|尾注|注释)\s*[:：]?$""",
     )
     private val bareNoteNumber = Regex("""^\d{1,3}[.)]?$""")
+    private val leadingNote = Regex("""^\s*\d{1,3}(?=\s+\p{Lu}|\p{Lu})""")
     private val noteNumberAtStart = Regex("""^(?:\[(\d{1,3})]|(?:(\d{1,3}))[.)]?)(?:\s|$)""")
     private val heading = Regex("""(?i)^(?:abstract|introduction|background|discussion|method(?:s|ology)?|results?|conclusions?|summary|appendix(?:\s+[A-Z0-9]+)?|引言|导言|摘要|背景|方法|结果|讨论|结论|小结|(?:[IVX]+\.|\d+(?:\.\d+)*[.)])\s+\p{L}.{1,80})$""")
     private val standaloneAbstract = Regex("""(?i)^(?:abstract|摘要)\s*[.:：]?$""")
@@ -42,6 +40,31 @@ internal object LiteraturePassages {
     private val ibidLine = Regex("""(?i)^(?:see\s+(?:also\s+)?)?(?:ibid|op\.?\s*cit|loc\.?\s*cit)\.?(?:,|\s|$)""")
     private val authorInitialPrefix = Regex("""^(?:(?:see\s+(?:also\s+)?)?(?:[A-Z]\.\s*){1,3}[A-Z][\p{L}'\-]+|[\p{Lu}][\p{Ll}'\-]+,\s+[A-Z]\.)""")
     private val trailingPageRef = Regex("""(?i)\bpp?\.\s*\d+(?:\s*[-–—]\s*\d+)?\s*[.;]?$""")
+    private val authorYearPage = Regex(
+        """\([A-Z][\p{L}'\-]+(?:\s+et\s+al\.?)?,\s*(?:1[5-9]\d{2}|20\d{2})\s*[,:;]\s*(?:pp?\.\s*)?\d+""",
+    )
+    private val cjkYearPage = Regex("""（[^）]{0,40}(?:1[5-9]\d{2}|20\d{2})[^）]{0,20}第\s*\d+\s*页""")
+    private val noteCue = Regex(
+        """(?i)\bon whom see\b|\bsee also\b|\b(?:ibid|op\.?\s*cit|loc\.?\s*cit)\b|^\s*see\s+|\(\s*(?:cf\.?|see)\s+(?-i:[A-Z])|^\s*(?-i:[A-Z])[\p{L}'\-]{2,},\s+(?-i:[A-Z])[^.]{0,80}\b(?:1[5-9]\d{2}|20\d{2})\b""",
+    )
+    private val seeShortEnd = Regex("""(?i)\bsee\s+(?:also\s+)?(?:[A-Z]\.|vol\.|ch\.|pp?\.)\s*\d*\s*$""")
+    private val bibliographyPageEnd = Regex(
+        """(?i)(?:\bpp?\.\s*\d+(?:\s*[-–—]\s*\d+)?|(?:1[5-9]\d{2}|20\d{2})\)?,?\s+(?:pp?\.\s*)?\d{1,4})\s*[.。]?\s*$""",
+    )
+    private val abbreviations = setOf(
+        "ph", "phil", "tr", "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vol", "vols",
+        "no", "nos", "pp", "p", "cf", "ed", "eds", "fig", "figs", "al", "etc", "eg", "ie",
+        "ibid", "op", "cit", "loc", "vs", "ca", "ch", "esp", "viz", "rev", "trans",
+        "dept", "univ", "inc", "ltd", "mt", "ft", "gen", "col", "capt", "sgt", "sig",
+    )
+    private val compactSpace = Regex("""\s+""")
+    private const val BODY_SENTENCE_MAX = 650
+    /** A real sentence that keeps an abbreviation such as Sig. or Ph.Tr. can run past the ordinary cap. */
+    private const val ABBREVIATED_SENTENCE_MAX = 1300
+    private val closingQuotes = "”’\"')]"
+
+    /** Quiz and guide repair text. The part before the colon is the rule name. */
+    const val FOOTNOTE_REJECTION = "footer_note:这是页脚注释或尾注，不能当作正文出处"
 
     // Rhetorical signals still match the question when the prompt and paper use different languages.
     private val intentCues = listOf(
@@ -71,6 +94,81 @@ internal object LiteraturePassages {
         return false
     }
 
+    /**
+     * Footer, endnote, or bibliographic citation. Shared by the one-pager, quiz, comparison, and follow-along.
+     * A prose sentence that merely mentions a year is not a footnote.
+     */
+    fun isFootnoteSentence(s: String): Boolean {
+        val t = s.trim()
+        if (t.isEmpty()) return false
+        return isBibliographicFootnote(t) ||
+            authorYearPage.containsMatchIn(t) ||
+            cjkYearPage.containsMatchIn(t) ||
+            noteCue.containsMatchIn(t) ||
+            seeShortEnd.containsMatchIn(t) ||
+            bibliographyPageEnd.containsMatchIn(t)
+    }
+
+    /**
+     * Footer, endnote, or a span the PDF layout marked as the note zone.
+     * Candidate extraction and citation checks both call this, so a sentence that entered
+     * the pool is not later rejected for the same reason.
+     */
+    fun rejectedFootnote(
+        quote: String,
+        pageText: String,
+        pageOffset: Int,
+        region: GuideRegion,
+        localStart: Int,
+        localEnd: Int,
+    ): Boolean = region.overlapsFootnote(localStart, localEnd) ||
+        (!region.measured && (isFootnoteSentence(quote) || followsFootnoteMarker(pageText, pageOffset)))
+
+    fun rejectedFootnote(excerpt: GuideExcerpt): Boolean {
+        val anchor = excerpt.anchor
+        val page = excerpt.book.page(anchor.pdfPage)
+        val base = if (page == null) 0 else regionBase(page, excerpt.region)
+        return rejectedFootnote(
+            anchor.quoteAnchor,
+            page?.text.orEmpty(),
+            anchor.startUtf16,
+            excerpt.region,
+            anchor.startUtf16 - base,
+            anchor.endUtf16 - base,
+        )
+    }
+
+    /** Page text joins guide regions with a blank line, so a quote's page offset is base plus its region offset. */
+    fun regionBase(page: BookPage, region: GuideRegion): Int {
+        var base = 0
+        for (candidate in page.guideRegions) {
+            if (candidate === region) return base
+            base += candidate.text.length + 2
+        }
+        base = 0
+        for (candidate in page.guideRegions) {
+            if (candidate.text == region.text && candidate.footnoteRanges == region.footnoteRanges) return base
+            base += candidate.text.length + 2
+        }
+        return 0
+    }
+
+    /**
+     * The span sits on the sentence after a footnote marker on its own line.
+     * A note number glued to the previous body sentence, such as "look.8", is a callout.
+     * The next sentence is still body text. A page number at the top is not a marker either.
+     */
+    fun followsFootnoteMarker(pageText: String, start: Int): Boolean {
+        if (start <= 0 || start > pageText.length) return false
+        val priorLines = pageText.substring(0, start).lineSequence().map(String::trim).toList()
+        val prevIndex = priorLines.indexOfLast(String::isNotEmpty)
+        if (prevIndex < 0) return false
+        val prev = priorLines[prevIndex]
+        if (!isBareNoteNumber(prev)) return false
+        val number = noteNumber(prev) ?: return false
+        return number >= 10 && priorLines.take(prevIndex).any { endsSentence(it) }
+    }
+
     /** Notes heading. Sectioning should call this instead of keeping its own copy. */
     fun isNotesHeading(line: String): Boolean = notesBoundary.matches(line.trim())
 
@@ -80,8 +178,111 @@ internal object LiteraturePassages {
     fun isDownloadBanner(line: String): Boolean = publisher.containsMatchIn(line)
 
     fun endsSentence(text: String): Boolean {
-        val trimmed = text.trim()
-        return trimmed.isNotEmpty() && end.containsMatchIn(trimmed)
+        val core = withoutTrailingNoteMark(text.trimEnd()).trimEnd().dropLastWhile { it in closingQuotes }
+        if (core.isEmpty()) return false
+        val last = core.last()
+        if (last == '!' || last == '?' || last == '。' || last == '！' || last == '？') return true
+        if (last != '.') return false
+        return !isAbbreviationPeriod(core, core.length - 1)
+    }
+
+    /** "meeting.12" and "society'.12" end at the period. A decimal such as "3.14" does not. */
+    private fun withoutTrailingNoteMark(text: String): String {
+        var i = text.length
+        var digits = 0
+        while (i > 0 && text[i - 1].isDigit() && digits < 3) {
+            digits++
+            i--
+        }
+        if (digits == 0 || i == 0) return text
+        var quote = i
+        while (quote > 0 && text[quote - 1] in closingQuotes) quote--
+        if (quote == 0 || text[quote - 1] != '.') return text
+        if (quote >= 2 && text[quote - 2].isDigit()) return text
+        return text.substring(0, quote)
+    }
+
+    /** Periods inside Ph.Tr., Phil., Sig., p. 21, and initials are not sentence boundaries. */
+    private fun containsAbbreviationPeriod(text: String): Boolean {
+        for (i in text.indices) {
+            if (text[i] == '.' && isAbbreviationPeriod(text, i)) return true
+        }
+        return false
+    }
+
+    private fun isAbbreviationPeriod(text: String, period: Int): Boolean {
+        if (period <= 0 || period >= text.length || text[period] != '.') return false
+        var i = period - 1
+        while (i >= 0 && text[i].isLetter()) i--
+        val word = text.substring(i + 1, period)
+        if (word.isEmpty()) return false
+        if (word.length == 1 && (word[0].isUpperCase() ||
+                i >= 1 && text[i] == '.' && text[i - 1].isLetter() && (i == 1 || !text[i - 2].isLetter()))) return true
+        return word.lowercase() in abbreviations
+    }
+
+    private fun sentenceBounds(text: String, region: GuideRegion? = null, offset: Int = 0): List<Pair<Int, Int>> {
+        val bounds = ArrayList<Pair<Int, Int>>()
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            val hard = ch == '!' || ch == '?' || ch == '。' || ch == '！' || ch == '？'
+            val closes = ch == '.' && !isAbbreviationPeriod(text, i) && !staysInside(text, i) && closerFollows(text, i)
+            val wordEnd = offset + i + 1
+            val visibleStop = region?.scannedStops?.contains(wordEnd) == true
+            if (hard && region?.raisedCallouts?.contains(wordEnd) != true || closes || visibleStop) {
+                var bound = i + 1
+                while (bound < text.length && text[bound] in "”’\"')]") bound++
+                if (text.substring(start, bound).isNotBlank()) bounds += start to bound
+                val noteDigits = noteDigitsAfter(text, bound)
+                start = bound + noteDigits
+                i = start
+            } else {
+                i++
+            }
+        }
+        if (start < text.length && text.substring(start).isNotBlank()) bounds += start to text.length
+        return bounds
+    }
+
+    /**
+     * A period glued to a lowercase letter, a continuing digit, or a quote is not a cut.
+     * "meeting.12" still ends: those digits are a note mark and are stripped from the next sentence.
+     * A closing quote with a note mark after it, as in "society'.12", also ends.
+     */
+    private fun staysInside(text: String, period: Int): Boolean {
+        val next = period + 1
+        if (next >= text.length) return false
+        val ch = text[next]
+        if (ch.isLowerCase()) return true
+        if (ch == '\'' || ch == '"' || ch == '\u2018' || ch == '\u2019' || ch == '\u201C' || ch == '\u201D') {
+            var quote = next + 1
+            while (quote < text.length && text[quote] in closingQuotes) quote++
+            return noteDigitsAfter(text, quote) == 0
+        }
+        return ch.isDigit() && noteDigitsAfter(text, next) == 0
+    }
+
+    private fun closerFollows(text: String, period: Int): Boolean {
+        var j = period + 1
+        while (j < text.length && text[j] in "”’\"')]") j++
+        return j >= text.length || text[j].isWhitespace() || noteDigitsAfter(text, j) > 0
+    }
+
+    /** Digits glued to a sentence end, as in "meeting.12", are a note mark, not "3.14". */
+    private fun noteDigitsAfter(text: String, index: Int): Int {
+        var mark = index - 1
+        while (mark >= 0 && text[mark] in "”’\"')]") mark--
+        if (mark > 0 && text[mark] == '.' && text[mark - 1].isDigit()) return 0
+        var j = index
+        var digits = 0
+        while (j < text.length && text[j].isDigit() && digits < 3) {
+            digits++
+            j++
+        }
+        if (digits == 0) return 0
+        return if (j >= text.length || text[j].isWhitespace()) digits else 0
     }
 
     fun isBareNoteNumber(line: String): Boolean = bareNoteNumber.matches(line.trim())
@@ -137,36 +338,48 @@ internal object LiteraturePassages {
                 coursepackCoverHeader.findAll(page.text).count() >= 2
             )
 
-    private fun lastProseLine(page: BookPage): String? =
-        page.guideRegions.asSequence()
-            .flatMap { it.text.lineSequence() }
-            .map(String::trim)
-            .lastOrNull { line ->
-                line.isNotEmpty() && !folio.matches(line) && !isDownloadBanner(line) &&
-                    !isBackMatterHeading(line) && !isBibliographicFootnote(line)
+    private fun lastProseLine(page: BookPage): String? {
+        for (region in page.guideRegions.asReversed()) {
+            var end = region.text.length
+            while (end > 0) {
+                val start = region.text.lastIndexOf('\n', end - 1) + 1
+                val line = region.text.substring(start, end).trim()
+                if (line.isNotEmpty() && !region.overlapsFootnote(start, end) &&
+                    !folio.matches(line) && !isDownloadBanner(line) &&
+                    !isBackMatterHeading(line) && !isFootnoteSentence(line)) return line
+                end = start - 1
             }
+        }
+        return null
+    }
 
-    fun bodySentence(s: String): Boolean = s.length in 6..650 &&
-        !LiteratureScaffoldNoise.rejectsSentence(s) &&
-        !hasControlOrBrokenChar(s) &&
-        end.containsMatchIn(s) &&
-        !publisher.containsMatchIn(s) &&
-        !note.containsMatchIn(s) &&
-        !isBibliographicFootnote(s) &&
-        s.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
-        (s.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(s).take(4).count() >= 4)
+    fun bodySentence(excerpt: GuideExcerpt): Boolean {
+        val region = excerpt.region
+        val anchor = excerpt.anchor
+        val page = excerpt.book.page(anchor.pdfPage)
+        val visibleStop = region.scannedStops.isNotEmpty() && page != null &&
+            anchor.endUtf16 - regionBase(page, region) in region.scannedStops
+        return bodySentence(anchor.quoteAnchor, region.measured, visibleStop)
+    }
+
+    fun bodySentence(s: String, measured: Boolean = false, visibleStop: Boolean = false): Boolean {
+        val compact = compactSpace.replace(s, " ").trim()
+        val limit = if (containsAbbreviationPeriod(compact)) ABBREVIATED_SENTENCE_MAX else BODY_SENTENCE_MAX
+        return compact.length in 6..limit &&
+            !LiteratureScaffoldNoise.rejectsSentence(compact) &&
+            !hasControlOrBrokenChar(s) &&
+            (visibleStop || end.containsMatchIn(compact)) &&
+            !publisher.containsMatchIn(s) &&
+            !(if (measured) isBibliographicFootnote(s) else note.containsMatchIn(s) || isFootnoteSentence(s)) &&
+            compact.dropWhile { it in "“‘\"'([" }.firstOrNull()?.isLowerCase() != true &&
+            (compact.count { it.code in 0x3400..0x9fff } >= 5 || Regex("""\p{L}{2,}""").findAll(compact).take(4).count() >= 4)
+    }
 
     fun countBodySentences(text: String): Int {
         if (text.isBlank()) return 0
-        val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(text) }
         var count = 0
-        var a = iterator.first()
-        var b = iterator.next()
-        while (b != BreakIterator.DONE) {
-            val quote = text.substring(a, b).trim()
-            if (bodySentence(quote)) count++
-            a = b
-            b = iterator.next()
+        for ((a, b) in sentenceBounds(text)) {
+            if (bodySentence(text.substring(a, b).trim())) count++
         }
         return count
     }
@@ -188,7 +401,10 @@ internal object LiteraturePassages {
     private data class Candidate(val page: BookPage, val region: GuideRegion, val offset: Int, val quote: String)
 
     /** Extract all clean, filtered body sentences for one book in reading order (no section grouping). */
-    fun extractCandidates(book: Textbook): List<GuideExcerpt> {
+    fun extractCandidates(book: Textbook): List<GuideExcerpt> = extractCandidates(book, null)
+
+    /** The local audit observes discarded spans in reader coordinates. Normal callers need no observer. */
+    fun extractCandidates(book: Textbook, discarded: ((BookPage, Int, Int, String) -> Unit)?): List<GuideExcerpt> {
         val edges = book.pages.flatMap { page ->
             page.guideRegions.flatMap { region ->
                 val lines = region.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
@@ -200,21 +416,30 @@ internal object LiteraturePassages {
         var backMatter = false
         val notesOpen = book.pages.size / 3
         for (page in book.pages) {
-            if (isFrontMatterCover(page)) continue
-            if (backMatter) continue
+            if (backMatter || isFrontMatterCover(page)) {
+                discarded?.invoke(page, 0, page.text.length, if (backMatter) "back_matter" else "cover")
+                continue
+            }
             val pageLines = page.guideRegions.flatMap { it.text.lines() }
-            if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) continue
-            if (page.number > notesOpen && isEndnotePage(pageLines)) {
+            if (LiteratureScaffoldNoise.rejectsPage(pageLines, page.number)) {
+                discarded?.invoke(page, 0, page.text.length, "scaffold_page")
+                continue
+            }
+            if (page.number > notesOpen && page.guideRegions.none { it.measured && it.footnoteRanges.isNotEmpty() } && isEndnotePage(pageLines)) {
                 backMatter = true
+                discarded?.invoke(page, 0, page.text.length, "endnotes_page")
                 continue
             }
             val pageCandidates = mutableListOf<Candidate>()
+            var footnoteLines = 0
+            var proseLines = 0
             var base = 0
             var dropPageTop = continuesPreviousPage(book, page.number, 0)
             var skipSection = false
             for (region in page.guideRegions) {
                 val regionLines = region.text.lines()
-                if (isFootnoteBlock(regionLines)) {
+                if (!region.measured && isFootnoteBlock(regionLines)) {
+                    discarded?.invoke(page, base, base + region.text.length, "note_block")
                     base += region.text.length + 2
                     continue
                 }
@@ -233,30 +458,32 @@ internal object LiteraturePassages {
                     val paragraph = region.text.substring(start, finish)
                     val dropLead = skipFirst
                     var lead = dropLead
-                    val iterator = BreakIterator.getSentenceInstance(Locale.ROOT).apply { setText(paragraph) }
-                    var a = iterator.first()
-                    var b = iterator.next()
-                    while (b != BreakIterator.DONE) {
-                        val raw = paragraph.substring(a, b)
+                    for ((a, b) in sentenceBounds(paragraph, region, start)) {
+                        var from = a
+                        val noteLead = leadingNote.find(paragraph.substring(a, b))
+                        if (noteLead != null && noteLead.range.first == 0) from = a + noteLead.value.length
+                        val raw = paragraph.substring(from, b)
                         val quote = raw.trim()
                         if (quote.isNotEmpty()) {
-                            val localStart = start + a + raw.indexOf(quote)
+                            val localStart = start + from + raw.indexOf(quote)
                             val localEnd = localStart + quote.length
                             val at = base + localStart
                             val pageTopTail = dropPageTop && at <= 220
                             if (pageTopTail) dropPageTop = false
                             val blankTail = lead
                             lead = false
-                            if (!pageTopTail && !blankTail &&
-                                !region.overlapsWideGap(localStart, localEnd) &&
-                                bodySentence(quote) &&
-                                region.containsSentence(quote)
-                            ) {
-                                pageCandidates += Candidate(page, region, at, quote)
+                            val reason = when {
+                                pageTopTail -> "previous_page"
+                                blankTail -> "unfinished_paragraph"
+                                rejectedFootnote(quote, page.text, at, region, localStart, localEnd) -> "note"
+                                region.overlapsWideGap(localStart, localEnd) -> "wide_gap"
+                                !bodySentence(quote, region.measured, localEnd in region.scannedStops) -> "body_sentence"
+                                !region.containsSentence(quote) -> "source_order"
+                                else -> null
                             }
+                            if (reason == null) pageCandidates += Candidate(page, region, at, quote)
+                            else discarded?.invoke(page, at, at + quote.length, reason)
                         }
-                        a = b
-                        b = iterator.next()
                     }
                     start = -1
                     skipFirst = !endsSentence(paragraph)
@@ -268,7 +495,14 @@ internal object LiteraturePassages {
                 var prevCaptionEnded = false
                 for ((index, raw) in regionLines.withIndex()) {
                     val line = raw.trim()
+                    if (region.overlapsFootnote(offset, offset + raw.length)) {
+                        finishParagraph()
+                        discarded?.invoke(page, base + offset, base + offset + raw.length, "note_line")
+                        offset += raw.length + 1
+                        continue
+                    }
                     if (index < abstractLineIdx) {
+                        discarded?.invoke(page, base + offset, base + offset + raw.length, "before_abstract")
                         offset += raw.length + 1
                         continue
                     }
@@ -293,6 +527,7 @@ internal object LiteraturePassages {
                             }
                         } else {
                             prevCaptionEnded = endsSentence(line)
+                            discarded?.invoke(page, base + offset, base + offset + raw.length, "caption")
                             offset += raw.length + 1
                             continue
                         }
@@ -301,6 +536,24 @@ internal object LiteraturePassages {
                         LiteratureScaffoldNoise.isSubfigureCaptionLine(regionLines, index)
                     val undelimitedCap = !delimitedCap && LiteratureScaffoldNoise.isUndelimitedCaptionStart(line)
                     val abstractMatch = if (page.number == 1) inlineAbstractLead.find(raw) else null
+                    val number = noteNumber(line) ?: 0
+                    val afterBody = !region.measured && !isEdge &&
+                        region.text.substring(0, offset.coerceAtMost(region.text.length)).lineSequence().any { endsSentence(it) }
+                    val midBare = isBareNoteNumber(line) && number >= 10 && afterBody
+                    val marker = isBareNoteNumber(line) || note.containsMatchIn(line) ||
+                        (bottom && bottomBareNote.containsMatchIn(line)) ||
+                        (bottomBareNote.containsMatchIn(line) && number >= 10 && afterBody)
+                    val open = if (start >= 0) region.text.substring(start, finish.coerceAtMost(region.text.length)) else ""
+                    val unfinished = start >= 0 && open.isNotBlank() && !endsSentence(open)
+                    val nextLine = regionLines.getOrNull(index + 1)?.trim().orEmpty()
+                    val nextIsNote = nextLine.isEmpty() || isFootnoteSentence(nextLine) || isBareNoteNumber(nextLine) ||
+                        note.containsMatchIn(nextLine) || bottomBareNote.containsMatchIn(nextLine)
+                    // A superscript note mark is its own line when its baseline sits above the words it follows.
+                    // That line is not the note. The sentence keeps going, including when the next word is capitalized.
+                    val superscriptInsideSentence = unfinished && isBareNoteNumber(line) && number >= 10 && !nextIsNote
+                    val continuesOpenSentence = unfinished && !marker
+                    val footnoteLine = !region.measured && line.isNotEmpty() && !continuesOpenSentence && !superscriptInsideSentence &&
+                        (isFootnoteSentence(line) || marker)
                     when {
                         backMatter -> break
                         isBackMatter -> {
@@ -326,17 +579,20 @@ internal object LiteraturePassages {
                             prevCaptionEnded = endsSentence(line)
                         }
                         LiteratureScaffoldNoise.isKeywordsOrMetaLine(line) -> finishParagraph()
-                        isBareNoteNumber(line) && bottom -> {
+                        superscriptInsideSentence -> Unit
+                        footnoteLine -> {
                             finishParagraph()
-                            footnotes = true
+                            footnoteLines++
+                            if ((bottom && marker) || midBare) footnotes = true
                         }
-                        line.isBlank() || folio.matches(line) || isDownloadBanner(line) ||
-                            isBibliographicFootnote(line) ||
+                        line.isBlank() -> {
+                            if (start >= 0) {
+                                val open = region.text.substring(start, finish)
+                                if (open.isBlank() || endsSentence(open)) finishParagraph()
+                            }
+                        }
+                        folio.matches(line) || isDownloadBanner(line) ||
                             (isEdge && edgeKey(line) in edges && (!end.containsMatchIn(line) || line.length < 45)) -> finishParagraph()
-                        note.containsMatchIn(line) || (bottom && bottomBareNote.containsMatchIn(line)) -> {
-                            finishParagraph()
-                            if (bottom) footnotes = true
-                        }
                         abstractMatch != null && !footnotes -> {
                             finishParagraph()
                             val bodyStart = offset + abstractMatch.range.last + 1
@@ -348,6 +604,7 @@ internal object LiteraturePassages {
                         !footnotes -> {
                             if (start < 0) start = offset
                             finish = offset + raw.length
+                            proseLines++
                         }
                     }
                     offset += raw.length + 1
@@ -355,18 +612,22 @@ internal object LiteraturePassages {
                 finishParagraph()
                 base += region.text.length + 2
             }
+            if (footnoteLines >= 3 && footnoteLines * 2 >= footnoteLines + proseLines) {
+                discarded?.invoke(page, 0, page.text.length, "note_page")
+                continue
+            }
             // Drop coursepack cover / copyright notice pages: >= 2 copyright term hits and < 3 body sentences
             // (or heavy copyright notice cover on page 1 with >= 4 copyright hits and <= 6 sentences).
             // Never drop the final body sentences on a page that transitions into back-matter References (ISBN citations).
             val copyrightHits = copyrightPageTerm.findAll(page.text).count()
-            if (!backMatter && copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) continue
+            if (!backMatter && copyrightHits >= 2 && (pageCandidates.size < 3 || (page.number == 1 && copyrightHits >= 4 && pageCandidates.size <= 6))) {
+                discarded?.invoke(page, 0, page.text.length, "copyright_page")
+                continue
+            }
             candidates += pageCandidates
         }
         if (candidates.isEmpty()) return emptyList()
-        val seen = HashSet<String>(candidates.size)
-        return candidates.mapNotNull { c ->
-            val norm = LiteratureTextNorm.normalize(c.quote)
-            if (!seen.add(norm)) return@mapNotNull null
+        return candidates.map { c ->
             val anchorId = "${book.id}#p${c.page.number}-${c.offset}"
             GuideExcerpt(book, BookCompanionAnchor(c.page.number, anchorId, c.offset, c.offset + c.quote.length, c.quote), c.region)
         }
@@ -400,8 +661,8 @@ internal object LiteraturePassages {
         questions: List<String>,
         excludedQuotes: Set<String> = emptySet(),
     ): List<GuideExcerpt> {
-        val active = if (excludedQuotes.isEmpty()) candidates
-        else candidates.filterNot { LiteratureTextNorm.normalize(it.anchor.quoteAnchor) in excludedQuotes }
+        val seen = excludedQuotes.toMutableSet()
+        val active = candidates.filter { seen.add(LiteratureTextNorm.normalize(it.anchor.quoteAnchor)) }
         if (active.isEmpty()) return emptyList()
         val paperTokens = tokens("${meta.author} ${meta.title} ${meta.year}")
         val vocab = active.map { tokens(it.anchor.quoteAnchor) }
@@ -454,7 +715,7 @@ internal object LiteraturePassages {
         val cues = intentCues.filter { it.first.containsMatchIn(question) }.map { it.second }
         val scored = mutableListOf<Pair<GuideExcerpt, Int>>()
         for (book in books) {
-            val all = candidatesByBook[book.id].orEmpty()
+            val all = candidatesByBook[book.id].orEmpty().distinctBy { LiteratureTextNorm.normalize(it.anchor.quoteAnchor) }
             val meta = metas[book.id] ?: LiteraturePaperMeta(book.id, LiteratureTextNorm.decodeHtmlEntities(book.title))
             val paperTokens = tokens("${meta.author} ${meta.title} ${meta.year}")
             val mentionsPaper = qTokens.any(paperTokens::contains)

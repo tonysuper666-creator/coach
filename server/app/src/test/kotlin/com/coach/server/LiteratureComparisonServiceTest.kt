@@ -56,7 +56,9 @@ class LiteratureComparisonServiceTest {
                     it["x-coach-friend"] == friendId("synthetic")
             })
             assertTrue(systems.all { system ->
-                "本行这一篇" in system && "反对者自己" in system && "不要一边写成支持" in system
+                "本行这一篇" in system && "反对者自己" in system && "不要一边写成支持" in system &&
+                    "按各自的主张比较" in system && "两边各引一句" in system &&
+                    "不要硬找反对方" in system && "不要写「虚拳客」" in system && "储藏室" in system
             })
         } finally {
             server.stop(0)

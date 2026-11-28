@@ -11,6 +11,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
 internal const val COMPARISON_PENDING = "出处待查"
+internal const val COMPARISON_NO_DIALOGUE = "两篇没有直接对话"
 internal const val COMPARISON_MIN_PAPERS = 2
 internal const val COMPARISON_MAX_PAPERS = 8
 
@@ -21,6 +22,12 @@ internal fun comparisonTooMany(count: Int) =
     "这一组有 $count 篇文献，一次最多放 $COMPARISON_MAX_PAPERS 篇。请先去掉几篇，再出表。"
 
 internal enum class ComparisonRelationKind { SUPPORT, REFUTE, SUPPLEMENT }
+
+internal fun ComparisonRelation.tableValue(): String {
+    if (noDialogue) return "$otherLabel：$COMPARISON_NO_DIALOGUE"
+    val kindLabel = kind?.zh()?.let { "$it " }.orEmpty()
+    return "$kindLabel$otherLabel：${cell.markdownValue()}"
+}
 
 internal fun ComparisonRelationKind.zh(): String = when (this) {
     ComparisonRelationKind.SUPPORT -> "支持"
@@ -47,6 +54,7 @@ internal data class ComparisonRelation(
     val otherLabel: String,
     val kind: ComparisonRelationKind?,
     val cell: ComparisonCell,
+    val noDialogue: Boolean = false,
 )
 
 internal data class ComparisonRow(
@@ -93,7 +101,7 @@ internal data class LiteratureComparison(
             countCell(row.claim)
             countCell(row.method)
             if (row.concepts.isEmpty()) pending++ else row.concepts.forEach(::countCell)
-            if (row.relations.isEmpty()) pending++ else row.relations.forEach { countCell(it.cell) }
+            row.relations.filter { !it.noDialogue }.forEach { countCell(it.cell) }
         }
         outline.forEach { point ->
             (point.supports + point.opposes).forEach { side ->
@@ -134,11 +142,8 @@ internal data class LiteratureComparison(
         rows.forEach { row ->
             val concepts = if (row.concepts.isEmpty()) COMPARISON_PENDING
             else row.concepts.joinToString("；") { it.markdownValue() }
-            val relations = if (row.relations.isEmpty()) COMPARISON_PENDING
-            else row.relations.joinToString("；") { relation ->
-                val kind = relation.kind?.zh()?.let { "$it " }.orEmpty()
-                "$kind${relation.otherLabel}：${relation.cell.markdownValue()}"
-            }
+            val relations = if (row.relations.isEmpty()) COMPARISON_NO_DIALOGUE
+            else row.relations.joinToString("；") { it.tableValue() }
             append("| ${md(row.label())} | ${md(row.claim.markdownValue())} | ${md(row.method.markdownValue())} | ${md(concepts)} | ${md(relations)} |\n")
         }
         append("\n## 出处\n\n")
@@ -148,10 +153,14 @@ internal data class LiteratureComparison(
             append("- 方法 / 证据：${citeMarkdown(row.method)}\n")
             if (row.concepts.isEmpty()) append("- 关键概念：$COMPARISON_PENDING\n")
             row.concepts.forEach { append("- 关键概念：${citeMarkdown(it)}\n") }
-            if (row.relations.isEmpty()) append("- 与其他几篇的关系：$COMPARISON_PENDING\n")
+            if (row.relations.isEmpty()) append("- 与其他几篇的关系：$COMPARISON_NO_DIALOGUE\n")
             row.relations.forEach { relation ->
-                val kind = relation.kind?.zh()?.let { "$it " }.orEmpty()
-                append("- 与 ${relation.otherLabel}：$kind${citeMarkdown(relation.cell)}\n")
+                if (relation.noDialogue) {
+                    append("- 与 ${relation.otherLabel}：$COMPARISON_NO_DIALOGUE\n")
+                } else {
+                    val kind = relation.kind?.zh()?.let { "$it " }.orEmpty()
+                    append("- 与 ${relation.otherLabel}：$kind${citeMarkdown(relation.cell)}\n")
+                }
             }
             append("\n")
         }
@@ -258,7 +267,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             }
             return if (rule == "ok") source else null
         }
-        val rows = reconcileRelations(books.map { book ->
+        val rows = withMissingDialogues(reconcileRelations(books.map { book ->
             val meta = paperMetas.getValue(book.id)
             val raw = byBook[book.id]
             ComparisonRow(
@@ -272,7 +281,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                     .map { cellFrom(it, book.id, ::cite) },
                 relations = relationsFrom(raw?.get("relations") as? JsonArray, book.id, ::cite),
             )
-        })
+        }))
         val (outline, outlineNotice) = outlineFrom(body["outline"] as? JsonArray, ::cite)
         val table = LiteratureComparison(rows, outline)
         val audit = table.audit()
@@ -352,12 +361,30 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
         }
     }
 
+    /** A pair the model did not compare is an explanation, not a failed citation. */
+    private fun withMissingDialogues(rows: List<ComparisonRow>): List<ComparisonRow> {
+        val ids = rows.map { it.bookId }
+        return rows.map { row ->
+            val present = row.relations.map { it.otherBookId }.toSet()
+            val missing = ids.filter { it != row.bookId && it !in present }.map { otherId ->
+                ComparisonRelation(
+                    otherBookId = otherId,
+                    otherLabel = labelOf(otherId),
+                    kind = null,
+                    cell = ComparisonCell(COMPARISON_NO_DIALOGUE, null, pending = false),
+                    noDialogue = true,
+                )
+            }
+            if (missing.isEmpty()) row else row.copy(relations = row.relations + missing)
+        }
+    }
+
     private fun cellFrom(
         raw: JsonObject?,
         bookId: String,
         cite: (Int?, String) -> GuideExcerpt?,
     ): ComparisonCell {
-        val text = (raw?.get("text") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        val text = polishTerms((raw?.get("text") as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
         val ref = (raw?.get("ref") as? JsonPrimitive)?.intOrNull
         if (!acceptableProse(text, 80)) return pendingCell()
         val source = cite(ref, bookId) ?: return pendingCell()
@@ -395,7 +422,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             val obj = element as? JsonObject ?: return@forEach
             seen++
             if (points.size >= 6) return@forEach
-            val thesis = (obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+            val thesis = polishTerms((obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
             if (!acceptableProse(thesis, 120)) return@forEach
             points += OutlinePoint(
                 thesis = thesis,
@@ -459,6 +486,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                                     put("otherBookId", relation.otherBookId)
                                     put("otherLabel", relation.otherLabel)
                                     relation.kind?.let { put("kind", it.name.lowercase()) }
+                                    if (relation.noDialogue) put("noDialogue", true)
                                     put("cell", cellToJson(relation.cell))
                                 })
                             }
@@ -494,7 +522,8 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
             }
             fun cell(obj: JsonObject?): ComparisonCell? {
                 if (obj == null) return null
-                val text = (obj["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().ifBlank { COMPARISON_PENDING }
+                val text = polishTerms((obj["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
+                    .ifBlank { COMPARISON_PENDING }
                 val storedPending = (obj["pending"] as? JsonPrimitive)?.booleanOrNull == true
                 val source = resolve(obj["source"] as? JsonObject)
                 val pending = storedPending || source == null
@@ -516,12 +545,23 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                     relations = (obj["relations"] as? JsonArray)?.map { rel ->
                         val relation = rel as? JsonObject ?: return null
                         val other = (relation["otherBookId"] as? JsonPrimitive)?.contentOrNull ?: return null
-                        ComparisonRelation(
-                            otherBookId = other,
-                            otherLabel = (relation["otherLabel"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
-                            kind = kindOf((relation["kind"] as? JsonPrimitive)?.contentOrNull),
-                            cell = cell(relation["cell"] as? JsonObject) ?: return null,
-                        )
+                        val noDialogue = (relation["noDialogue"] as? JsonPrimitive)?.booleanOrNull == true
+                        if (noDialogue) {
+                            ComparisonRelation(
+                                otherBookId = other,
+                                otherLabel = (relation["otherLabel"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
+                                kind = null,
+                                cell = ComparisonCell(COMPARISON_NO_DIALOGUE, null, pending = false),
+                                noDialogue = true,
+                            )
+                        } else {
+                            ComparisonRelation(
+                                otherBookId = other,
+                                otherLabel = (relation["otherLabel"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
+                                kind = kindOf((relation["kind"] as? JsonPrimitive)?.contentOrNull),
+                                cell = cell(relation["cell"] as? JsonObject) ?: return null,
+                            )
+                        }
                     }.orEmpty(),
                 )
             }
@@ -546,7 +586,7 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
                 val supports = sides("supports") ?: return@mapNotNull null
                 val opposes = sides("opposes") ?: return@mapNotNull null
                 OutlinePoint(
-                    thesis = (obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty(),
+                    thesis = polishTerms((obj["thesis"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()),
                     supports = supports,
                     opposes = opposes,
                 )
@@ -578,6 +618,8 @@ internal class LiteratureComparisonInput(val books: List<Textbook>) {
 }
 
 private fun pendingCell() = ComparisonCell(COMPARISON_PENDING, null, pending = true)
+
+private fun polishTerms(text: String) = text.replace("虚拳客", "鉴赏家")
 
 private fun acceptableProse(text: String, limit: Int): Boolean =
     text.isNotBlank() && text.length <= limit && LiteraturePassages.substantive(text) && !LiteraturePassages.hasLeakedRef(text)

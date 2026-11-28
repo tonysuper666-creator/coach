@@ -381,3 +381,11 @@ tasks.register<JavaExec>("bookMapVerify") {
     mainClass.set("com.coach.desktop.books.BookMapVerifyMain")
     jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
 }
+
+tasks.register<JavaExec>("literatureGoldAudit") {
+    group = "verification"
+    description = "Check local PDFs against page offsets and hashes; report counts only"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.getByName("test").runtimeClasspath
+    mainClass.set("com.coach.desktop.books.LiteratureGoldAudit")
+}

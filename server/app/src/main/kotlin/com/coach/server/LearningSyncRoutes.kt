@@ -11,15 +11,20 @@ import kotlinx.serialization.json.*
 
 internal val learningSyncActive = io.ktor.util.AttributeKey<Boolean>("learning-sync-active")
 
-internal fun Application.learningSyncRoutes(actor: LedgerActor, books: UnifiedBookPipeline) {
-    attributes.put(learningSyncActive,true)
-    val store = LearningSyncStore(books.accountsDirPath,books.learningBackup())
+internal fun Application.learningSyncRoutes(
+    actor: LedgerActor,
+    books: UnifiedBookPipeline,
+    allowOwner: Boolean = false,
+) {
+    attributes.put(learningSyncActive, true)
+    val store = LearningSyncStore(books.accountsDirPath, books.learningBackup(), allowOwner = allowOwner)
     suspend fun ApplicationCall.withAccount(block: (UnifiedBookScope, String) -> JsonObject) {
         val device = attributes[observedDevice]
         val friend = attributes.getOrNull(observedFriend)
         val token = request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
         val scope = UnifiedBookScope.fromCall(device, friend)
-        if (!scope.isSableAccount) { respond(HttpStatusCode.Forbidden); return }
+        val allowed = scope.isSableAccount || (allowOwner && friend == null)
+        if (!allowed) { respond(HttpStatusCode.Forbidden); return }
         try {
             // Serialize the authorization check with device revocation. The request cannot supply a storage path.
             val result = books.withActiveAccount(scope) {

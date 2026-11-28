@@ -463,6 +463,55 @@ class StanceExplanationTest {
     }
 
     /**
+     * 裁定回归（E1 / 古籍短引文扩整句）：古籍与繁文典籍块里只给一段短 quote（5 字以上），
+     * 服务端必须将区间与 quote 扩到所在整句原句，且该句通过全部门禁并保留。
+     */
+    @Test
+    fun classicalShortQuoteExpandsToFullSentenceAndKeepsSentence() {
+        val bookHash = "8".repeat(64)
+        val firstSent = "初九：潛龍勿用。"
+        val secondSent = "象曰：潛龍勿用，陽在下也。"
+        val zhouyiBlock = "$firstSent$secondSent"
+        val esotericPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p2:40", 2, zhouyiBlock))),
+            BookStance.ESOTERIC,
+        )
+        val esotericPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"象传解释初九潜龙勿用是因为阳气尚处在最下方。","anchors":["S1"],"quote":"潛龍勿用，陽在下"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val esotericRes = assertNotNull(checkedStancePayload(esotericPayload, esotericPack, BookStance.ESOTERIC))
+        assertEquals(0, esotericRes.droppedSentences)
+        val esotericSent = (esotericRes.layers.single() as CheckedStanceLayer.Book).sentences.single()
+        val esotericCite = esotericSent.citations.single()
+        assertEquals(secondSent, esotericCite.quote)
+        assertEquals(40 + zhouyiBlock.indexOf(secondSent), esotericCite.startUtf16)
+        assertEquals(40 + zhouyiBlock.indexOf(secondSent) + secondSent.length, esotericCite.endUtf16)
+
+        val lunyuSent1 = "子曰：學而時習之，不亦說乎？"
+        val lunyuSent2 = "有朋自遠方來，不亦樂乎？"
+        val lunyuBlock = "$lunyuSent1$lunyuSent2"
+        val classicPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p3:10", 3, lunyuBlock))),
+            BookStance.CLASSIC,
+        )
+        val classicPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"原文说朋友从远方到来也是令人快乐的事。","anchors":["S1"],"quote":"有朋自遠方來"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val classicRes = assertNotNull(checkedStancePayload(classicPayload, classicPack, BookStance.CLASSIC))
+        assertEquals(0, classicRes.droppedSentences)
+        val classicLayer = classicRes.layers.single() as CheckedStanceLayer.Book
+        assertEquals("原文", classicLayer.label)
+        val classicCite = classicLayer.sentences.single().citations.single()
+        assertEquals(lunyuSent2, classicCite.quote)
+        assertEquals(10 + lunyuBlock.indexOf(lunyuSent2), classicCite.startUtf16)
+        assertEquals(10 + lunyuBlock.indexOf(lunyuSent2) + lunyuSent2.length, classicCite.endUtf16)
+    }
+
+    /**
      * 规则 2、3、4、8：结构违规整次拒绝（触发重试），包括推想含第一人称、书外带页码、只看原文带书外、超 5 段。
      */
     @Test

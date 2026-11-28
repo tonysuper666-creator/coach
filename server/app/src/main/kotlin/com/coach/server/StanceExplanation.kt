@@ -18,6 +18,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import org.slf4j.LoggerFactory
 import java.text.Normalizer
 
 internal data class StanceRequestSpec(
@@ -461,9 +462,9 @@ internal fun buildStanceSystemPrompt(
         2. Output 0 to 5 items in "paragraphs". Allowed layer values: $allowedLayersDesc.
         3. Every "book" paragraph MUST use ONLY keys "layer" and "sentences". Each item in "sentences" is STRICTLY ONE Chinese sentence (only ONE sentence-ending mark 。！？ at the end; NEVER put two sentences in one item).
         4. Each "book" sentence MUST state ONLY facts or claims explicitly written in its cited original sentence(s) — NEVER state anything not written in the cited original sentence(s), and NEVER put meta-disclaimers (like "本书不能预测现实") into a "book" sentence (put meta-disclaimers in "outside"). Each "book" sentence MUST have:
-           - "text": one plain Chinese sentence (no newlines, no 【】, no page numbers, NEVER write ASCII double quotes " inside strings — use 「」 or bare words), stating ONLY what is written in its cited original sentence(s).
+           - "text": one plain Chinese sentence (no newlines, no 【】, no page numbers) stating ONLY what is written in its cited original sentence(s). In "text", use NO quotation marks of any kind (", “”, 「」, 『』, '') and NEVER put an original sentence (especially with sentence-ending punctuation) inside 「」 — write source terms bare; the application highlights the exact cited sentence.
            - "anchors": non-empty array of supplied anchor IDs (like ["S1"]) with no duplicates, citing ONLY blocks that directly support THIS specific sentence.
-           - "quote" / "quotes": copy the FULL original sentence verbatim (character-for-character with no "..." and no edits) from the cited anchor block. When one Chinese sentence merges facts from multiple original sentences, cite each supporting original sentence separately using multiple anchors or "quotes" (e.g. "quotes":{"S1":"full sentence 1","S2":"full sentence 2"} or "quotes":["full sentence 1","full sentence 2"] when in the same block).
+           - "quote": copy a verbatim contiguous substring (at least 5 characters, prefer short and exact over long and approximate — the application automatically expands it to the full supporting sentence; no "..." and no edits) from the first cited anchor block. Optionally, when one Chinese sentence merges facts from multiple original sentences, you may cite each separately using multiple anchors or "quotes" (e.g. "quotes":{"S1":"...","S2":"..."} or "quotes":["...","..."]).
         5. Every "outside" paragraph MUST use ONLY keys "layer", "kind" (one of "通行讲法", "注家读法", "今人解读", "史学"), and "text" (plain text, NO anchors, NO page numbers like 第X页 / page X, NO 【】, NEVER write unescaped ASCII double quotes ").
         6. Every "guess" paragraph (ONLY allowed in "life" stance) MUST use ONLY keys "layer" and "text" (third-person ONLY, NO 我/我们/I/my, NO anchors, NO page numbers, NO 【】, NEVER write unescaped ASCII double quotes ").
         7. NEVER invent facts as "book" sentences. If the supplied blocks do not directly answer the question, omit "book" paragraphs (leave only valid "outside"/"guess" if allowed by stance, or {"paragraphs":[],"boundary":null}).
@@ -904,6 +905,13 @@ internal object ServerQuoteLocator {
     }
 }
 
+private val STANCE_DROP_LOG = LoggerFactory.getLogger("coach.reader")
+
+private fun logStanceDrop(stance: BookStance, reason: String, anchors: List<String> = emptyList()) {
+    val anchorTag = if (anchors.isEmpty()) "none" else anchors.joinToString(",")
+    STANCE_DROP_LOG.info("COACH stance.drop stance={} reason={} anchors={}", stance.wire, reason, anchorTag)
+}
+
 private val STANCE_LOCATOR_REGEX = Regex(
     """(?:PDF\s*(?:page|第)|(?:page|页码)\s*[:：]?\s*\d|第\s*\d+\s*页)""",
     RegexOption.IGNORE_CASE,
@@ -1052,23 +1060,29 @@ internal fun checkedStancePayload(
                 for (rawSent in rawSentences) {
                     val sentObj = rawSent as? JsonObject
                     if (sentObj == null) {
+                        logStanceDrop(stance, "SHAPE")
                         droppedSentences++
                         continue
                     }
+                    val rawAnchorIds = (sentObj["anchors"] as? JsonArray).orEmpty()
+                        .mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim()?.takeIf { s -> s.isNotEmpty() } }
                     val text = (sentObj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
                     if (text.isNullOrEmpty() || '\n' in text || '\r' in text || '【' in text || '】' in text ||
                         STANCE_LOCATOR_REGEX.containsMatchIn(text)
                     ) {
+                        logStanceDrop(stance, "SHAPE", rawAnchorIds)
                         droppedSentences++
                         continue
                     }
                     // 规则 1：按句末标点切必须只有一句
                     if (StanceSentenceSplitter.countSentences(text) != 1) {
+                        logStanceDrop(stance, "SENTENCE_COUNT", rawAnchorIds)
                         droppedSentences++
                         continue
                     }
                     val anchorsArr = sentObj["anchors"] as? JsonArray
                     if (anchorsArr == null || anchorsArr.isEmpty()) {
+                        logStanceDrop(stance, "ANCHOR")
                         droppedSentences++
                         continue
                     }
@@ -1076,6 +1090,7 @@ internal fun checkedStancePayload(
                     if (anchorIds.size != anchorsArr.size || anchorIds.distinct().size != anchorIds.size ||
                         anchorIds.any { it !in pack.byAnchor }
                     ) {
+                        logStanceDrop(stance, "ANCHOR", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1087,6 +1102,7 @@ internal fun checkedStancePayload(
                             if (strictSinglePageOnly) b.pdfPage != effectiveReadThroughPage else b.pdfPage > effectiveReadThroughPage
                         }
                         if (violated) {
+                            logStanceDrop(stance, "OUT_OF_RANGE", anchorIds)
                             outOfRange++
                             droppedSentences++
                             continue
@@ -1098,6 +1114,7 @@ internal fun checkedStancePayload(
                         val hasMain = blocks.any { it.classicalKind == ClassicalSpanKind.MAIN_TEXT }
                         val hasComment = blocks.any { it.classicalKind != ClassicalSpanKind.MAIN_TEXT }
                         if (hasMain && hasComment) {
+                            logStanceDrop(stance, "CLASSIC_MIXED", anchorIds)
                             droppedSentences++
                             continue
                         }
@@ -1107,6 +1124,7 @@ internal fun checkedStancePayload(
                     val sentenceGate = SourceCitationGate(pack.anchorTextMap)
                     val checked = sentenceGate.push(text + anchorIds.joinToString("") { "【$it】" }) + sentenceGate.finish(true)
                     if (sentenceGate.accepted != 1 || checked.isEmpty()) {
+                        logStanceDrop(stance, "INLINE_QUOTE", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1136,6 +1154,7 @@ internal fun checkedStancePayload(
                     }
                     val hasExplicitQuote = singleQuote != null || quotesByAnchor.isNotEmpty()
                     if (!hasExplicitQuote && !passesSameScriptSupport(text, blocks)) {
+                        logStanceDrop(stance, "CLAIM_SUPPORT", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1143,6 +1162,7 @@ internal fun checkedStancePayload(
                     val citations = mutableListOf<CheckedStanceCitation>()
                     val seenCitationSpans = HashSet<Triple<String, Int, Int>>()
                     var quoteFailed = false
+                    var failedAnchor: String? = null
                     for ((idx, block) in blocks.withIndex()) {
                         val requestedQuotes: List<String> = quotesByAnchor[block.anchor]
                             ?: if (idx == 0 && singleQuote != null) listOf(singleQuote) else emptyList()
@@ -1151,6 +1171,7 @@ internal fun checkedStancePayload(
                                 val located = ServerQuoteLocator.verifyAndLocate(requestedQuote, block.text)
                                 if (!located.verified || located.endUtf16 <= located.startUtf16) {
                                     quoteFailed = true
+                                    failedAnchor = block.anchor
                                     break
                                 }
                                 val (expStart, expEnd) = ServerQuoteLocator.expandToSentenceBounds(
@@ -1189,12 +1210,14 @@ internal fun checkedStancePayload(
                         }
                     }
                     if (quoteFailed || citations.isEmpty()) {
+                        logStanceDrop(stance, "QUOTE_LOCATE", failedAnchor?.let(::listOf) ?: anchorIds)
                         droppedSentences++
                         continue
                     }
 
                     // 规则 1：词面粗筛，陈述与该句所引原句毫不相干就丢句；不判断语义蕴含（见 StanceClaimSupport 注释）
                     if (!StanceClaimSupport.isSupported(text, citations, blocks)) {
+                        logStanceDrop(stance, "CLAIM_SUPPORT", anchorIds)
                         droppedSentences++
                         continue
                     }

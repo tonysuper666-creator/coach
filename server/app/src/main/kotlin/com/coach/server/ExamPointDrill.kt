@@ -859,7 +859,7 @@ class ExamPointDrillPipeline(
         val prompt = sourcePrompt(topicTitle, kept, essayWanted)
         // Durable batches cache their result by key, even after a prompt or exam format changes.
         val scope = sha256("$system\u0000$prompt".toByteArray(Charsets.UTF_8))
-        val first = generator.generateSection(
+        var first = generator.generateSection(
             systemPrompt = system,
             userPrompt = prompt,
             task = "exam_point_drill",
@@ -872,8 +872,26 @@ class ExamPointDrillPipeline(
                 "出题模型不是 Haiku，整批未入库", first.model, "",
             ).toJson()
         }
-        val firstJson = extractJsonObject(first.text)
+        var firstParsed = extractJsonObjectOrNull(first.text)
+        var firstJson = firstParsed ?: buildJsonObject {}
         var drafts = ExamPointDrillGate.parseDrafts(firstJson)
+        val initialChoiceRows = firstJson["choices"] as? JsonArray
+        val firstMalformed = firstParsed == null || initialChoiceRows == null || (initialChoiceRows.isNotEmpty() && drafts.isEmpty())
+        if (firstMalformed) {
+            val retried = generator.generateSection(
+                systemPrompt = system,
+                userPrompt = "$prompt\n上一轮返回的 JSON 格式损坏或被截断，请重新输出严格合法、括号完整闭合、包含 choices 数组的单个 JSON 对象，不要附加解释文字。",
+                task = "exam_point_drill",
+                batchKey = "drill-gen-retry-$topicId-$scope",
+                maxTokens = ExamPointDrillLimits.MAX_TOKENS,
+            )
+            if (retried.model.startsWith("claude-haiku")) {
+                first = retried
+                firstParsed = extractJsonObjectOrNull(retried.text)
+                firstJson = firstParsed ?: buildJsonObject {}
+                drafts = ExamPointDrillGate.parseDrafts(firstJson)
+            }
+        }
         var essay = if (essayWanted) ExamPointDrillGate.parseEssay(firstJson) else null
         val indexes = citationIndex(kept)
         val sourceTexts = kept.map { it.text }
@@ -891,19 +909,36 @@ class ExamPointDrillPipeline(
         val choiceRows = firstJson["choices"] as? JsonArray
         val malformedBatch = choiceRows == null || (choiceRows.isNotEmpty() && drafts.isEmpty())
         if (failedIds.isNotEmpty() || essayNeedsRewrite || malformedBatch) {
-            val repair = generator.generateSection(
+            val repairUserPrompt = if (malformedBatch) {
+                "$prompt\n上一份单选题格式不完整，请重新输出包含 choices 数组的完整 JSON 对象。"
+            } else {
+                repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite, failedReasons)
+            }
+            var repair = generator.generateSection(
                 systemPrompt = generatorSystem(essayWanted),
-                userPrompt = if (malformedBatch) {
-                    "$prompt\n上一份单选题格式不完整，请重新输出包含 choices 数组的完整 JSON 对象。"
-                } else {
-                    repairPrompt(topicTitle, kept, essayWanted, failedIds, essayNeedsRewrite, failedReasons)
-                },
+                userPrompt = repairUserPrompt,
                 task = "exam_point_drill",
                 batchKey = "drill-repair-$topicId-$scope",
                 maxTokens = ExamPointDrillLimits.MAX_TOKENS,
             )
             if (repair.model.startsWith("claude-haiku")) {
-                val repaired = extractJsonObject(repair.text)
+                var repairedParsed = extractJsonObjectOrNull(repair.text)
+                val repairMalformed = repairedParsed == null ||
+                    (repairedParsed["choices"] as? JsonArray == null && (!essayNeedsRewrite || repairedParsed["essay"] == null))
+                if (repairMalformed) {
+                    val repairRetry = generator.generateSection(
+                        systemPrompt = generatorSystem(essayWanted),
+                        userPrompt = "$repairUserPrompt\n上一轮重写返回的 JSON 格式损坏或被截断，请重新输出严格合法、括号完整闭合的单个 JSON 对象。",
+                        task = "exam_point_drill",
+                        batchKey = "drill-repair-retry-$topicId-$scope",
+                        maxTokens = ExamPointDrillLimits.MAX_TOKENS,
+                    )
+                    if (repairRetry.model.startsWith("claude-haiku")) {
+                        repair = repairRetry
+                        repairedParsed = extractJsonObjectOrNull(repairRetry.text)
+                    }
+                }
+                val repaired = repairedParsed ?: buildJsonObject {}
                 val rewritten = ExamPointDrillGate.parseDrafts(repaired).associateBy { it.id }
                 drafts = drafts.map { draft -> if (draft.id in failedIds) rewritten[draft.id] ?: draft else draft }
                 val extras = rewritten.filterKeys { id -> drafts.none { it.id == id } }.values
@@ -924,10 +959,23 @@ class ExamPointDrillPipeline(
         val essayVotes = mutableListOf<List<SupportVote>>()
         var checkerModel = ""
         if (ready.isNotEmpty() || essayReady != null) {
-            val checked = askChecker(topicTitle, kept, ready, essayReady, "drill-check-$topicId-$scope")
+            var checked = askChecker(topicTitle, kept, ready, essayReady, "drill-check-$topicId-$scope")
             checkerModel = checked.model
             if (checked.model.startsWith("gpt-")) {
-                val (answers, essayRound) = ExamPointDrillGate.parseVotes(extractJsonObject(checked.text))
+                var checkedParsed = extractJsonObjectOrNull(checked.text)
+                var parsedVotes = ExamPointDrillGate.parseVotes(checkedParsed ?: buildJsonObject {})
+                val checkerEmptyOrBroken = checkedParsed == null ||
+                    ((ready.isNotEmpty() && parsedVotes.first.isEmpty()) && (essayReady == null || parsedVotes.second.isEmpty()))
+                if (checkerEmptyOrBroken) {
+                    val checkedRetry = askChecker(topicTitle, kept, ready, essayReady, "drill-check-retry-$topicId-$scope")
+                    if (checkedRetry.model.startsWith("gpt-")) {
+                        checked = checkedRetry
+                        checkerModel = checkedRetry.model
+                        checkedParsed = extractJsonObjectOrNull(checkedRetry.text)
+                        parsedVotes = ExamPointDrillGate.parseVotes(checkedParsed ?: buildJsonObject {})
+                    }
+                }
+                val (answers, essayRound) = parsedVotes
                 ready.forEach { draft -> votes.getOrPut(draft.id) { mutableListOf() }.add(answers[draft.id] ?: SupportVote()) }
                 if (essayReady != null) essayVotes += essayRound
                 val again = ready.filter { draft ->
@@ -1101,13 +1149,15 @@ class ExamPointDrillPipeline(
         blocks.groupBy { it.bookId },
     )
 
-    private fun extractJsonObject(raw: String): JsonObject {
+    private fun extractJsonObjectOrNull(raw: String): JsonObject? {
         val cleaned = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
         val start = cleaned.indexOf('{')
         val end = cleaned.lastIndexOf('}')
-        if (start < 0 || end <= start) return buildJsonObject {}
-        return runCatching { json.parseToJsonElement(cleaned.substring(start, end + 1)).jsonObject }.getOrDefault(buildJsonObject {})
+        if (start < 0 || end <= start) return null
+        return runCatching { json.parseToJsonElement(cleaned.substring(start, end + 1)).jsonObject }.getOrNull()
     }
+
+    private fun extractJsonObject(raw: String): JsonObject = extractJsonObjectOrNull(raw) ?: buildJsonObject {}
 
     private data class CitationIndex(
         val byPage: Map<Pair<String, Int>, List<CourseMaterialTextBlock>>,

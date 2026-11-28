@@ -39,16 +39,18 @@ internal object CourseExamPoints {
     private val conversationalLeadNoise = Regex("""(?i)^(?:let\s+us|let's|consider\s+(?:the|two|three|a|an|how|why|what)|suppose\s+(?:that|a|an|we)|assume\s+(?:that|a|an|we)|imagine\s+(?:that|a|an)|think\s+about|notice\s+that|note\s+that|recall\s+that|remember\s+that|those\s+(?:in|who|with|conceived|born|aged)\b|(?:a\s+)?special\s+note\s+for)\b""")
     private val truncatedTrailingWordNoise = Regex("""(?i)\s+(?:the|a|an|of|for|and|or|to|in|on|at|by|from|with|into|onto|upon|as|than|that|which|who|whose|where|when|while|between|among|under|over|through|during|without|within|against|about|across|after|before|toward|towards)$""")
     private val incompleteBetweenNoise = Regex("""(?i)^(?:the\s+)?relationship\s+between\s+(?!.*\band\b)""")
+    private val demonstrativeSubjectLeadNoise = Regex("""(?i)^(?:this|these|that|those|it|they|we|you)\s+""")
+    private val forVariousTableNoise = Regex("""(?i)\bfor\s+various\b""")
+    private val chartTitleLeadNoise = Regex("""(?i)^(?:chart|graph|plot|diagram|histogram|scatter\s*plot)\s+of\b""")
+    private val finiteCopulaNoise = Regex("""\b(?:is|are|was|were)\b""")
     private val leadingEdgeCounterNoise = Regex("""^(?:\d{1,3}\s*/\s*\d{1,3}|\d{1,3}[.)]?)\s+""")
     private val trailingEdgeCounterNoise = Regex("""(?i)(?:\s*\(\s*\d{1,3}\s*/\s*\d{1,3}\s*\)|\s+\d{1,3}\s*/\s*\d{1,3}|\s+page\s+\d{1,4}|\s+\d{4}(?:\s*[-/]\s*\d{2,4})?|\s+\d{1,4})+$""")
     private val edgeSeparatorTrim = Regex("""^[\s\-–—|·•:：,，/]+|[\s\-–—|·•:：,，/]+$""")
     private val functionCallNoise = Regex("""^[A-Za-z]{1,2}\([^)]{1,20}\)$""")
     private val journalCitationNoise = Regex("""(?i)(?:,\s*\d{1,4}\(\d{1,4}\)|\b\d{1,4}\(\d{1,4}\)\s*:\s*\d{1,5}\s*[-–—]\s*\d{1,5}|\b(?:journal|quarterly|review)\s+of\b.{0,40}\d)""")
-    private val figureOrTableCaptionLine = Regex("""(?i)^(?:figure|fig\.?|table|box|exhibit|panel|chart)\s+\d+(?:\.\d+)*\b""")
     private val leadingArticlePrefix = Regex("""^(?:the|a|an)\s+""")
-    private val wrappedContinuationPrefix = Regex("""^(?:of|for|in|on|to|and|or|with|from|by|as|at|the|a|an)\b""")
     // Case-sensitive lowercase verbs so uppercase acronyms/variables (e.g. "IS" in "IH–IS") are never misread as verbs.
-    private val sentenceVerbNoise = Regex("""\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes|relies|satisfies|prevents|allows|enables|creates|produces|reduces|increases|decreases|determines|explains|describes|predicts|yields|generates|states|argues|claims|holds|exists|occurs|happens|follows|remains|becomes|provides|offers|gives|takes|uses|needs|wants|prefers|chooses|faces|pays|charges|sets|raises|lowers|changes|shifts|moves)\b""")
+    private val sentenceVerbNoise = Regex("""\b(?:is|are|was|were|has|have|had|can|could|will|would|should|must|does|do|did|getting|becoming|leads|makes|causes|shows|starts|begins|involves|depends|requires|implies|suggests|indicates|assumes|relies|satisfies|prevents|allows|enables|creates|produces|reduces|increases|decreases|determines|explains|describes|predicts|yields|generates|states|argues|claims|holds|exists|occurs|happens|follows|remains|becomes|provides|offers|gives|takes|uses|needs|wants|prefers|chooses|faces|pays|charges|sets|raises|lowers|changes|shifts|moves|leaves)\b""")
     private val nonTopicLabel = Regex(
         """(?i)^(?:example|examples|note|notes|side\s*note|sidebar|aside|figure|fig\.?|table|box|source|sources|step|steps|case|cases|question|questions|problem|problems|exercise|exercises|answer|answers|solution|solutions|hint|hints|remark|remarks|proof|equation|eq\.?|formula|definition|def\.?|theorem|lemma|proposition|corollary|assumption|assumptions|chart|graph|panel|exhibit|diagram|warning|tip|recall|key|true|false|unclear|uncertain|appendix|part|chapter|section|unit|module|lecture|week)(?:\s+[a-z0-9]+(?:\.[a-z0-9]+)*)?$""",
     )
@@ -531,6 +533,8 @@ internal object CourseExamPoints {
             trailingSlideFraction.containsMatchIn(heading) || tableMetaSuffixNoise.containsMatchIn(heading) ||
             numericCohortLabelNoise.containsMatchIn(heading) || parentheticalUnitCohortNoise.containsMatchIn(heading) ||
             conditionalLeadNoise.containsMatchIn(heading) || conversationalLeadNoise.containsMatchIn(heading) ||
+            demonstrativeSubjectLeadNoise.containsMatchIn(heading) || forVariousTableNoise.containsMatchIn(heading) ||
+            chartTitleLeadNoise.containsMatchIn(heading) ||
             truncatedTrailingWordNoise.containsMatchIn(heading) || incompleteBetweenNoise.containsMatchIn(heading) ||
             functionCallNoise.matches(heading)
         ) return false
@@ -555,6 +559,9 @@ internal object CourseExamPoints {
             val words = heading.split(whitespace)
             if (words.size > 8) return false
             if (!officialTocSection && !markdown && !defined && !numbered && words.size > 7) return false
+            // Short finite-copula clauses ("Customers are risk-neutral") are sentences, not topic nouns,
+            // except official TOC section headings ("Health is uncertain and contagious").
+            if (!officialTocSection && words.size >= 3 && finiteCopulaNoise.containsMatchIn(heading)) return false
             if (!officialTocSection && words.size >= 6 && sentenceVerbNoise.containsMatchIn(heading)) return false
         }
         return true
@@ -774,12 +781,17 @@ internal object CourseExamPoints {
             }
         }
 
+        val allFullTocTitles = fullTocTitlesByBook.values.flatten().toSet() +
+            sectionSpansByBook.values.flatten().map { it.normalizedTitle }.toSet()
+
         val indexed = mutableListOf<ExamTeachingPage>()
         for (page in bodyPages) {
             val lines = page.text.lineSequence().map(String::trim)
                 .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
                 .toList()
             val isSlideLike = page.role != CourseMaterialRole.CORE_TEXTBOOK
+            val bookTocTitles = fullTocTitlesByBook[page.bookId].orEmpty() +
+                sectionSpansByBook[page.bookId].orEmpty().map { it.normalizedTitle }
             fun isRepeatingSlideEdge(candidate: String): Boolean {
                 val norm = normalize(candidate)
                 val stripped = normalizeEdgeCandidate(candidate)
@@ -832,6 +844,13 @@ internal object CourseExamPoints {
                     else -> continue
                 }.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
                 val key = normalize(heading)
+                // Skip ONLY actual 2-line wrapped TOC headings on this page (e.g. "13 Technology and the price"
+                // immediately followed by "of health care" matching TOC "technology and the price of health care"),
+                // never standalone concepts like "Adverse selection" that share a prefix with a longer TOC title.
+                if (!isSlideLike && !defined && index + 1 < lines.size) {
+                    val joined = normalize("$heading ${lines[index + 1]}")
+                    if (joined != key && (joined in bookTocTitles || joined in allFullTocTitles)) continue
+                }
                 val bodyBacked = key in officialTocSectionKeys || hasDedicatedTextbookProse(key)
                 if (isSlideLike && !bodyBacked && (isRepeatingSlideEdge(line) || isRepeatingSlideEdge(heading))) continue
                 if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(heading)) continue
@@ -841,29 +860,6 @@ internal object CourseExamPoints {
             }
             indexed += page.copy(text = normalize(page.text))
         }
-
-        // Strip figure/table caption lines when verifying whether a slide-only title is genuinely discussed in textbook body.
-        val textbookNonCaptionByPage = HashMap<Pair<String, Int>, String>()
-        for (pg in bodyPages) {
-            if (pg.role != CourseMaterialRole.CORE_TEXTBOOK) continue
-            val rawLines = pg.text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-            val nonCaption = mutableListOf<String>()
-            var skipNextCaptionCont = false
-            for (l in rawLines) {
-                if (figureOrTableCaptionLine.containsMatchIn(l)) {
-                    skipNextCaptionCont = true
-                    continue
-                }
-                if (skipNextCaptionCont) {
-                    skipNextCaptionCont = false
-                    if (l.length <= 90 && !l.endsWith(".") && !l.endsWith("。")) continue
-                }
-                nonCaption += l
-            }
-            textbookNonCaptionByPage[pg.bookId to pg.page] = normalize(nonCaption.joinToString("\n"))
-        }
-        val allFullTocTitles = fullTocTitlesByBook.values.flatten().toSet() +
-            sectionSpansByBook.values.flatten().map { it.normalizedTitle }.toSet()
 
         val sectionRangesByKey = HashMap<String, MutableList<Pair<String, IntRange>>>()
         for ((bookId, spans) in sectionSpansByBook) {
@@ -881,25 +877,11 @@ internal object CourseExamPoints {
         )
 
         val rawDrafts = titles.mapNotNull { (key, title) ->
-            // Drop line-wrapped truncated chapter/section prefixes (e.g. "Technology and the price" when TOC has
-            // "Technology and the price of health care"), while keeping genuine shorter titles before a subtitle colon.
-            if (key !in officialTocSectionKeys && allFullTocTitles.any { full ->
-                    full.startsWith("$key ") && wrappedContinuationPrefix.containsMatchIn(full.removePrefix("$key "))
-                }
-            ) {
-                return@mapNotNull null
-            }
             val pattern = termPattern(key)
             val isStrong = key in textbookStrong
             val linkMap = LinkedHashMap<Pair<String, Int>, CourseTopicLinkPlan>()
             for (pg in indexed) {
-                val matched = if (!isStrong && pg.role == CourseMaterialRole.CORE_TEXTBOOK) {
-                    val bodyOnly = textbookNonCaptionByPage[pg.bookId to pg.page].orEmpty()
-                    pattern.containsMatchIn(bodyOnly)
-                } else {
-                    pattern.containsMatchIn(pg.text)
-                }
-                if (matched) {
+                if (pattern.containsMatchIn(pg.text)) {
                     linkMap.putIfAbsent(
                         pg.bookId to pg.page,
                         CourseTopicLinkPlan(pg.bookId, startPage = pg.page, endPage = pg.page, role = pg.role),

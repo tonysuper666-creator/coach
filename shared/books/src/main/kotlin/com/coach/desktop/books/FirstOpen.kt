@@ -5,10 +5,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -71,6 +74,8 @@ internal object FirstOpenCopy {
     const val ANSWER_HINT = "选一个答案。做完就能看到讲解。"
     const val NO_QUESTION = "开头这几章还没出成题。可以再试一次，或先翻开这本书。"
     const val GENERIC_FAIL = "这次没出成题。可以再试一次。"
+    const val ALLOW_EXPLAIN = "允许这本书讲解"
+    const val ALLOW_EXPLAIN_HINT = "这本书还没开启讲解许可。允许后只发送开头几小节用来出题。"
 }
 
 internal enum class FirstOpenBlock { NONE, OFFLINE, BUSY, IMPORT, OTHER }
@@ -216,9 +221,49 @@ internal fun FirstOpenInvite(
 
 internal sealed interface TasteStep {
     data object Loading : TasteStep
+    data object NeedConsent : TasteStep
     data class Hold(val block: FirstOpenBlock, val message: String) : TasteStep
     data class Ask(val quiz: BookCompanionQuiz) : TasteStep
     data class Told(val quiz: BookCompanionQuiz, val picked: String) : TasteStep
+}
+
+/**
+ * 进阅读页后轻提示开胃题小条：不遮挡正文，提供「来一道」「×」「不再提示」三个入口。
+ */
+@Composable
+internal fun FirstTasteStrip(
+    onTry: () -> Unit,
+    onDismiss: () -> Unit,
+    onNeverShow: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    PaperCard(
+        modifier = modifier.widthIn(max = 460.dp).testTag("first-taste-strip"),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "想先试一道开胃题吗？",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            V7TextButton(onClick = onTry, modifier = Modifier.testTag("first-taste-try")) {
+                Text("来一道")
+            }
+            V7TextButton(onClick = onNeverShow, modifier = Modifier.testTag("first-taste-never")) {
+                Text("不再提示")
+            }
+            V7TextButton(onClick = onDismiss, modifier = Modifier.testTag("first-taste-dismiss")) {
+                Text("×")
+            }
+        }
+    }
 }
 
 /**
@@ -248,10 +293,19 @@ internal fun FirstTastePanel(
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
     memory: FirstTasteMemory = remember { FirstTasteMemory() },
+    compact: Boolean = false,
+    onDismiss: (() -> Unit)? = null,
+    library: TextbookLibrary? = null,
+    onAllowExplain: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val pollMs = LocalConnectivityPollMs.current
     val currentBook by rememberUpdatedState(book)
+    val aiEnabled = LocalReadingAiExplain.current
+    val hostAllowExplain = LocalAllowBookExplain.current
+    val effectiveAllowExplain: (() -> Unit)? = onAllowExplain ?: hostAllowExplain?.let { cb -> { cb(book.id) } }
+    var localAllowed by remember(book.id) { mutableStateOf(false) }
+    val hasConsent = aiEnabled && (library == null || localAllowed || ExplainConsent(library.directory).allowed(book.id))
     var fetchTrigger by remember(book.id) { mutableIntStateOf(0) }
     var manualClicks by remember(book.id) { mutableIntStateOf(0) }
     var handledManualClicks by remember(book.id) { mutableIntStateOf(0) }
@@ -314,10 +368,14 @@ internal fun FirstTastePanel(
         }
     }
 
-    LaunchedEffect(book.id, fetchTrigger) {
+    LaunchedEffect(book.id, fetchTrigger, hasConsent) {
         val isManual = manualClicks > handledManualClicks
         handledManualClicks = manualClicks
         if (memory.step is TasteStep.Ask || memory.step is TasteStep.Told) return@LaunchedEffect
+        if (!hasConsent) {
+            memory.step = TasteStep.NeedConsent
+            return@LaunchedEffect
+        }
         if (connectivity == CoachConnectivityStatus.OFFLINE && !isManual && !recoveredOnline) {
             memory.step = TasteStep.Hold(
                 FirstOpenBlock.OFFLINE,
@@ -352,27 +410,43 @@ internal fun FirstTastePanel(
                 else TasteStep.Ask(quiz)
             }
             is ChapterCompanionFetchResult.Failed -> {
-                val latestConnectivity = CoachConnectivityRegistry.statusFor(explainer.identity?.serverUrl.orEmpty())
-                    .takeIf { it != CoachConnectivityStatus.UNKNOWN } ?: connectivity
-                val block = FirstOpenPlanner.blockFor(result.trouble, latestConnectivity)
-                memory.step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
+                if (result.trouble == ExplainTrouble.ConsentRequired) {
+                    memory.step = TasteStep.NeedConsent
+                } else {
+                    val latestConnectivity = CoachConnectivityRegistry.statusFor(explainer.identity?.serverUrl.orEmpty())
+                        .takeIf { it != CoachConnectivityStatus.UNKNOWN } ?: connectivity
+                    val block = FirstOpenPlanner.blockFor(result.trouble, latestConnectivity)
+                    memory.step = TasteStep.Hold(block, FirstOpenPlanner.statusText(block, result.message, bookInHand = true))
+                }
             }
         }
     }
-    Column(
-        modifier
-            .fillMaxSize()
-            .background(colors.bgCanvas)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 36.dp)
-            .testTag("first-taste"),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text(book.title, style = MaterialTheme.typography.titleLarge, color = colors.fgPrimary, textAlign = TextAlign.Center)
+    val body: @Composable () -> Unit = {
+        if (compact) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(book.title, style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary, modifier = Modifier.weight(1f))
+                V7TextButton(onDismiss ?: onReadBook, modifier = Modifier.testTag("first-taste-close")) { Text("×") }
+            }
+        } else {
+            Text(book.title, style = MaterialTheme.typography.titleLarge, color = colors.fgPrimary, textAlign = TextAlign.Center)
+        }
         when (val current = memory.step) {
             TasteStep.Loading -> {
                 Text(FirstOpenCopy.MAKING, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
+            }
+            TasteStep.NeedConsent -> {
+                Text(FirstOpenCopy.ALLOW_EXPLAIN_HINT, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
+                PrimaryButton(
+                    onClick = {
+                        localAllowed = true
+                        effectiveAllowExplain?.invoke()
+                        if (effectiveAllowExplain == null) library?.let { ExplainConsent(it.directory).allow(book.id) }
+                        manualClicks += 1
+                        fetchTrigger += 1
+                    },
+                    modifier = Modifier.testTag("first-taste-allow-explain"),
+                ) { Text(FirstOpenCopy.ALLOW_EXPLAIN) }
+                V7TextButton(onDismiss ?: onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }
             }
             is TasteStep.Hold -> {
                 Text(current.message, color = v7Alert(), textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
@@ -385,7 +459,7 @@ internal fun FirstTastePanel(
                 ) {
                     Text(FirstOpenCopy.RETRY)
                 }
-                V7TextButton(onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }
+                V7TextButton(onDismiss ?: onReadBook, modifier = Modifier.testTag("first-taste-read")) { Text(FirstOpenCopy.READ) }
             }
             is TasteStep.Ask -> {
                 Text(FirstOpenCopy.ANSWER_HINT, color = colors.fgSecondary, textAlign = TextAlign.Center, modifier = Modifier.testTag("first-taste-status"))
@@ -409,6 +483,37 @@ internal fun FirstTastePanel(
                     Text(FirstOpenCopy.CONTINUE)
                 }
             }
+        }
+    }
+    if (compact) {
+        PaperCard(
+            modifier = modifier
+                .widthIn(max = 460.dp)
+                .heightIn(max = 460.dp)
+                .testTag("first-taste"),
+            contentPadding = PaddingValues(16.dp),
+            contentSpacing = 12.dp,
+        ) {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                body()
+            }
+        }
+    } else {
+        Column(
+            modifier
+                .fillMaxSize()
+                .background(colors.bgCanvas)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp, vertical = 36.dp)
+                .testTag("first-taste"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            body()
         }
     }
 }

@@ -530,4 +530,19 @@ class BackgroundOcrImportTest {
             onNodeWithText("重试").assertIsDisplayed()
         } finally { root.toFile().deleteRecursively() }
     }
+
+    @Test fun importToastCanBeDismissedByCloseButton() = runComposeUiTest {
+        var dismissedId: Long? = null
+        setContent {
+            CoachTheme(false) {
+                BookImportToast(
+                    notice = BookImportNotice(42L, "《测试教材》识别完了"),
+                    onDismiss = { dismissedId = it },
+                )
+            }
+        }
+        onNodeWithTag("book-import-toast").assertIsDisplayed()
+        onNodeWithTag("book-import-toast-close").assertIsDisplayed().performClick()
+        assertEquals(42L, dismissedId)
+    }
 }

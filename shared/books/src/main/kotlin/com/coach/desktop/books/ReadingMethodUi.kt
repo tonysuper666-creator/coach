@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +54,7 @@ internal fun ReadingMethodPanel(
     val colors = CoachTheme.colors
     var bookState by remember(book.id) { mutableStateOf<ReadingMethodBookState?>(null) }
     var graded by remember(book.id, chapter?.chapterId) { mutableStateOf<List<ReadingCheck>>(emptyList()) }
+    var collapsed by rememberSaveable(book.id) { mutableStateOf(true) }
     val latestDraft = rememberUpdatedState(draft)
     val latestState = rememberUpdatedState(bookState)
     val plan = ReadingMethodFlow.planOf(chapter)
@@ -96,6 +98,36 @@ internal fun ReadingMethodPanel(
         graded = incoming
     }
 
+    val state = bookState
+    if (collapsed) {
+        val label = if (state != null) {
+            val stepText = if (plan != null) " · ${stepTitle(state.active, state.progress(plan.id, state.active).step)}" else ""
+            "学法：${state.active.title}$stepText"
+        } else "学法 · 准备中"
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { collapsed = false }
+                .padding(horizontal = 12.dp, vertical = 2.dp)
+                .testTag("reading-method-collapsed"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
+            Text(
+                "展开",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.actionPrimary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { collapsed = false }
+                    .padding(horizontal = 6.dp, vertical = 1.dp)
+                    .testTag("reading-method-expand"),
+            )
+        }
+        return
+    }
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -104,9 +136,20 @@ internal fun ReadingMethodPanel(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        val state = bookState
         if (!draftReady || state == null || plan == null && chapter != null) {
-            Text("正在按这本书选学法…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("正在按这本书选学法…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
+                Text(
+                    "收起",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.fgSecondary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { collapsed = true }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("reading-method-collapse"),
+                )
+            }
             return@Column
         }
         val method = state.active
@@ -126,6 +169,16 @@ internal fun ReadingMethodPanel(
                     modifier = Modifier.testTag("reading-method-mark-read"),
                 ) { Text("标成读过了") }
             }
+            Text(
+                "收起",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.fgSecondary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { collapsed = true }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .testTag("reading-method-collapse"),
+            )
         }
         Text(state.reason, style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("reading-method-reason"))
         if (plan == null) {
@@ -170,8 +223,7 @@ private fun BeforeFlow(
         "PRETEST" -> {
             CheckList(checks, progress, reveal = true, onAnswer = { id, value -> onProgress(ReadingMethodFlow.recordAnswer(progress, id, value)) })
             PaperButton(
-                onClick = { onProgress(ReadingMethodFlow.finishBeforePretest(progress, checks)) },
-                enabled = ReadingMethodFlow.allAnswered(progress, checks),
+                onClick = { onProgress(ReadingMethodFlow.advanceBeforePretest(progress)) },
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text("做完了，去读") }
         }
@@ -227,7 +279,6 @@ private fun DuringFlow(
             )
             PaperButton(
                 onClick = { onProgress(ReadingMethodFlow.finishDuringPause(progress, plan.sections.size)) },
-                enabled = progress.answers[check.id].orEmpty().isNotBlank(),
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text(if (index + 1 >= plan.sections.size) "这一章走完了" else "下一节") }
         }
@@ -256,8 +307,7 @@ private fun AfterFlow(
                 tag = "reading-method-own-words",
             )
             PaperButton(
-                onClick = { onProgress(ReadingMethodFlow.finishRecall(progress)) },
-                enabled = progress.recall.isNotBlank(),
+                onClick = { onProgress(ReadingMethodFlow.advanceRecall(progress)) },
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text("去做题") }
         }
@@ -285,8 +335,7 @@ private fun AfterFlow(
                 ) { Text("写不出来") }
             }
             PaperButton(
-                onClick = { onProgress(ReadingMethodFlow.finishQuiz(progress, checks)) },
-                enabled = ReadingMethodFlow.allAnswered(progress, checks),
+                onClick = { onProgress(ReadingMethodFlow.advanceQuiz(progress, checks)) },
                 modifier = Modifier.testTag("reading-method-next"),
             ) { Text("对一下") }
         }

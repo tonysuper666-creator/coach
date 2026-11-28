@@ -256,9 +256,22 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             ChapterCompanionFetchResult.Failed(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
         }
         return try {
+            if (blocks.isNotEmpty() && library != null) {
+                val bookIds = blocks.map { it.id.substringBefore(":p") }.distinct()
+                val singleBookId = bookIds.singleOrNull()
+                val consented = withContext(Dispatchers.IO) {
+                    singleBookId != null && ExplainConsent(library.directory).allowed(singleBookId)
+                }
+                if (!consented) {
+                    return ChapterCompanionFetchResult.Failed(
+                        "这本书还没允许讲解，点击「允许这本书讲解」后继续。",
+                        ExplainTrouble.ConsentRequired,
+                    )
+                }
+            }
             val snapshot = if (blocks.isNotEmpty()) {
                 withContext(Dispatchers.IO) { runCatching { imports?.snapshot(blocks) }.getOrNull() }
-                    ?: return ChapterCompanionFetchResult.Failed("请先打开个人导入的书并允许讲解。")
+                    ?: return ChapterCompanionFetchResult.Failed("这本书的本地原文还没准备好，暂时无法生成伴读。")
             } else null
             val wire = if (snapshot != null) JsonObject(requestJson + ("localSource" to snapshot)) else requestJson
             suspend fun stillCurrent(): Boolean =
@@ -487,11 +500,23 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
             ExplainResult.Refused(ExplainTrouble.UNPAIRED, ExplainTrouble.Unpaired)
         }
         return try {
-            val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
             val kind = input["kind"]?.jsonPrimitive?.contentOrNull
             val sectionScoped = kind == "lesson" || kind == "guide" || kind == "structure" || input["sectionContext"] != null
+            if (sectionScoped && context.isNotEmpty() && library != null) {
+                val singleBookId = context.map { it.id.substringBefore(":p") }.distinct().singleOrNull()
+                val consented = withContext(Dispatchers.IO) {
+                    singleBookId != null && ExplainConsent(library.directory).allowed(singleBookId)
+                }
+                if (!consented) {
+                    return null to ExplainResult.Refused(
+                        "这本书还没允许讲解，点击「允许这本书讲解」后继续。",
+                        ExplainTrouble.ConsentRequired,
+                    )
+                }
+            }
+            val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
             val wire = if (sectionScoped) {
-                if (snapshot == null) return null to ExplainResult.Refused("请先打开个人导入的书并允许讲解。")
+                if (snapshot == null) return null to ExplainResult.Refused("这本书的本地原文还没准备好，暂时无法讲解。")
                 try { BookLessonWire.withSource(input, snapshot) }
                 catch (_: IllegalArgumentException) { return null to ExplainResult.Refused(BookLessonWire.TOO_LONG) }
             } else if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))

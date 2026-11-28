@@ -179,24 +179,25 @@ internal fun WindowsTextbookHost(
 
     val isEmptyLibrary = ui.catalog.isEmpty() && ui.collections.none { !it.record.archived }
     var sawEmptyShelf by remember { mutableStateOf(false) }
-    var tasteActive by remember { mutableStateOf(false) }
+    var tasteStripDismissed by remember { mutableStateOf(false) }
+    var tasteExpanded by remember(ui.book?.id) { mutableStateOf(false) }
     // Outlives the panel, so the question on screen survives the panel leaving and re-entering composition.
     val tasteMemory = remember(controller.library.directory) { com.coach.desktop.books.FirstTasteMemory() }
     var tasteDone by remember(controller.library.directory) {
         mutableStateOf(com.coach.desktop.books.FirstOpenStore.isDone(controller.library.directory))
     }
-    LaunchedEffect(firstOpenGuide, ui.initialized, isEmptyLibrary, ui.book?.id, ui.screen, tasteDone) {
-        if (!firstOpenGuide || tasteDone) {
-            tasteActive = false
-            return@LaunchedEffect
+    LaunchedEffect(firstOpenGuide, ui.initialized, isEmptyLibrary, ui.book?.id, ui.screen) {
+        if (ui.screen != com.coach.desktop.books.BookScreen.READER) {
+            tasteExpanded = false
         }
-        if (ui.initialized && isEmptyLibrary && ui.book == null) sawEmptyShelf = true
-        tasteActive = sawEmptyShelf && ui.book != null && ui.screen == com.coach.desktop.books.BookScreen.READER
+        if (firstOpenGuide && ui.initialized && isEmptyLibrary && ui.book == null) {
+            sawEmptyShelf = true
+        }
     }
     fun finishFirstTaste() {
         com.coach.desktop.books.FirstOpenStore.markDone(controller.library.directory)
         tasteDone = true
-        tasteActive = false
+        tasteExpanded = false
     }
     val deskPage = (book != null && ui.screen != BookScreen.HOME) ||
         ui.screen == BookScreen.COURSE ||
@@ -341,6 +342,11 @@ internal fun WindowsTextbookHost(
                         com.coach.desktop.books.LocalReadingAutoGuide provides preferences.autoGuide,
                         com.coach.desktop.books.LocalReadingSectionSummary provides preferences.sectionSummary,
                         com.coach.desktop.books.LocalReadingAiExplain provides preferences.aiExplain,
+                        com.coach.desktop.books.LocalAllowBookExplain provides { bookId ->
+                            ExplainConsent(controller.library.directory).allow(bookId)
+                            preferences.chooseAiExplain(true)
+                        },
+                        com.coach.desktop.books.LocalOpenTasteQuiz provides { tasteExpanded = true },
                         LocalBookHinge provides hinge,
                         LocalCoachConnectivity provides connectivity,
                     ) {
@@ -395,24 +401,45 @@ internal fun WindowsTextbookHost(
                         }
                     }
                 }
-                BookImportToast(ui.importNotice, controller::dismissImportNotice, Modifier.align(Alignment.TopCenter))
-                val updateIdle = !settings && !tasteActive &&
+                BookImportToast(
+                    ui.importNotice,
+                    controller::dismissImportNotice,
+                    Modifier.align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = if (ui.screen == BookScreen.READER) 56.dp else 16.dp),
+                )
+                val updateIdle = !settings && !tasteExpanded &&
                     ui.screen != BookScreen.READER &&
                     ui.screen != BookScreen.LEARNING &&
                     ui.screen != BookScreen.REVIEWING &&
                     ui.screen != BookScreen.COURSE_MOCK
                 updateBanner?.invoke(this, updateIdle)
                 val tasteBook = ui.book
-                if (tasteActive && tasteBook != null) {
-                    com.coach.desktop.books.FirstTastePanel(
-                        book = tasteBook,
-                        explainer = hostExplainer,
-                        connectivity = connectivity,
-                        onReadBook = ::finishFirstTaste,
-                        onDone = ::finishFirstTaste,
-                        modifier = Modifier.fillMaxSize(),
-                        memory = tasteMemory,
-                    )
+                if (tasteBook != null && ui.screen == BookScreen.READER) {
+                    if (tasteExpanded) {
+                        com.coach.desktop.books.FirstTastePanel(
+                            book = tasteBook,
+                            explainer = hostExplainer,
+                            connectivity = connectivity,
+                            onReadBook = { tasteExpanded = false },
+                            onDone = ::finishFirstTaste,
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 56.dp),
+                            memory = tasteMemory,
+                            compact = true,
+                            onDismiss = { tasteExpanded = false },
+                            library = controller.library,
+                            onAllowExplain = {
+                                ExplainConsent(controller.library.directory).allow(tasteBook.id)
+                                preferences.chooseAiExplain(true)
+                            },
+                        )
+                    } else if (firstOpenGuide && sawEmptyShelf && !tasteDone && !tasteStripDismissed) {
+                        com.coach.desktop.books.FirstTasteStrip(
+                            onTry = { tasteExpanded = true },
+                            onDismiss = { tasteStripDismissed = true },
+                            onNeverShow = ::finishFirstTaste,
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 56.dp),
+                        )
+                    }
                 }
             }
 

@@ -226,7 +226,11 @@ internal fun SectionGuideCard(
                     Text(state.message, style = MaterialTheme.typography.bodySmall,
                         color = if (state.trouble == ExplainTrouble.Revoked) v7Alert() else colors.fgSecondary,
                         modifier = Modifier.weight(1f).testTag("section-guide-failed"))
-                    if (state.trouble.needsPairing) PaperButton(
+                    if (state.trouble == ExplainTrouble.ConsentRequired) PaperButton(
+                        onClick = { onAllowConsent() },
+                        modifier = Modifier.testTag("section-guide-allow-explain"),
+                    ) { Text("允许这本书讲解") }
+                    else if (state.trouble.needsPairing) PaperButton(
                         onClick = { if (onRelogin != null) onRelogin("授权已撤销，请重新登录。") else onOpenPair() },
                     ) { Text("重新登录") }
                     else V7TextButton(onRetry, modifier = Modifier.testTag("section-guide-retry")) { Text("重试") }
@@ -239,7 +243,10 @@ internal fun SectionGuideCard(
                     V7TextButton({ onRelogin(null) }, modifier = Modifier.testTag("section-guide-pair")) { Text("登录") }
                 }
             }
-            !consented -> Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+            !consented -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("这本书还没允许讲解。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.weight(1f))
+                V7TextButton(onAllowConsent, modifier = Modifier.testTag("section-guide-allow-explain")) { Text("允许这本书讲解") }
+            }
             state is SectionGuideState.Loading || state is SectionGuideState.Idle -> {
                 Text("正在整理本节导读…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.testTag("section-guide-loading"))
             }

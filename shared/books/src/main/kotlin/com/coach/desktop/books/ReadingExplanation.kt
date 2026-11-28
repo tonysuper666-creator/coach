@@ -234,9 +234,23 @@ internal fun PageExplanation(
         }
     }
 
+    val allowBookExplain = LocalAllowBookExplain.current
+    val globalAiEnabled = LocalReadingAiExplain.current
     when {
         blocks.isEmpty() -> Text("这一页没有可讲解的正文。")
-        !enabled -> Text("伴读讲解已在设置中关闭。")
+        !enabled -> {
+            if (!globalAiEnabled && allowBookExplain != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("这本书还没允许讲解。", style = MaterialTheme.typography.bodySmall)
+                    V7TextButton(
+                        onClick = { allowBookExplain(book.id); attempt++ },
+                        modifier = Modifier.testTag("page-explain-allow-book"),
+                    ) { Text("允许这本书讲解") }
+                }
+            } else {
+                Text("伴读讲解已在设置中关闭。")
+            }
+        }
         !explainer.loaded -> Text("正在打开讲解…")
         explainer.identity == null -> {
             RetrievedPageLinks(blocks.take(1), { "第 ${it.page} 页" }, onOpen)
@@ -285,8 +299,14 @@ internal fun PageExplanation(
             is ExplainResult.Refused -> {
                 Text(result.message, modifier = Modifier.testTag("page-explanation-error"))
                 RetrievedPageLinks(blocks.take(1), { "第 ${it.page} 页" }, onOpen)
-                if (result.trouble.needsPairing) V7TextButton(onLogin) { Text("重新登录") }
-                else V7TextButton({ attempt++ }) { Text("重试") }
+                when {
+                    result.trouble == ExplainTrouble.ConsentRequired && allowBookExplain != null ->
+                        V7TextButton({ allowBookExplain(book.id); attempt++ }, modifier = Modifier.testTag("page-explain-allow-book")) {
+                            Text("允许这本书讲解")
+                        }
+                    result.trouble.needsPairing -> V7TextButton(onLogin) { Text("重新登录") }
+                    else -> V7TextButton({ attempt++ }) { Text("重试") }
+                }
             }
         }
     }

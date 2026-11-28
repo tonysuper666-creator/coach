@@ -123,6 +123,9 @@ internal object ReadingMethodFlow {
     fun finishBeforePretest(progress: ChapterMethodProgress, checks: List<ReadingCheck>): ChapterMethodProgress =
         if (allAnswered(progress, checks)) progress.copy(step = "READ") else progress
 
+    fun advanceBeforePretest(progress: ChapterMethodProgress): ChapterMethodProgress =
+        progress.copy(step = "READ")
+
     fun finishBeforeRead(progress: ChapterMethodProgress): ChapterMethodProgress =
         progress.copy(step = "COMPARE")
 
@@ -144,10 +147,28 @@ internal object ReadingMethodFlow {
     fun finishRecall(progress: ChapterMethodProgress): ChapterMethodProgress =
         if (progress.recall.isNotBlank()) progress.copy(step = "QUIZ") else progress
 
+    fun advanceRecall(progress: ChapterMethodProgress): ChapterMethodProgress =
+        progress.copy(step = "QUIZ")
+
     fun finishQuiz(progress: ChapterMethodProgress, checks: List<ReadingCheck>): ChapterMethodProgress {
         if (!allAnswered(progress, checks)) return progress
         val wrong = checks.mapNotNull { check ->
             val given = progress.answers[check.id].orEmpty()
+            val missed = if (check.ownWords) given == NEED_BOOK else check.correct != null && given != check.correct
+            if (missed) check.id else null
+        }
+        return if (wrong.isEmpty()) {
+            progress.copy(step = "DONE", wrongIds = emptyList())
+        } else {
+            progress.copy(step = "RETURN", wrongIds = wrong)
+        }
+    }
+
+    /** 没填的内容不记作错，直接完成或仅回书看真正答错的题。 */
+    fun advanceQuiz(progress: ChapterMethodProgress, checks: List<ReadingCheck>): ChapterMethodProgress {
+        val wrong = checks.mapNotNull { check ->
+            val given = progress.answers[check.id].orEmpty()
+            if (given.isBlank()) return@mapNotNull null
             val missed = if (check.ownWords) given == NEED_BOOK else check.correct != null && given != check.correct
             if (missed) check.id else null
         }

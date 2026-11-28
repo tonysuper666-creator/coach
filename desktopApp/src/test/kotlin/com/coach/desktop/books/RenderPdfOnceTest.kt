@@ -1,15 +1,25 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.runComposeUiTest
+import com.coach.ui.CoachTheme
+import org.apache.pdfbox.cos.COSName
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.common.PDStream
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferInt
+import java.io.ByteArrayInputStream
 import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlin.test.*
@@ -170,6 +180,108 @@ class RenderPdfOnceTest {
             BookPdfLoader.clearCache()
             root.toFile().deleteRecursively()
         }
+    }
+
+    /**
+     * Reproduces first-import "这一页暂时打不开。":
+     * PDFs larger than BookPdfLoader's 16 MB in-memory threshold use file-backed RandomAccessReadBufferedFile
+     * during stageBookImportTier0. After moving `.import-<uuid>` to `<bookId>.pdf`, rendering on any worker
+     * thread other than the staging thread must open `<bookId>.pdf` cleanly instead of failing on the moved stage path.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test fun firstImportOfLargePdfRendersImmediatelyAcrossWorkerThreadsWithoutTemporaryFailure() {
+        val root = Files.createTempDirectory("coach-first-import-large-")
+        val importExec = Executors.newSingleThreadExecutor { r -> Thread(r, "test-tier0-import") }
+        try {
+            val largePdf = createLargeTextPdf(root.resolve("large-first-import.pdf"), padBytes = 17 * 1024 * 1024)
+            assertTrue(Files.size(largePdf) > 16L * 1024 * 1024, "PDF should exceed 16 MB in-memory threshold")
+
+            val library = TextbookLibrary(root.resolve("library"), streamPdfExtras = true, lazyPdfExtras = true)
+            val staged = importExec.submit(Callable { library.stageBookImportTier0(largePdf) }).get()
+            val targetPage = staged.book.readingPage
+
+            runComposeUiTest {
+                setContent {
+                    CoachTheme(false) {
+                        val image = rememberOriginalPageImage(
+                            library = library,
+                            book = staged.book,
+                            page = targetPage,
+                            enabled = true,
+                            pixelWidth = 960,
+                            retry = 0,
+                        )
+                        OriginalBookPage(
+                            label = "第 $targetPage 页",
+                            image = image,
+                            placeholderAspect = 0.707f,
+                            layer = null,
+                            pageText = staged.book.page(targetPage)?.text.orEmpty(),
+                            selected = null,
+                            marks = emptyList(),
+                            citation = null,
+                            quote = null,
+                            onResize = {},
+                            onRetry = {},
+                            onSelection = {},
+                        )
+                    }
+                }
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("remote-image").fetchSemanticsNodes().isNotEmpty() ||
+                        onAllNodesWithText("这一页暂时打不开。").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertTrue(
+                    onAllNodesWithText("这一页暂时打不开。").fetchSemanticsNodes().isEmpty(),
+                    "First import of >16 MB PDF must not show '这一页暂时打不开。' when rendered on another thread",
+                )
+                assertEquals(1, onAllNodesWithTag("remote-image").fetchSemanticsNodes().size)
+            }
+        } finally {
+            importExec.shutdownNow()
+            BookPdfLoader.clearCache()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun createLargeTextPdf(path: Path, padBytes: Int): Path {
+        PDDocument().use { pdf ->
+            pdf.documentInformation.title = "Large First Import Sample"
+            val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+            val iccBytes = java.awt.color.ICC_Profile.getInstance(java.awt.color.ColorSpace.CS_sRGB).data
+            val iccColorSpace = org.apache.pdfbox.pdmodel.graphics.color.PDICCBased(pdf).also { icc ->
+                icc.pdStream.createOutputStream(COSName.FLATE_DECODE).use { out -> out.write(iccBytes) }
+                icc.pdStream.cosObject.setInt(COSName.N, 3)
+            }
+            repeat(2) { idx ->
+                val page = PDPage(PDRectangle.LETTER)
+                pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { out ->
+                    out.setNonStrokingColor(0.15f, 0.2f, 0.25f)
+                    out.beginText()
+                    out.setFont(font, 14f)
+                    out.newLineAtOffset(64f, 700f)
+                    out.showText("Chapter ${idx + 1} Introduction to Psychology")
+                    out.newLineAtOffset(0f, -28f)
+                    out.showText("Empirical observation and experimental controls ground psychological science.")
+                    out.endText()
+                }
+                page.resources.put(COSName.DEFAULT_RGB, iccColorSpace)
+            }
+            val rawPad = ByteArray(padBytes)
+            var state = 0x5DEECE66DL
+            var i = 0
+            while (i < rawPad.size) {
+                state = state * 6364136223846793005L + 1442695040888963407L
+                rawPad[i] = (state ushr 24).toByte()
+                i++
+            }
+            val padStream = PDStream(pdf)
+            padStream.cosObject.createRawOutputStream().use { out -> out.write(rawPad) }
+            pdf.documentCatalog.cosObject.setItem(COSName.getPDFName("CoachPadding"), padStream)
+            pdf.save(path.toFile())
+        }
+        return path
     }
 }
 

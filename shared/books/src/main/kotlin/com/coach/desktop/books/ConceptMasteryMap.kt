@@ -17,8 +17,14 @@ import java.sql.Connection
  */
 internal enum class ConceptAnswerKind {
     MCQ,
+    PRETEST,
+    PRACTICE,
+    SECTION_CHECK,
+    LESSON_PRACTICE,
     CHAPTER_END,
     RUBRIC,
+    PRACTICE_RUBRIC,
+    CHAPTER_END_RUBRIC,
 }
 
 internal data class ConceptQuoteCandidate(
@@ -70,6 +76,69 @@ internal object ConceptMasteryMap {
     const val KEY_PREFIX = "cmap:"
     private val json = Json { ignoreUnknownKeys = true }
     private val whitespace = Regex("\\s+")
+    private val chapterEndTitleRe = Regex(
+        """(?i)^(?:\d+(?:\.\d+)*\s+)?(?:章末习题|本章习题|课后习题|章末题|复习题|复习思考题|end[- ]of[- ]chapter\b|critical\s+thinking\s+questions?\b|personal\s+application\s+questions?\b|check\s+your\s+understanding\b|self[- ]check\b)""",
+    )
+
+    fun isChapterEndSectionTitle(title: String): Boolean {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return false
+        return ChapterCompanionGrouping.isExerciseSection(trimmed) || chapterEndTitleRe.containsMatchIn(trimmed)
+    }
+
+    fun kindForQuiz(
+        book: Textbook,
+        quiz: BookCompanionQuiz,
+        fallback: ConceptAnswerKind,
+    ): ConceptAnswerKind {
+        val rubricMode = fallback == ConceptAnswerKind.PRACTICE_RUBRIC ||
+            fallback == ConceptAnswerKind.RUBRIC ||
+            fallback == ConceptAnswerKind.CHAPTER_END_RUBRIC
+        when (quiz.kind.trim().uppercase()) {
+            "CHAPTER_END", "CHAPTER_END_RUBRIC" ->
+                return if (rubricMode) ConceptAnswerKind.CHAPTER_END_RUBRIC else ConceptAnswerKind.CHAPTER_END
+            "PRETEST" -> if (!rubricMode) return ConceptAnswerKind.PRETEST
+            "PRACTICE", "PRACTICE_RUBRIC" ->
+                return if (rubricMode) ConceptAnswerKind.PRACTICE_RUBRIC else ConceptAnswerKind.PRACTICE
+            "SECTION_CHECK" -> if (!rubricMode) return ConceptAnswerKind.SECTION_CHECK
+            "LESSON_PRACTICE" -> if (!rubricMode) return ConceptAnswerKind.LESSON_PRACTICE
+        }
+        if (fallback == ConceptAnswerKind.CHAPTER_END || fallback == ConceptAnswerKind.CHAPTER_END_RUBRIC) {
+            return if (rubricMode) ConceptAnswerKind.CHAPTER_END_RUBRIC else ConceptAnswerKind.CHAPTER_END
+        }
+        if (fallback == ConceptAnswerKind.SECTION_CHECK) return ConceptAnswerKind.SECTION_CHECK
+        if (fallback == ConceptAnswerKind.PRETEST || (!rubricMode && ":pre:" in quiz.id)) return ConceptAnswerKind.PRETEST
+        if (fallback == ConceptAnswerKind.PRACTICE || (!rubricMode && ":prac:" in quiz.id)) return ConceptAnswerKind.PRACTICE
+        if (fallback == ConceptAnswerKind.PRACTICE_RUBRIC) return ConceptAnswerKind.PRACTICE_RUBRIC
+        if (fallback == ConceptAnswerKind.LESSON_PRACTICE) return ConceptAnswerKind.LESSON_PRACTICE
+
+        val section = book.lessons.firstOrNull { it.id == quiz.sectionId }
+        if (section != null) {
+            return if (isChapterEndSectionTitle(section.title)) {
+                if (rubricMode) ConceptAnswerKind.CHAPTER_END_RUBRIC else ConceptAnswerKind.CHAPTER_END
+            } else {
+                fallback
+            }
+        }
+        val anchorPage = quiz.anchor?.pdfPage
+        if (anchorPage != null) {
+            val sharedWithBody = book.lessons.any {
+                anchorPage in it.firstPage..it.lastPage && !isChapterEndSectionTitle(it.title)
+            }
+            val deepestToc = book.tocNodes.filter { anchorPage in it.startPage..it.endPage }.maxByOrNull { it.level }
+            if (!sharedWithBody && deepestToc != null && isChapterEndSectionTitle(deepestToc.title)) {
+                return if (rubricMode) ConceptAnswerKind.CHAPTER_END_RUBRIC else ConceptAnswerKind.CHAPTER_END
+            }
+        }
+        return fallback
+    }
+
+    fun kindForLesson(section: BookLesson, mode: QuestionMode): ConceptAnswerKind =
+        if (isChapterEndSectionTitle(section.title)) {
+            if (mode == QuestionMode.CHOICE) ConceptAnswerKind.CHAPTER_END else ConceptAnswerKind.CHAPTER_END_RUBRIC
+        } else {
+            if (mode == QuestionMode.CHOICE) ConceptAnswerKind.LESSON_PRACTICE else ConceptAnswerKind.PRACTICE_RUBRIC
+        }
 
     fun levelLabel(record: ConceptMasteryRecord): String = when {
         !record.hasActiveTest -> "还没测过"
@@ -293,7 +362,12 @@ internal object ConceptMasteryMap {
             ?: return null
         if (owner.tocNodeId != chapterId) return null
         val exact = page.text.substring(range.first, range.last + 1)
-        val kind = runCatching { ConceptAnswerKind.valueOf(obj.str("kind")) }.getOrDefault(ConceptAnswerKind.MCQ)
+        val rawKind = runCatching { ConceptAnswerKind.valueOf(obj.str("kind")) }.getOrDefault(ConceptAnswerKind.MCQ)
+        val kind = if (obj.str("v") == "2") {
+            rawKind
+        } else {
+            resolveStoredKind(book, event.page, event.signalType, rawKind, obj.str("questionId"))
+        }
         val guessed = event.guessed
         return ConceptEvidenceLine(
             eventId = event.eventId,
@@ -306,12 +380,62 @@ internal object ConceptMasteryMap {
         )
     }
 
+    internal fun resolveStoredKind(
+        book: Textbook,
+        page: Int,
+        signal: LearnerSignalType,
+        rawKind: ConceptAnswerKind,
+        questionId: String,
+    ): ConceptAnswerKind {
+        if (rawKind == ConceptAnswerKind.CHAPTER_END && ":prac:" in questionId) {
+            return ConceptAnswerKind.PRACTICE
+        }
+        if (rawKind == ConceptAnswerKind.MCQ && (signal == LearnerSignalType.PRETEST_T0 || ":pre:" in questionId)) {
+            return ConceptAnswerKind.PRETEST
+        }
+        if (questionId.endsWith(":CHOICE")) {
+            val secId = questionId.removeSuffix(":CHOICE")
+            val sec = book.lessons.firstOrNull { it.id == secId }
+            if (sec != null) {
+                return if (isChapterEndSectionTitle(sec.title)) ConceptAnswerKind.CHAPTER_END else ConceptAnswerKind.LESSON_PRACTICE
+            }
+        }
+        val sharedWithBody = book.lessons.any { page in it.firstPage..it.lastPage && !isChapterEndSectionTitle(it.title) }
+        val onDedicatedExercisePage = !sharedWithBody && (
+            book.lessons.any { page in it.firstPage..it.lastPage && isChapterEndSectionTitle(it.title) } ||
+                book.tocNodes.filter { page in it.startPage..it.endPage }.maxByOrNull { it.level }
+                    ?.let { isChapterEndSectionTitle(it.title) } == true
+            )
+        if (onDedicatedExercisePage) return rawKind
+        return rawKind
+    }
+
     private fun evidenceLabel(kind: ConceptAnswerKind, score: Double?, guessed: Boolean, prompt: String): String {
         val head = when (kind) {
             ConceptAnswerKind.MCQ -> when {
                 guessed -> "选择题，这题是猜的"
                 score != null && score >= 0.99 -> "选择题答对"
                 else -> "选择题答错"
+            }
+            ConceptAnswerKind.PRETEST -> when {
+                guessed -> "读前自测，这题是猜的"
+                score != null && score >= 0.99 -> "读前自测答对"
+                else -> "读前自测答错"
+            }
+            ConceptAnswerKind.PRACTICE -> when {
+                guessed -> "练习题，这题是猜的"
+                score != null && score >= 0.99 -> "练习题答对"
+                else -> "练习题答错"
+            }
+            ConceptAnswerKind.SECTION_CHECK -> when {
+                guessed -> "节末自测，这题是猜的"
+                score != null && score >= 0.99 -> "节末自测答对"
+                else -> "节末自测答错"
+            }
+            ConceptAnswerKind.LESSON_PRACTICE -> when {
+                guessed -> "做题学，这题是猜的"
+                score != null && score >= 0.99 -> "做题学答对"
+                else -> "做题学答错"
             }
             ConceptAnswerKind.CHAPTER_END -> when {
                 guessed -> "章末题，这题是猜的"
@@ -323,6 +447,16 @@ internal object ConceptMasteryMap {
                 score != null && score >= 0.4 -> "开放题这一点部分答到"
                 else -> "开放题这一点没答到"
             }
+            ConceptAnswerKind.PRACTICE_RUBRIC -> when {
+                score != null && score >= 0.99 -> "练习题这一点答到了"
+                score != null && score >= 0.4 -> "练习题这一点部分答到"
+                else -> "练习题这一点没答到"
+            }
+            ConceptAnswerKind.CHAPTER_END_RUBRIC -> when {
+                score != null && score >= 0.99 -> "章末题这一点答到了"
+                score != null && score >= 0.4 -> "章末题这一点部分答到"
+                else -> "章末题这一点没答到"
+            }
         }
         val extra = MasteryEngine.sanitizeHumanLabel(prompt)?.take(32)
         return if (extra == null) head else "$head · $extra"
@@ -331,6 +465,7 @@ internal object ConceptMasteryMap {
     private fun detailJson(kind: ConceptAnswerKind, questionId: String, prompt: String, hit: ResolvedConceptHit): String =
         buildJsonObject {
             put("map", "1")
+            put("v", "2")
             put("kind", kind.name)
             put("questionId", questionId)
             put("chapterId", hit.chapterId)

@@ -434,7 +434,7 @@ internal fun SingleBookCompanionPanel(
         correct: Boolean,
         guessed: Boolean,
         pretest: Boolean,
-        chapterEnd: Boolean,
+        fallbackKind: ConceptAnswerKind,
     ) {
         val points = (packState as? CompanionPackState.Ready)?.pack?.keyPoints.orEmpty()
         val score = if (correct && !guessed) 1.0 else 0.0
@@ -444,7 +444,7 @@ internal fun SingleBookCompanionPanel(
             book = book,
             expectedChapterId = chapterId,
             candidates = candidates,
-            kind = if (chapterEnd) ConceptAnswerKind.CHAPTER_END else ConceptAnswerKind.MCQ,
+            kind = ConceptMasteryMap.kindForQuiz(book, quiz, fallbackKind),
             signal = if (pretest) LearnerSignalType.PRETEST_T0 else LearnerSignalType.POST_QUIZ_T1,
             guessed = guessed,
             questionId = quiz.id,
@@ -669,7 +669,7 @@ internal fun SingleBookCompanionPanel(
                                         correct = answer.text == q.correctOption,
                                         guessed = answer.guessed,
                                         pretest = false,
-                                        chapterEnd = true,
+                                        fallbackKind = ConceptAnswerKind.SECTION_CHECK,
                                     )
                                 }
                             },
@@ -873,7 +873,7 @@ internal fun SingleBookCompanionPanel(
                                             correct = chosen == quiz.correctOption,
                                             guessed = guessed,
                                             pretest = true,
-                                            chapterEnd = false,
+                                            fallbackKind = ConceptAnswerKind.PRETEST,
                                         )
                                     }
                                 },
@@ -947,7 +947,7 @@ internal fun SingleBookCompanionPanel(
                                                 correct = chosen == quiz.correctOption,
                                                 guessed = guessed,
                                                 pretest = false,
-                                                chapterEnd = true,
+                                                fallbackKind = ConceptAnswerKind.PRACTICE,
                                             )
                                         }
                                     }
@@ -1342,7 +1342,7 @@ private fun OptionalPracticeModuleView(
                                         book = book,
                                         expectedChapterId = pack.chapterId,
                                         candidates = ConceptMasteryMap.candidatesForRubric(resp.rubricItems, quiz, pack.keyPoints),
-                                        kind = ConceptAnswerKind.RUBRIC,
+                                        kind = ConceptMasteryMap.kindForQuiz(book, quiz, ConceptAnswerKind.PRACTICE_RUBRIC),
                                         signal = LearnerSignalType.RUBRIC_GRADE,
                                         guessed = draft.practiceGuessed[quiz.id] == true,
                                         questionId = quiz.id,

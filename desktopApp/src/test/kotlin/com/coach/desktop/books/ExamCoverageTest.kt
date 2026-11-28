@@ -482,4 +482,53 @@ class ExamCoverageTest {
             report.uncovered.map { it.name to it.reason },
         )
     }
+
+    @Test
+    fun matchesPluralPointNamesToSingularStemsRejectsGenericCareAndMapsModeledConcepts() {
+        val syntheticExam = """
+            SYNTHETIC UNIVERSITY
+            ECON99999 Synthetic Exam
+            Time Allowed: 60 Minutes
+
+            1. Which of the following is NOT a recent trend in northern clinics?
+            A) Longer wait times
+            B) Higher outpatient volume
+
+            2. Consider a typical local clinic market. Which market structure best describes this market?
+            Explain how it differs from perfect competition.
+
+            3. Which are the key traits of a synthetic voucher health care system?
+            A) Universal subsidies
+            B) Private clinic delivery
+        """.trimIndent()
+
+        val questions = HeldOutDecomposer.questionsFromDocument(syntheticExam)
+        assertEquals(3, questions.size)
+
+        val textbook = """
+            Health Care: Overview of public and private provision.
+            Recent trends in northern clinics: Wait times and outpatient volume shifted steadily.
+            Demand for health care: Patients respond to out-of-pocket prices.
+            Differentiated service oligopoly: A market with entry barriers and non-identical providers.
+            Economists typically model the clinic market as a differentiated service oligopoly.
+        """.trimIndent()
+        val identified = listOf(
+            "Recent trends in northern clinics",
+            "Demand for health care",
+            "Differentiated service oligopoly",
+        )
+        val bank = identified.map { CoverageBankPoint(it, choices = 3, essay = true) }
+
+        val report = ExamCoverage.evaluate(questions, identified, bank, textbook)
+        assertEquals(3, report.heldOutPoints)
+        assertEquals(2, report.covered)
+        assertEquals(
+            listOf("Recent trends in northern clinics", "Differentiated service oligopoly"),
+            report.coveredPoints,
+        )
+        assertEquals(
+            listOf("未识别考点 #1" to ExamCoverage.POINT_MISSED),
+            report.uncovered.map { it.name to it.reason },
+        )
+    }
 }

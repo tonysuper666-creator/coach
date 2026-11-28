@@ -667,6 +667,193 @@ class StanceExplanationTest {
     }
 
     /**
+     * QA 预发 600c88c9 回归样本 1（E1-A 周易第 2 页 `[516,527)`）：
+     * 复句只挂「子曰：「龍德而隱者也。」一条引文却在后半句讲处世、名声与意志时，必须整句丢弃（CLAUSE_UNSUPPORTED）；
+     * 拆成各自挂对应原句的独立陈述，或用 quotes 补足两句原句时，完整保留并分别高亮对应区间。
+     */
+    @Test
+    fun compoundBookSentenceMissingSecondHalfQuoteInZhouyiE1AIsDroppedWhileSplitOrMultiQuotedPasses() {
+        val bookHash = "e".repeat(64)
+        val sent1 = "子曰：「龍德而隱者也。"
+        val sent2 = "不易乎世，不成乎名，遯世无悶，不見是而无悶，樂則行之，憂則違之，確乎其不可拔，潛龍也。」"
+        val blockText = "$sent1$sent2"
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p2:516", 2, blockText))),
+            BookStance.ESOTERIC,
+        )
+
+        // 1. 复现：唯一引文只扩到 [516, 527)（覆盖隐居），后半句讲处世、名声和意志 -> 必须丢弃
+        val badCompound = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {
+                    "text": "文言借孔子之口说，潜龙是具有龙德而隐居的人，他不改变世俗、不求成名，且意志坚定不可动摇。",
+                    "anchors": ["S1"],
+                    "quote": "龍德而隱者也"
+                  }
+                ]
+              }],
+              "boundary": null
+            }
+        """.trimIndent()
+        val dropLogs = mutableListOf<String>()
+        val badRes = assertNotNull(
+            checkedStancePayload(
+                payload = badCompound,
+                pack = pack,
+                stance = BookStance.ESOTERIC,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                onDropLog = dropLogs::add,
+            ),
+        )
+        assertTrue(badRes.layers.isEmpty(), "仅高亮前半句却覆盖后半句处世/名声/意志的复句必须丢弃")
+        assertEquals(1, badRes.droppedSentences)
+        assertTrue(dropLogs.any { "reason=CLAUSE_UNSUPPORTED" in it }, "logs=$dropLogs")
+
+        // 2. 拆开陈述，每句各自挂对应原句 -> 两句均保留，分别高亮 [516, 527) 和 [527, 527+sent2.length)
+        val splitPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "文言借孔子之口说，潜龙是具有龙德而隐居的人。", "anchors": ["S1"], "quote": "龍德而隱者也"},
+                  {"text": "这样的人不改变世俗，不求成名，避世无闷，意志坚定不可动摇。", "anchors": ["S1"], "quote": "不易乎世，不成乎名"}
+                ]
+              }],
+              "boundary": null
+            }
+        """.trimIndent()
+        val splitRes = assertNotNull(
+            checkedStancePayload(splitPayload, pack, BookStance.ESOTERIC, guards = setOf(BookStanceGuard.ESOTERIC)),
+        )
+        assertEquals(0, splitRes.droppedSentences)
+        val splitSents = (splitRes.layers.single() as CheckedStanceLayer.Book).sentences
+        assertEquals(2, splitSents.size)
+        assertEquals(516, splitSents[0].citations.single().startUtf16)
+        assertEquals(516 + sent1.length, splitSents[0].citations.single().endUtf16)
+        val sent2Expanded = sent2.trimEnd('」')
+        assertEquals(516 + sent1.length, splitSents[1].citations.single().startUtf16)
+        assertEquals(516 + sent1.length + sent2Expanded.length, splitSents[1].citations.single().endUtf16)
+
+        // 3. 复句补足两条原句 quotes -> 保留，且带有两条完整高亮出处
+        val multiQuotePayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {
+                    "text": "文言借孔子之口说，潜龙是具有龙德而隐居的人，他不改变世俗、不求成名，且意志坚定不可动摇。",
+                    "anchors": ["S1"],
+                    "quotes": ["龍德而隱者也", "不易乎世，不成乎名"]
+                  }
+                ]
+              }],
+              "boundary": null
+            }
+        """.trimIndent()
+        val multiRes = assertNotNull(
+            checkedStancePayload(multiQuotePayload, pack, BookStance.ESOTERIC, guards = setOf(BookStanceGuard.ESOTERIC)),
+        )
+        assertEquals(0, multiRes.droppedSentences)
+        val multiSents = (multiRes.layers.single() as CheckedStanceLayer.Book).sentences
+        assertEquals(1, multiSents.size)
+        assertEquals(listOf(sent1, sent2Expanded), multiSents.single().citations.map { it.quote })
+    }
+
+    /**
+     * QA 预发 600c88c9 回归样本 2（X3 福尔摩斯探案跨语种复句漏引后半句）：
+     * 1. 复句合并两句相邻英文，只引第一句（漏第二句「很少用别的称呼」或漏「冷静精确的头脑厌恶一切情感」）-> 必须丢弃；
+     * 2. 拆成独立陈述各自挂对应原句，或用 quotes 补足两条英文原句 -> 完整保留。
+     */
+    @Test
+    fun compoundBookSentenceMissingSecondHalfQuoteInHolmesX3IsDroppedWhileSplitOrMultiQuotedPasses() {
+        val bookHash = "f".repeat(64)
+        val s1 = "To Sherlock Holmes she is always the woman."
+        val s2 = "I have seldom heard him mention her under any other name."
+        val s3 = "It was not that he felt any emotion akin to love for Irene Adler."
+        val s4 = "All emotions, and that one particularly, were abhorrent to his cold, precise but admirably balanced mind."
+        val blockText = "$s1 $s2 $s3 $s4"
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p3:0", 3, blockText))),
+            BookStance.KNOWLEDGE,
+        )
+
+        // 1. 两条各漏后半项的复句（对应 X3 第 1、3 句模式）均必须丢弃
+        val badPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {
+                    "text": "在福尔摩斯眼中她永远是那位女士，华生很少听他用别的称呼提到她。",
+                    "anchors": ["S1"],
+                    "quote": "she is always the woman"
+                  },
+                  {
+                    "text": "福尔摩斯对艾琳并无类似爱情的情感，一切情感都为他冷静精确的头脑所厌恶。",
+                    "anchors": ["S1"],
+                    "quote": "felt any emotion akin to love"
+                  }
+                ]
+              }],
+              "boundary": null
+            }
+        """.trimIndent()
+        val dropLogs = mutableListOf<String>()
+        val badRes = assertNotNull(
+            checkedStancePayload(
+                payload = badPayload,
+                pack = pack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.FICTION),
+                effectiveReadThroughPage = 3,
+                strictSinglePageOnly = true,
+                onDropLog = dropLogs::add,
+            ),
+        )
+        assertTrue(badRes.layers.isEmpty(), "两条各漏后半句原句的 X3 复句都必须丢弃")
+        assertEquals(2, badRes.droppedSentences)
+        assertEquals(2, dropLogs.count { "reason=CLAUSE_UNSUPPORTED" in it }, "logs=$dropLogs")
+
+        // 2. 拆开陈述、各引对应英文原句，以及补足 quotes 的复句 -> 全部保留
+        val fixedPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "在福尔摩斯眼中她永远是那位女士。", "anchors": ["S1"], "quote": "she is always the woman"},
+                  {"text": "华生很少听他用别的称呼提到她。", "anchors": ["S1"], "quote": "seldom heard him mention her"},
+                  {
+                    "text": "福尔摩斯对艾琳并无类似爱情的情感，一切情感都为他冷静精确的头脑所厌恶。",
+                    "anchors": ["S1"],
+                    "quotes": ["felt any emotion akin to love", "cold, precise but admirably balanced mind"]
+                  }
+                ]
+              }],
+              "boundary": null
+            }
+        """.trimIndent()
+        val fixedRes = assertNotNull(
+            checkedStancePayload(
+                payload = fixedPayload,
+                pack = pack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.FICTION),
+                effectiveReadThroughPage = 3,
+                strictSinglePageOnly = true,
+            ),
+        )
+        assertEquals(0, fixedRes.droppedSentences)
+        val kept = (fixedRes.layers.single() as CheckedStanceLayer.Book).sentences
+        assertEquals(3, kept.size)
+        assertEquals(listOf(s1), kept[0].citations.map { it.quote })
+        assertEquals(listOf(s2), kept[1].citations.map { it.quote })
+        assertEquals(listOf(s3, s4), kept[2].citations.map { it.quote })
+    }
+
+    /**
      * 反例 5（TON-1976 §3）：请求不带 stance，走旧路径，返回结构和现在一样。
      */
     @Test

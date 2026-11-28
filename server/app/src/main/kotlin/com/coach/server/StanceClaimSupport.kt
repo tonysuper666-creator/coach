@@ -209,6 +209,10 @@ internal object StanceClaimSupport {
         '利' to listOf("有利", "适合", "有益"),
         '田' to listOf("田野", "地面", "人间"),
         '天' to listOf("天空", "高处", "高位"),
+        '易' to listOf("改变", "变更", "变易", "改易"),
+        '遁' to listOf("避世", "隐遁", "隐居", "逃避"),
+        '确' to listOf("坚定", "坚决", "确凿"),
+        '拔' to listOf("动摇", "拔除", "移易"),
     )
 
     private val enToZhLexicon: Map<String, List<String>> by lazy { loadLexicon() }
@@ -474,6 +478,121 @@ internal object StanceClaimSupport {
 
         // 6. 跨语种：英文陈述 ↔ 中文引文
         return checkChineseClaimAgainstEnglishEvidence(toSimplified(evidenceQuote), claimText)
+    }
+
+    private val compoundClauseSplitRegex = Regex("""(?:[，,；;：:]+|——+)""")
+    private val englishBlockSentenceSplitRegex = Regex("""(?<=[.!?]["”’')\]]?)\s+""")
+
+    /** 普通立场复句核验中可跳过独立出处的纯引入/范围/连接词（不代表新增事实）。 */
+    private val clauseLeadInTerms: List<String> = listOf(
+        "在已读范围内", "就已读范围", "到目前为止", "就目前读到的内容", "在这一段里", "在这段话里",
+        "换句话说", "也就是说", "总体而言", "简而言之", "总的来说", "与此同时", "不仅如此",
+        "借孔子之口", "文言传", "这一段", "这一节", "这一章", "这一处", "这一句", "这一爻", "这一卦",
+        "说的是", "写的是", "指的是", "讲的是", "意思是", "含义是", "写明的是", "进一步",
+        "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞", "象传", "象曰",
+        "彖传", "彖曰", "文言", "易传", "作者", "本段", "该段", "这段", "本节", "该节", "本章", "该章",
+        "王弼注", "王弼", "孔子", "老子", "梭罗", "富兰克林", "华生", "达西", "福尔摩斯", "伊丽莎白", "班纳特",
+        "解释", "说明", "提到", "指出", "认为", "写明", "强调", "表示", "记载", "记述", "叙述", "转述",
+        "概括", "总结", "反问", "接着", "随后", "此外", "另外", "不过", "但是", "然而", "因此", "所以",
+        "同时", "而且", "并且", "此时", "此刻", "这时", "这里", "其中", "明确", "简括", "还说", "又说",
+        "还写", "又写", "借此", "事后", "然后",
+    ).sortedByDescending { it.length }
+
+    private fun isLeadInOnlyClause(clauseText: String): Boolean {
+        val clean = clauseText.trim().trimEnd('。', '！', '？', '.', '!', '?').trim()
+        if (clean.isEmpty()) return true
+        if (extractCanonicalNumbers(clean, forClaim = true).any { it != "1" }) return false
+        if (extractLatinContentStems(clean).isNotEmpty()) return false
+        var stripped = toSimplified(clean)
+        for (term in clauseLeadInTerms) {
+            stripped = stripped.replace(term, "")
+        }
+        val remainingCjk = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhStopChars }.toSet()
+        return remainingCjk.size < 2
+    }
+
+    private fun matchedEnglishWordsInChineseClause(clauseSimp: String, englishText: String): Set<String> {
+        val rawWords = latinTokenRegex.findAll(englishText)
+            .map { it.value.lowercase(Locale.ROOT) }
+            .filter { it.length >= 3 && it !in enStopwords }
+            .distinct()
+            .toList()
+        val matched = HashSet<String>()
+        for (word in rawWords) {
+            val zhCandidates = LinkedHashSet<String>()
+            for (stem in englishStems(word)) {
+                if (stem in enStopwords) continue
+                enToZhLexicon[stem]?.let { zhCandidates.addAll(it) }
+            }
+            if (zhCandidates.any { term -> term in clauseSimp }) {
+                matched += englishStems(word).firstOrNull() ?: word
+            }
+        }
+        return matched
+    }
+
+    /**
+     * 普通立场「本书」复句逐分句出处核验（TON-1982）：
+     * 防止一条复合陈述（如 E1-A 合并「龍德而隱者也」与下一句「不易乎世……確乎其不可拔」，
+     * 或 X3 合并两句相邻英文）仅挂前半句高亮，导致后半句无原句支撑。
+     * - 仅对含 2 条及以上实质分句的复句逐条对照本句实际 `citations`（不放宽到整块未引原文）；
+     * - 跨语种复句若某条后半分句仅靠重复前句的一个熟词勉强命中当前引文，而同块内另一条未引英文原句
+     *   能明显更好地覆盖该分句（命中词数 >= 3 且多出至少 2 个），同样判定为缺引并丢弃整句。
+     */
+    internal fun areAllSubstantiveClausesSupported(
+        claimText: String,
+        citations: List<CheckedStanceCitation>,
+        blocks: List<StanceSourceBlock>,
+    ): Boolean {
+        if (citations.isEmpty()) return false
+        val clauses = compoundClauseSplitRegex.split(claimText)
+            .map { it.trim().trimEnd('。', '！', '？', '.', '!', '?').trim() }
+            .filter { it.isNotEmpty() }
+        if (clauses.size < 2) return true
+
+        val substantive = clauses.filterNot(::isLeadInOnlyClause)
+        if (substantive.size < 2) return true
+
+        val evidenceQuote = citations.joinToString(" ") { it.quote }.trim()
+        val evHasCjk = hasCjk(evidenceQuote)
+        val priorMatchedEnWords = HashSet<String>()
+
+        // 预先切分同块内未被当前 citations 覆盖的英文原句，用于识别跨语种漏引下一句的情况
+        val uncitedEnglishSentences: List<String> by lazy {
+            if (evHasCjk) emptyList()
+            else {
+                val citedNorms = citations.map { it.quote.replace(Regex("\\s+"), " ").trim() }.toSet()
+                blocks.flatMap { blk ->
+                    englishBlockSentenceSplitRegex.split(blk.text.replace(Regex("\\s+"), " ").trim())
+                        .map { it.trim() }
+                        .filter { sent ->
+                            sent.length >= 20 && citedNorms.none { c -> sent in c || c in sent }
+                        }
+                }
+            }
+        }
+
+        for (clause in substantive) {
+            if (!isSupported(clause, citations, emptyList())) {
+                return false
+            }
+            if (!evHasCjk && hasCjk(clause)) {
+                val clauseSimp = toSimplified(clause)
+                val matchedInCited = matchedEnglishWordsInChineseClause(clauseSimp, evidenceQuote)
+                if (matchedInCited.size == 1 && matchedInCited.all { it in priorMatchedEnWords } &&
+                    uncitedEnglishSentences.isNotEmpty()
+                ) {
+                    val bestUncited = uncitedEnglishSentences.maxOfOrNull { sent ->
+                        matchedEnglishWordsInChineseClause(clauseSimp, sent).size
+                    } ?: 0
+                    if (bestUncited >= 3 && bestUncited >= matchedInCited.size + 2) {
+                        return false
+                    }
+                }
+                priorMatchedEnWords.addAll(matchedInCited)
+            }
+        }
+        return true
     }
 
     /** 英文归属框架词干（仅允许描述书中说法，绝不收动作、资产、行业、时间、结果类词）。 */

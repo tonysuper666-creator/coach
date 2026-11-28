@@ -419,4 +419,116 @@ class CollectionQaStanceTest {
         assertEquals("book-walden", guessLayer.getValue("bookId").jsonPrimitive.content)
         assertEquals("Walden", guessLayer.getValue("bookTitle").jsonPrimitive.content)
     }
+
+    @Test
+    fun k4aStyleDropsSentenceMissingPercentagesWhenQuoteOnlyCoversResult() = runBlocking {
+        val econPage = "When price rises by 8%, quantity demanded drops by 11.76%, giving a price elasticity of demand of 1.47."
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                assertTrue("ONLY ONE fact" in systemPrompt)
+                assertTrue("5–200 chars" in systemPrompt)
+                val modelJson = """{"paragraphs":[{"layer":"book","bookId":"book-econ","sentences":[
+                    {"text":"当价格上涨8%、需求量下降11.76%时，需求价格弹性为1.47。","anchors":["S1"],"quote":"price elasticity of demand of 1.47"}
+                ]}],"boundary":null}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "knowledge")
+            put("question", "需求价格弹性计算例子是什么？")
+            put("bookStances", mixedBooksSpec())
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-econ"); put("docLabel", "Economics 2e"); put("page", 42); put("text", econPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertTrue(res.getValue("layers").jsonArray.isEmpty())
+        assertEquals(1, res.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
+    }
+
+    @Test
+    fun k1bStyleKeepsThreeSplitExampleSentencesSharingOneAnchorWithDistinctHighlights() = runBlocking {
+        val originPage = "For instance, wolves hunt swift deer in the mountains. Another example is two hounds chasing hares across open plains. A third example shows bees pollinating blossoms in summer."
+        val q1 = "wolves hunt swift deer in the mountains"
+        val q2 = "two hounds chasing hares across open plains"
+        val q3 = "A third example shows bees pollinating blossoms in summer"
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                val modelJson = """{"paragraphs":[{"layer":"book","bookId":"book-origin","sentences":[
+                    {"text":"例如狼在山地追捕敏捷的鹿。","anchors":["S1"],"quote":"$q1"},
+                    {"text":"另一个例子是两只猎犬在平原追兔。","anchors":["S1"],"quote":"$q2"},
+                    {"text":"第三个例子是蜜蜂在夏季为花朵授粉。","anchors":["S1"],"quote":"$q3"}
+                ]}],"boundary":null}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val books = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-origin")
+                put("title", "On the Origin of Species")
+                put("defaultStance", "knowledge")
+                put("guards", JsonArray(emptyList()))
+            })
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "knowledge")
+            put("question", "达尔文举了哪些自然选择例子？")
+            put("bookStances", books)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-origin"); put("docLabel", "Origin"); put("page", 15); put("text", originPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertEquals(0, res.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
+        val sents = res.getValue("layers").jsonArray.single().jsonObject.getValue("sentences").jsonArray
+        assertEquals(3, sents.size)
+        val cites = sents.map { it.jsonObject.getValue("citations").jsonArray.single().jsonObject }
+        assertEquals(listOf(q1, q2, q3), cites.map { it.getValue("quote").jsonPrimitive.content })
+        assertEquals(listOf(originPage.indexOf(q1), originPage.indexOf(q2), originPage.indexOf(q3)), cites.map { it.getValue("startUtf16").jsonPrimitive.int })
+    }
+
+    @Test
+    fun m2WaldenStyleSplitsHouseBuildingAndEarningLivingIntoSeparateCitedSentences() = runBlocking {
+        val waldenPage = "I borrowed an axe and built my own house beside Walden Pond. I earned my living strictly by the labor of my hands as a surveyor and day laborer."
+        val qHouse = "built my own house beside Walden Pond"
+        val qLiving = "earned my living strictly by the labor of my hands"
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                val modelJson = """{"paragraphs":[
+                    {"layer":"book","bookId":"book-walden","sentences":[
+                        {"text":"梭罗在瓦尔登湖畔自己动手盖了房子。","anchors":["S1"],"quote":"$qHouse"},
+                        {"text":"他靠双手做测量和零工来谋生。","anchors":["S1"],"quote":"$qLiving"}
+                    ]}
+                ],"boundary":null}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "mixed")
+            put("question", "梭罗在瓦尔登湖是怎么盖房子和谋生的？")
+            put("bookStances", mixedBooksSpec())
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-walden"); put("docLabel", "Walden"); put("page", 4); put("text", waldenPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertEquals(0, res.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
+        val sents = res.getValue("layers").jsonArray.single().jsonObject.getValue("sentences").jsonArray
+        assertEquals(2, sents.size)
+        val cites = sents.map { it.jsonObject.getValue("citations").jsonArray.single().jsonObject }
+        assertEquals(listOf(qHouse, qLiving), cites.map { it.getValue("quote").jsonPrimitive.content })
+        assertEquals(listOf(waldenPage.indexOf(qHouse), waldenPage.indexOf(qLiving)), cites.map { it.getValue("startUtf16").jsonPrimitive.int })
+    }
 }

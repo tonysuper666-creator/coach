@@ -431,7 +431,7 @@ internal object CollectionQaStanceEngine {
         )
         var lastReply = reply1
         if (verified == null) {
-            val repairNote = "\n\n[PREVIOUS ATTEMPT INVALID: ${rejectReason?.hint ?: "Fix JSON structure."} Output valid JSON only.]"
+            val repairNote = "\n\n[PREVIOUS ATTEMPT INVALID: ${rejectReason?.hint ?: "Fix JSON structure."} State ONLY ONE fact per sentence; split multiple examples, numbers, or 'A and B' into separate sentences, each with its own anchor and verbatim quote (up to 200 chars) covering every number in that sentence; drop unsupported facts. Output valid JSON only.]"
             val reply2 = transport.ask(
                 systemPrompt = sysPrompt,
                 userPrompt = userPrompt + repairNote,
@@ -609,10 +609,11 @@ internal object CollectionQaStanceEngine {
             appendLine()
             appendLine("RULES:")
             appendLine("1. Root JSON object MUST contain ONLY keys \"paragraphs\" and \"boundary\". Output 0 to 5 paragraphs.")
-            appendLine("2. Every \"book\" paragraph must contain ONLY keys \"layer\", \"sentences\", and optional \"bookId\". Every sentence item is STRICTLY ONE Chinese sentence (one 。！？ at end) with \"text\", \"anchors\" (non-empty, ALL anchors in ONE sentence MUST belong to the SAME bookId and match the paragraph/sentence bookId), and \"quote\" (verbatim 5–80 char substring from the cited block; use \"quotes\":{\"S1\":\"...\"} if >1 anchor).")
-            appendLine("3. Never mix citations from two different books inside one \"book\" sentence. Put each book's facts in separate \"book\" sentences/paragraphs.")
-            appendLine("4. Never put 【】, newlines, or page numbers (第X页 / page X) or unescaped \" inside text; only wrap text in 「」 when quoting an exact verbatim substring present in the cited block (use bare words for translated terms). Never fabricate citations.")
-            appendLine("5. When multiple books in the library are asked about, address each relevant book according to its OWN stance; if synthesis/comparison across books is outside all books, put that connection in an \"outside\" paragraph (unless stance is original-only or high-risk).")
+            appendLine("2. Every \"book\" paragraph must contain ONLY keys \"layer\", \"sentences\", and optional \"bookId\". Every sentence item is STRICTLY ONE Chinese sentence (one 。！？ at end) stating ONLY ONE fact. If enumerating multiple examples, multiple numbers/percentages, or \"A并且B\", split them into separate sentences, each with its own \"anchors\" and \"quote\" (up to 200 chars, or \"quotes\":{\"S1\":\"...\"} if >1 anchor). Omit any item not directly backed by the block text.")
+            appendLine("3. Each \"quote\" (5–200 chars verbatim substring from the cited block) MUST cover the full fact and EVERY number/percentage stated in that sentence. If citing 3 examples from the same block, emit 3 separate sentence items sharing that anchor, each with its own exact verbatim quote.")
+            appendLine("4. Never mix citations from two different books inside one \"book\" sentence. Put each book's facts in separate \"book\" sentences/paragraphs.")
+            appendLine("5. Never put 【】, newlines, or page numbers (第X页 / page X) or unescaped \" inside text; only wrap text in 「」 when quoting an exact verbatim substring present in the cited block (use bare words for translated terms). Never fabricate citations.")
+            appendLine("6. When multiple books in the library are asked about, address each relevant book according to its OWN stance; if synthesis/comparison across books is outside all books, put that connection in an \"outside\" paragraph (unless stance is original-only or high-risk).")
         }.trimIndent()
 
         val systemBytes = systemPrompt.toByteArray(Charsets.UTF_8).size

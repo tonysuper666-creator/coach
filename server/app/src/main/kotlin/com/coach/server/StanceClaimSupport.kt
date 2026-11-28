@@ -99,17 +99,6 @@ internal object StanceClaimSupport {
         "hundred" to "100", "thousand" to "1000", "million" to "1000000",
     )
 
-    private val zhWordNumbers = listOf(
-        "十三" to "13", "十四" to "14", "十五" to "15", "十六" to "16", "十七" to "17", "十八" to "18", "十九" to "19",
-        "十一" to "11", "十二" to "12", "二十" to "20", "三十" to "30", "四十" to "40", "五十" to "50",
-        "六十" to "60", "七十" to "70", "八十" to "80", "九十" to "90",
-        "百万" to "1000000", "千" to "1000", "百" to "100",
-        "第一" to "1", "第二" to "2", "第三" to "3", "第四" to "4", "第五" to "5",
-        "零" to "0", "两" to "2", "双" to "2",
-        "一" to "1", "二" to "2", "三" to "3", "四" to "4", "五" to "5",
-        "六" to "6", "七" to "7", "八" to "8", "九" to "9", "十" to "10",
-    )
-
     /** 常用繁简对照表（覆盖古籍《论语》《道德经》《周易》与常见中文文本）。 */
     private val tradToSimp: Map<Char, Char> = buildMap {
         val pairs = listOf(
@@ -343,18 +332,65 @@ internal object StanceClaimSupport {
         return out.toList()
     }
 
-    private fun extractCanonicalNumbers(text: String): Set<String> {
+    private val yaoLabelRegex = Regex("""(?:初[六九]|[六九][二三四五]|上[六九]|用[九六])""")
+    private val zhNonNumericIdioms = listOf(
+        "千方百计", "百分比", "百分号", "百分率", "百分之",
+        "百姓", "百科", "百般", "千万", "万物", "万一",
+        "十分", "十足", "十字", "十翼",
+        "零工", "零星", "零售", "零件", "零食", "零碎",
+        "双手", "双方", "双向", "双重",
+    )
+    private val zhCompoundTenRegex = Regex("""([二三四五六七八九])?十([一二三四五六七八九])?""")
+    private val zhUnitNumRegex = Regex("""([一二两三四五六七八九])(百|千|万)""")
+    private val zhDigitMap = mapOf(
+        '零' to 0, '一' to 1, '二' to 2, '两' to 2, '双' to 2,
+        '三' to 3, '四' to 4, '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9,
+    )
+
+    private fun extractCanonicalNumbers(text: String, forClaim: Boolean = false): Set<String> {
         val nums = HashSet<String>()
         for (m in digitTokenRegex.findAll(text)) {
             nums += m.value.removeSuffix("%")
         }
         for (m in latinTokenRegex.findAll(text)) {
-            enWordNumbers[m.value.lowercase(Locale.ROOT)]?.let { nums += it }
+            val w = m.value.lowercase(Locale.ROOT)
+            if (forClaim && w == "one") continue
+            enWordNumbers[w]?.let { nums += it }
         }
-        val simp = toSimplified(text)
-        for ((zh, canonical) in zhWordNumbers) {
-            if (zh in simp) nums += canonical
+        var simp = toSimplified(text)
+        if (forClaim) {
+            simp = yaoLabelRegex.replace(simp, " ")
         }
+        for (word in zhNonNumericIdioms) {
+            simp = simp.replace(word, " ")
+        }
+        if ("百万" in simp) {
+            nums += "1000000"
+            simp = simp.replace("百万", " ")
+        }
+        simp = zhCompoundTenRegex.replace(simp) { m ->
+            val tens = m.groupValues[1].firstOrNull()?.let { zhDigitMap[it] } ?: 1
+            val ones = m.groupValues[2].firstOrNull()?.let { zhDigitMap[it] } ?: 0
+            nums += (tens * 10 + ones).toString()
+            " "
+        }
+        simp = zhUnitNumRegex.replace(simp) { m ->
+            val digit = zhDigitMap[m.groupValues[1].first()] ?: 1
+            val unit = when (m.groupValues[2].first()) {
+                '百' -> 100
+                '千' -> 1000
+                else -> 10_000
+            }
+            nums += (digit * unit).toString()
+            " "
+        }
+        for ((ch, value) in zhDigitMap) {
+            if (forClaim && ch == '一') continue
+            if (ch in simp) nums += value.toString()
+        }
+        if ('百' in simp) nums += "100"
+        if ('千' in simp) nums += "1000"
+        if ('万' in simp) nums += "10000"
         return nums
     }
 
@@ -387,12 +423,13 @@ internal object StanceClaimSupport {
         val claimHasCjk = hasCjk(claimText)
         val evHasCjk = hasCjk(evidenceQuote)
 
-        // 1. 直接数字对齐（如 13 / 十三 / thirteen，或年份、百分比）
-        val claimNums = extractCanonicalNumbers(claimText)
-        val evNums = extractCanonicalNumbers(evidenceQuote)
-        if (claimNums.isNotEmpty() && evNums.isNotEmpty() && claimNums.any { it in evNums }) {
-            // 仅「一 / 1 / 第一」太泛，不单独当支撑；非 "1" 的共同数字算有效对齐
-            if (claimNums.any { it in evNums && it != "1" }) return true
+        // 1. 直接数字对齐（含百分比与中文数字）：陈述中出现的每个数字都必须出现在该句全部引文中
+        val claimNums = extractCanonicalNumbers(claimText, forClaim = true)
+        val evNums = extractCanonicalNumbers(evidenceQuote, forClaim = false)
+        if (claimNums.isNotEmpty()) {
+            if (!claimNums.all { it in evNums }) return false
+            // 仅 "1"（如 1 / 1%）过泛时不单独当支撑，仍需继续核验其余实词；其余数字全部命中即通过
+            if (claimNums.any { it != "1" }) return true
         }
 
         // 2. 直接非虚词英文/拉丁词元对齐（如中英混排时提到原词或缩写，或纯英文↔英文）

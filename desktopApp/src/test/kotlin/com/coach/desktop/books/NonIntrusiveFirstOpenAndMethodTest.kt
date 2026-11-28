@@ -6,15 +6,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runSkikoComposeUiTest
@@ -23,7 +26,17 @@ import com.coach.desktop.WindowsTextbookHost
 import com.coach.ui.CoachTheme
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts
+import org.jetbrains.skia.EncodedImageFormat
+import org.jetbrains.skia.Image
+import java.awt.Color
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -274,6 +287,99 @@ class NonIntrusiveFirstOpenAndMethodTest {
                 onNodeWithTag("reading-method-expand").assertIsDisplayed().performClick()
                 waitForIdle()
                 onNodeWithTag("reading-method-collapse").assertIsDisplayed()
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun firstTasteStripNeverOverlapsTextBookOrPdfReadingPane() {
+        val root = Files.createTempDirectory("coach-strip-no-overlap-")
+        val shotDir = Path.of("build/screens/ton1983").also { Files.createDirectories(it) }
+        try {
+            // 1. Dense text book filling the page vertically
+            val md = root.resolve("dense-textbook.md")
+            val paragraphs = (1..24).joinToString("\n\n") { i ->
+                "Paragraph $i: When marginal cost rises with output, competitive supply slopes upward across every unit produced on this page."
+            }
+            Files.writeString(md, "# Chapter 1 Supply\n\n$paragraphs\n")
+            val libText = TextbookLibrary(root.resolve("lib-text"))
+            val ctrlText = TextbookController(libText)
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(
+                        controller = ctrlText,
+                        chooseBook = { md },
+                        firstOpenGuide = true,
+                    )
+                }
+                waitUntil(timeoutMillis = 20_000) { ctrlText.state.value.initialized }
+                onNodeWithTag("upload-textbook").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("first-taste-strip").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                val readerBounds = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
+                val stripBounds = onNodeWithTag("first-taste-strip").fetchSemanticsNode().boundsInRoot
+                assertTrue(
+                    readerBounds.bottom <= stripBounds.top + 0.5f,
+                    "Text reader pane bottom (${readerBounds.bottom}) overlapped strip top (${stripBounds.top})",
+                )
+                val png = Image.makeFromBitmap(onRoot().captureToImage().asSkiaBitmap())
+                    .encodeToData(EncodedImageFormat.PNG)?.bytes
+                if (png != null) Files.write(shotDir.resolve("textbook-strip.png"), png)
+            }
+
+            // 2. PDF book with body text and lower-half vector figure
+            val pdf = root.resolve("sample-figure.pdf")
+            PDDocument().use { doc ->
+                val page = PDPage(PDRectangle.LETTER)
+                doc.addPage(page)
+                PDPageContentStream(doc, page).use { cs ->
+                    cs.beginText()
+                    cs.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 13f)
+                    cs.newLineAtOffset(72f, 700f)
+                    cs.showText("Figure 1.1: Market equilibrium at the bottom half of the page.")
+                    cs.endText()
+                    cs.setNonStrokingColor(Color(215, 228, 220))
+                    cs.addRect(90f, 470f, 430f, 200f)
+                    cs.fill()
+                    cs.setStrokingColor(Color(40, 90, 65))
+                    cs.moveTo(110f, 490f)
+                    cs.lineTo(490f, 650f)
+                    cs.stroke()
+                }
+                doc.save(pdf.toFile())
+            }
+            val libPdf = TextbookLibrary(root.resolve("lib-pdf"))
+            val ctrlPdf = TextbookController(libPdf)
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(
+                        controller = ctrlPdf,
+                        chooseBook = { pdf },
+                        firstOpenGuide = true,
+                    )
+                }
+                waitUntil(timeoutMillis = 20_000) { ctrlPdf.state.value.initialized }
+                onNodeWithTag("upload-textbook").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("first-taste-strip").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("remote-image").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                val readerBounds = onNodeWithTag("reader-page").fetchSemanticsNode().boundsInRoot
+                val stripBounds = onNodeWithTag("first-taste-strip").fetchSemanticsNode().boundsInRoot
+                assertTrue(
+                    readerBounds.bottom <= stripBounds.top + 0.5f,
+                    "PDF reader pane bottom (${readerBounds.bottom}) overlapped strip top (${stripBounds.top})",
+                )
+                val png = Image.makeFromBitmap(onRoot().captureToImage().asSkiaBitmap())
+                    .encodeToData(EncodedImageFormat.PNG)?.bytes
+                if (png != null) Files.write(shotDir.resolve("pdf-strip.png"), png)
             }
         } finally {
             root.toFile().deleteRecursively()

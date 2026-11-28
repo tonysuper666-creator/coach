@@ -72,6 +72,8 @@ internal data class BookMapDocument(
         const val CURRENT_VERSION: Int = 2
         const val MIN_POINTS_PER_CHAPTER: Int = 3
         const val MAX_POINTS_PER_CHAPTER: Int = 7
+        /** Single-chapter books (e.g. lecture slide decks or un-chaptered books) allow up to 10 points so 10-point sampling is always supported. */
+        const val MAX_POINTS_SINGLE_CHAPTER_BOOK: Int = 10
     }
 }
 
@@ -145,7 +147,10 @@ internal object BookMapErrors {
             raw.contains("离线") ||
             raw.contains("网络")
         val quota = trouble == ExplainTrouble.Busy ||
-            raw.contains("credit_limit") ||
+            raw.contains("credit_limit", ignoreCase = true) ||
+            raw.contains("free_grant_exhausted", ignoreCase = true) ||
+            raw.contains("免费额度") ||
+            raw.contains("quota", ignoreCase = true) ||
             raw.contains("额度") ||
             raw.contains("上限") ||
             raw.contains("繁忙")
@@ -177,6 +182,15 @@ internal object BookMapSkeleton {
     private val asciiWordRe = Regex("[A-Za-z0-9]+")
     private val pageNumberLineRe = Regex("""^\s*(?:page\s*)?\d{1,5}\s*$""", RegexOption.IGNORE_CASE)
     private val tocDotsRe = Regex("""\.{4,}\s*\d+\s*$""")
+    private val headingLineRe = Regex(
+        """^(?:(?:CHAPTER|PART|BOOK|SECTION|APPENDIX)\b[\s\dIVXLCM.:—-]*$|第[一二三四五六七八九十百千万\d]+[章节篇回卷部](?:\s|$).{0,36}$)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val listItemStartRe = Regex("""^(?:[-*•▪▫◦]\s+|\d{1,3}[.)]\s+|[（(]\d{1,2}[)）]\s+)""")
+    private val abbreviationRe = Regex(
+        """(?:^|[\s(“"‘'(])(?:Mr|Mrs|Ms|Dr|Prof|St|Fig|Figs|No|Nos|Vol|Ch|Chap|Sec|pp|p|vs|etc|cf|al|Jan|Feb|Mar|Apr|Aug|Sept|Sep|Oct|Nov|Dec|e\.g|i\.e)\.$""",
+        RegexOption.IGNORE_CASE,
+    )
 
     fun bodyStartPage(book: Textbook): Int {
         val anchor = BookBoundaries.bodyStart(book.pages, book.structure, book.correctedBodyPage)
@@ -291,52 +305,94 @@ internal object BookMapSkeleton {
         chapterId: String,
         out: MutableList<BookMapSentenceRef>,
     ) {
+        // Assemble logical paragraphs across single soft line-wraps (`\n`) so Gutenberg/EPUB/PDF wrapped
+        // sentences are NEVER truncated mid-sentence at a hard line break, while keeping exact raw UTF-16 offsets.
+        var paraStart = -1
+        var paraEnd = -1
         var cursor = rangeStart
         while (cursor < rangeEnd) {
-            // Split into paragraph chunks on blank lines or hard newlines.
             val nextBreak = fullText.indexOf('\n', cursor).let { if (it < 0 || it > rangeEnd) rangeEnd else it }
             val rawLine = fullText.substring(cursor, nextBreak)
             val trimmed = rawLine.trim()
-            if (trimmed.isNotEmpty() && !isNoiseLine(trimmed)) {
+            if (trimmed.isEmpty() || isNoiseLine(trimmed) || isStandaloneHeading(trimmed)) {
+                if (paraStart in 0 until paraEnd) {
+                    splitParagraphIntoSentences(pdfPage, fullText, paraStart, paraEnd, chapterId, out)
+                    paraStart = -1
+                    paraEnd = -1
+                }
+            } else {
                 val leadTrim = rawLine.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
                 val lineStart = cursor + leadTrim
                 val lineEnd = (cursor + rawLine.trimEnd().length).coerceAtMost(rangeEnd)
-                splitLineIntoSentences(pdfPage, fullText, lineStart, lineEnd, chapterId, out)
+                if (paraStart < 0) {
+                    paraStart = lineStart
+                    paraEnd = lineEnd
+                } else if (listItemStartRe.containsMatchIn(trimmed)) {
+                    splitParagraphIntoSentences(pdfPage, fullText, paraStart, paraEnd, chapterId, out)
+                    paraStart = lineStart
+                    paraEnd = lineEnd
+                } else {
+                    paraEnd = lineEnd
+                }
             }
             cursor = nextBreak + 1
         }
+        if (paraStart in 0 until paraEnd) {
+            splitParagraphIntoSentences(pdfPage, fullText, paraStart, paraEnd, chapterId, out)
+        }
     }
 
-    private fun splitLineIntoSentences(
+    private fun splitParagraphIntoSentences(
         pdfPage: Int,
         fullText: String,
-        lineStart: Int,
-        lineEnd: Int,
+        paraStart: Int,
+        paraEnd: Int,
         chapterId: String,
         out: MutableList<BookMapSentenceRef>,
     ) {
-        var segStart = lineStart
-        var i = lineStart
-        while (i < lineEnd) {
+        var segStart = paraStart
+        var i = paraStart
+        while (i < paraEnd) {
             val ch = fullText[i]
             val isSentenceEnd = when (ch) {
-                '。', '！', '？', '；' -> true
-                '.', '!', '?', ';' -> (i + 1 == lineEnd || fullText[i + 1].isWhitespace() || fullText[i + 1] in "\"”'’)]")
+                '。', '！', '？' -> true
+                '；' -> (i - segStart) >= 120
+                '.', '!', '?' -> {
+                    val boundaryAfter = i + 1 == paraEnd ||
+                        fullText[i + 1].isWhitespace() ||
+                        fullText[i + 1] in "\"”'’)]）】"
+                    if (!boundaryAfter) {
+                        false
+                    } else if (ch == '.') {
+                        val decimal = i > paraStart && fullText[i - 1].isDigit() && i + 1 < paraEnd && fullText[i + 1].isDigit()
+                        val initial = i > paraStart && fullText[i - 1].isUpperCase() &&
+                            (i - 1 == paraStart || !fullText[i - 2].isLetter())
+                        val lookbackStart = (i - 12).coerceAtLeast(paraStart)
+                        val abbr = abbreviationRe.containsMatchIn(fullText.substring(lookbackStart, i + 1))
+                        !decimal && !initial && !abbr
+                    } else {
+                        true
+                    }
+                }
+                ';' -> (i - segStart) >= 160 && (i + 1 == paraEnd || fullText[i + 1].isWhitespace())
                 else -> false
             }
             if (isSentenceEnd) {
-                val endInclusive = (i + 1).coerceAtMost(lineEnd)
+                var endInclusive = (i + 1).coerceAtMost(paraEnd)
+                while (endInclusive < paraEnd && fullText[endInclusive] in "\"”'’」』）】") {
+                    endInclusive++
+                }
                 emitSentenceIfSubstantive(pdfPage, fullText, segStart, endInclusive, chapterId, out)
                 var next = endInclusive
-                while (next < lineEnd && fullText[next].isWhitespace()) next++
+                while (next < paraEnd && fullText[next].isWhitespace()) next++
                 segStart = next
                 i = next
             } else {
                 i++
             }
         }
-        if (segStart < lineEnd) {
-            emitSentenceIfSubstantive(pdfPage, fullText, segStart, lineEnd, chapterId, out)
+        if (segStart < paraEnd) {
+            emitSentenceIfSubstantive(pdfPage, fullText, segStart, paraEnd, chapterId, out)
         }
     }
 
@@ -354,10 +410,12 @@ internal object BookMapSkeleton {
         while (e > s && fullText[e - 1].isWhitespace()) e--
         if (e <= s) return
         val len = e - s
-        if (len > 280) {
-            // Trim overly long run-on blocks at a natural clause boundary while keeping exact UTF-16 slice.
-            val cap = (s + 240).coerceAtMost(e)
-            val stop = (cap downTo (s + 80)).firstOrNull { fullText[it] in ",，;；:： " } ?: cap
+        if (len > 380) {
+            // Trim overly long run-on sentences at a natural clause boundary while keeping exact UTF-16 slice.
+            val cap = (s + 340).coerceAtMost(e)
+            val stop = (cap downTo (s + 120)).firstOrNull { fullText[it] in ",，;；:：" }
+                ?: (cap downTo (s + 120)).firstOrNull { fullText[it].isWhitespace() }
+                ?: cap
             e = stop
             while (e > s && fullText[e - 1].isWhitespace()) e--
         }
@@ -371,6 +429,17 @@ internal object BookMapSkeleton {
             endUtf16 = e,
             text = slice,
         )
+    }
+
+    private fun isStandaloneHeading(trimmed: String): Boolean {
+        if (headingLineRe.matches(trimmed)) return true
+        // All-uppercase short title lines (e.g. Gutenberg "OF THE DIVISION OF LABOUR.")
+        if (trimmed.length in 3..90 && trimmed.any { it in 'A'..'Z' } && trimmed.none { it in 'a'..'z' } &&
+            trimmed.none { it in '\u4e00'..'\u9fff' }
+        ) {
+            return true
+        }
+        return false
     }
 
     private fun isNoiseLine(trimmed: String): Boolean {
@@ -410,7 +479,7 @@ internal object BookMapAnchorResolver {
         val cleanQuote = edgeQuoteRe.replace(anchor.quote.trim(), "")
         if (cleanQuote.isBlank()) return null
 
-        // 1. Try claimed page first (exact, then NFKC whitespace-collapsed).
+        // 1. Try claimed page first (exact, SentenceCitationGate typographic snap, then NFKC whitespace-collapsed).
         if (claimedPage != null) {
             findRawSpan(claimedPage.text, cleanQuote)?.let { (s, e) ->
                 return BookMapAnchor(
@@ -419,6 +488,16 @@ internal object BookMapAnchorResolver {
                     endUtf16 = e,
                     quote = claimedPage.text.substring(s, e),
                     blockId = "${book.id}:p${claimedPage.number}:$s",
+                )
+            }
+            val snapped = SentenceCitationGate.verifyOrSnapAnchor(cleanQuote, claimedPage.text)
+            if (snapped.verified && snapped.startUtf16 in 0 until snapped.endUtf16 && snapped.endUtf16 <= claimedPage.text.length) {
+                return BookMapAnchor(
+                    pdfPage = claimedPage.number,
+                    startUtf16 = snapped.startUtf16,
+                    endUtf16 = snapped.endUtf16,
+                    quote = claimedPage.text.substring(snapped.startUtf16, snapped.endUtf16),
+                    blockId = "${book.id}:p${claimedPage.number}:${snapped.startUtf16}",
                 )
             }
         }
@@ -436,6 +515,18 @@ internal object BookMapAnchorResolver {
                     quote = page.text.substring(s, e),
                     blockId = "${book.id}:p${page.number}:$s",
                 )
+            }
+            if (kotlin.math.abs(page.number - anchor.pdfPage) <= 3) {
+                val snapped = SentenceCitationGate.verifyOrSnapAnchor(cleanQuote, page.text)
+                if (snapped.verified && snapped.startUtf16 in 0 until snapped.endUtf16 && snapped.endUtf16 <= page.text.length) {
+                    return BookMapAnchor(
+                        pdfPage = page.number,
+                        startUtf16 = snapped.startUtf16,
+                        endUtf16 = snapped.endUtf16,
+                        quote = page.text.substring(snapped.startUtf16, snapped.endUtf16),
+                        blockId = "${book.id}:p${page.number}:${snapped.startUtf16}",
+                    )
+                }
             }
         }
         return null
@@ -646,6 +737,7 @@ internal object BookMapWire {
         val spans = if (targetChapterIds.isEmpty()) allSpans else allSpans.filter { it.tocNodeId in targetChapterIds }.ifEmpty { allSpans }
         val skeletonHash = BookMapSkeleton.computeSkeletonHash(book)
 
+        val maxSentencesPerChapter = if (allSpans.size == 1) 36 else 24
         val refMap = LinkedHashMap<Int, BookMapSentenceRef>()
         var nextRef = 1
         val chaptersArray = buildJsonArray {
@@ -657,7 +749,7 @@ internal object BookMapWire {
                     chapter = span,
                     nextChapter = nextSpan,
                     startRef = nextRef,
-                    maxSentences = 24,
+                    maxSentences = maxSentencesPerChapter,
                 )
                 nextRef += refs.size
                 refs.forEach { refMap[it.ref] = it }
@@ -677,7 +769,7 @@ internal object BookMapWire {
                                         buildJsonObject {
                                             put("ref", r.ref)
                                             put("pdfPage", r.pdfPage)
-                                            put("text", r.text)
+                                            put("text", r.text.replace(Regex("\\s+"), " ").trim())
                                         },
                                     )
                                 }
@@ -725,6 +817,11 @@ internal object BookMapWire {
             ?: return BookMapBatchParseResult.Invalid("返回的地图缺少章节数据，请重试。")
 
         val spans = BookMapSkeleton.chapters(book)
+        val maxPointsPerChapter = if (spans.size == 1) {
+            BookMapDocument.MAX_POINTS_SINGLE_CHAPTER_BOOK
+        } else {
+            BookMapDocument.MAX_POINTS_PER_CHAPTER
+        }
         val spanById = spans.associateBy { it.tocNodeId }
         val parsedById = LinkedHashMap<String, BookMapChapter>()
 
@@ -738,7 +835,7 @@ internal object BookMapWire {
 
             val validPoints = mutableListOf<BookMapPoint>()
             rawPoints.forEachIndexed { idx, pEl ->
-                if (validPoints.size >= BookMapDocument.MAX_POINTS_PER_CHAPTER) return@forEachIndexed
+                if (validPoints.size >= maxPointsPerChapter) return@forEachIndexed
                 val pObj = pEl as? JsonObject ?: return@forEachIndexed
                 val summary = pObj["summary"]?.jsonPrimitive?.contentOrNull.orEmpty().trim()
                 if (summary.isBlank()) return@forEachIndexed

@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -33,6 +34,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.test.Test
+import kotlin.test.assertNotNull
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -327,5 +329,131 @@ class BookMapBatchServiceTest {
             System.setErr(origErr)
             dir.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun batchServiceUsesThreeChapterChunks12kTokensSupportsSingleChapter10PointsAndStructuredErrors() = runBlocking {
+        val observedMaxTokens = mutableListOf<Int>()
+        val observedChunkCounts = mutableListOf<Int>()
+        val transport = object : BookMapBatchTransport {
+            override fun submitOrPoll(
+                jobKey: String,
+                systemPrompt: String,
+                userPrompt: String,
+                maxTokens: Int,
+                friend: String?,
+                device: String?,
+            ): BookMapBatchChunkOutcome {
+                observedMaxTokens += maxTokens
+                val chHeaders = Regex("=== CHAPTER id=([^ ]+) num=(\\d+)").findAll(userPrompt).toList()
+                observedChunkCounts += chHeaders.size
+                val chaptersJson = buildJsonArray {
+                    for (m in chHeaders) {
+                        val cid = m.groupValues[1]
+                        val cnum = m.groupValues[2].toInt()
+                        val refs = Regex("\\[(\\d+)\\|p\\.\\d+\\]").findAll(userPrompt).map { it.groupValues[1].toInt() }.toList()
+                        val chRefs = if (chHeaders.size == 1) refs.take(10) else refs.filter { it in ((cnum - 1) * 10 + 1)..(cnum * 10) }.take(5)
+                        add(buildJsonObject {
+                            put("chapterId", cid)
+                            put("chapterNum", cnum)
+                            put("oneLiner", "主干概述 $cnum")
+                            put("points", buildJsonArray {
+                                chRefs.forEachIndexed { idx, r ->
+                                    add(buildJsonObject {
+                                        put("summary", "要点 ${idx + 1} 概括原句 #$r。")
+                                        // Exercise both array refs and singular ref / bracketed ref string formats.
+                                        if (idx % 2 == 0) put("refs", buildJsonArray { add(JsonPrimitive(r)) })
+                                        else put("ref", JsonPrimitive("[$r]"))
+                                    })
+                                }
+                            })
+                        })
+                    }
+                }
+                // Exercise top-level JSON array response as well as object wrapper.
+                val text = if (chHeaders.size == 1) chaptersJson.toString() else buildJsonObject { put("chapters", chaptersJson) }.toString()
+                return BookMapBatchChunkOutcome.Ready(text, BridgeClient.HAIKU, 100, 120, 30L)
+            }
+        }
+        val service = BookMapBatchService(transport)
+
+        // 1. Multi-chapter book (7 non-empty chapters + 1 empty-ref divider chapter) -> chunked at max 3 chapters/chunk, 12,000 maxTokens.
+        val multiChapters = (1..7).map { c ->
+            BookMapV2ChapterInput(
+                chapterId = "ch-$c",
+                chapterNum = c,
+                chapterTitle = "Chapter $c",
+                firstPage = c * 10,
+                lastPage = c * 10 + 9,
+                refs = (1..10).map { j -> BookMapV2RefInput((c - 1) * 10 + j, c * 10, "Sentence $j in chapter $c explains the thesis.") },
+            )
+        } + BookMapV2ChapterInput("part-divider", 8, "Part II", 80, 80, emptyList())
+        val multiRes = service.generate(
+            BookMapV2Request("bk-multi", "Multi Book", "sk1", 1, ServerExplainLang.BILINGUAL, 0, multiChapters),
+        )
+        assertEquals(listOf(3, 3, 1), observedChunkCounts, "Should chunk at max 3 chapters per Haiku Batch call and skip empty-ref chapters")
+        assertTrue(observedMaxTokens.all { it == 12_000 }, "Each chunk must request 12,000 output tokens to prevent batch_incomplete truncation")
+        assertEquals(8, multiRes["chapters"]!!.jsonArray.size)
+        assertTrue(multiRes["chapters"]!!.jsonArray.last().jsonObject["points"]!!.jsonArray.isEmpty())
+
+        // 2. Single-chapter book (like a 60p lecture slide deck) allows up to 10 points.
+        val singleChapter = listOf(
+            BookMapV2ChapterInput(
+                chapterId = "ch-only",
+                chapterNum = 1,
+                chapterTitle = "Week 1 Lecture Slides",
+                firstPage = 12,
+                lastPage = 60,
+                refs = (1..14).map { j -> BookMapV2RefInput(j, 12 + j, "Slide $j explains key lecture concept number $j.") },
+            ),
+        )
+        val singleRes = service.generate(
+            BookMapV2Request("bk-single", "Lecture Deck", "sk2", 12, ServerExplainLang.BILINGUAL, 0, singleChapter),
+        )
+        assertEquals(10, singleRes["chapters"]!!.jsonArray.single().jsonObject["points"]!!.jsonArray.size)
+
+        // 3. free_grant_exhausted maps to BookMapQuotaExceededException with safe errorCode, and non-quota failure carries stage + errorCode.
+        val quotaService = BookMapBatchService(object : BookMapBatchTransport {
+            override fun submitOrPoll(jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int, friend: String?, device: String?) =
+                BookMapBatchChunkOutcome.Failed("本月生成额度已达上限", isQuota = true, errorCode = "free_grant_exhausted")
+        })
+        val quotaEx = runCatching {
+            quotaService.generate(BookMapV2Request("bk-q", "Q", "sk", 1, ServerExplainLang.ZH, 0, singleChapter))
+        }.exceptionOrNull() as? BookMapQuotaExceededException
+        assertNotNull(quotaEx)
+        assertEquals("free_grant_exhausted", quotaEx.errorCode)
+
+        val pollFailService = BookMapBatchService(object : BookMapBatchTransport {
+            override fun submitOrPoll(jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int, friend: String?, device: String?) =
+                BookMapBatchChunkOutcome.Failed("批处理失败", isQuota = false, errorCode = "batch_result_unavailable")
+        })
+        val genEx = runCatching {
+            pollFailService.generate(BookMapV2Request("bk-f", "F", "sk", 1, ServerExplainLang.ZH, 0, singleChapter))
+        }.exceptionOrNull() as? BookMapGenerationException
+        assertNotNull(genEx)
+        assertEquals("chunk_poll", genEx.stage)
+        assertEquals("batch_result_unavailable", genEx.errorCode)
+
+        // 4. parseRequest accepts up to 240 chapters (e.g. 130-chapter classics like Shiji).
+        val bigPayload = buildJsonObject {
+            put("bookTitle", "Large Classic")
+            put("chapters", buildJsonArray {
+                for (i in 1..135) {
+                    add(buildJsonObject {
+                        put("chapterId", "ch-$i")
+                        put("chapterNum", i)
+                        put("chapterTitle", "Chapter $i")
+                        put("firstPage", i)
+                        put("lastPage", i)
+                        put("refs", buildJsonArray {
+                            add(buildJsonObject { put("ref", i); put("pdfPage", i); put("text", "Core sentence $i in classic work.") })
+                        })
+                    })
+                }
+            })
+        }
+        assertEquals(135, BookMapBatchService.parseRequest("bk-135", bigPayload, null, "owner").chapters.size)
+        assertEquals("free_grant_exhausted", HaikuBookMapBatchTransport.sanitizeBridgeErrorCode("HTTP 429: free_grant_exhausted"))
+        assertEquals("bridge_error", HaikuBookMapBatchTransport.sanitizeBridgeErrorCode("unexpected raw error with private text"))
     }
 }

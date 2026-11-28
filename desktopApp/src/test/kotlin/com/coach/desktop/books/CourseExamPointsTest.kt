@@ -671,6 +671,52 @@ class CourseExamPointsTest {
     }
 
     @Test
+    fun numberedSectionsAfterAChapterGlossaryNeedAHeadingOnTheDestinationPage() {
+        fun bookmark(number: String, title: String, page: Int) = BookTocNode(
+            "section-$number", null, page, 1, TocNodeKind.BACK_MATTER, number,
+            "$number $title*", page, page + 1, source = HeadingSource.PDF_OUTLINE,
+        )
+        val nodes = listOf(bookmark("2.1", "Lattice defects", 12), bookmark("2.2", "Elastic limits", 14))
+        val pages = listOf(
+            BookPage(12, "2.1 | Lattice defects\nDislocations permit atoms in a solid to rearrange under stress."),
+            BookPage(14, "References\nSee section 2.2 Elastic limits in the catalogue for additional references."),
+        )
+        val spans = CourseExamPoints.bodyConfirmedSections(nodes, pages)
+        assertEquals(listOf(ExamSectionSpan("Lattice defects", "lattice defects", 12..13)), spans)
+        val evidence = pages.map { ExamTeachingPage("tb", it.number, CourseMaterialRole.CORE_TEXTBOOK, it.text, sectionEvidenceOnly = true) }
+        val point = CourseExamPoints.identifyFromPages("glossary", evidence, sectionSpansByBook = mapOf("tb" to spans)).single()
+        assertEquals("Lattice defects", point.title)
+        assertEquals(listOf(12), point.sources.map { it.startPage })
+    }
+
+    @Test
+    fun navigationAndRankedCellsDoNotSeedTopicsButTextbookSectionsStillDo() {
+        val pages = listOf(
+            ExamTeachingPage("book", 11, CourseMaterialRole.CORE_TEXTBOOK, """
+                Student resources (https://example.invalid/help) are available online.
+                View a brief video: Visit the companion site for a demonstration.
+                Link to Learning: Follow this link for extra practice.
+                Sample archive (partial: Access the incomplete label here.
+                Cognitive mapping (CM): An internal representation of spatial relationships.
+                Table 1.2 Example placements
+                Rank Assignment
+                1 Satellite telemetry
+                2 Coastal surveying
+                3 Botanical fieldwork
+                4 Cellular transport
+                2.3 Memory consolidation
+                Learning stabilizes through a sequence of changes after initial acquisition.
+            """.trimIndent()),
+            ExamTeachingPage("book", 12, CourseMaterialRole.CORE_TEXTBOOK, """
+                4 Cellular transport
+                Cells move molecules across membranes by several distinct mechanisms.
+            """.trimIndent()),
+        )
+        val titles = CourseExamPoints.identifyFromPages("ranked-cells", pages).map { it.title }.toSet()
+        assertEquals(setOf("Cognitive mapping (CM)", "Memory consolidation", "Cellular transport"), titles)
+    }
+
+    @Test
     fun tableCellLabelsAreRejectedWhileSectionSpanPagesRunningChapterHeadersAndMultiSlideTopicsStay() {
         // 1. Synthetic table rows ("All care: -0.22", "Dental care Source: ...", "100.0 All medical" near chart ticks)
         //    must NEVER become exam points.

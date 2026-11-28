@@ -33,6 +33,11 @@ internal object CourseExamPoints {
     private val lecturerTitlePrefix = Regex("""^(?:Dr\.?|Prof\.?|Professor)\s+[A-Z]""")
     private val trailingSlideFraction = Regex("""\s+\d{1,3}\s*/\s*\d{1,3}\s*$""")
     private val tableMetaSuffixNoise = Regex("""(?i)\s+(?:source|sources|note|notes|table|figure|fig\.?|panel|column|row)$""")
+    private val navigationHeading = Regex("""(?i)^(?:view\s+(?:a|an|the)\b|student\s+resources\b|link\s+to\s+learning\b)""")
+    private val urlInHeading = Regex("""(?i)(?:\bhttps?(?:://|\s*$)|[(（]\s*https?\b|\bwww\.)""")
+    private val nativeSectionNumber = Regex("""\d{1,2}\.\d{1,2}""")
+    private val tableCaption = Regex("""(?i)^(?:table\s+|表\s*)\d+""")
+    private val rankedCell = Regex("""^(\d{1,3})\s+\p{L}""")
     private val numericCohortLabelNoise = Regex("""(?i)^(?:ages?|years?|months?|days?|grades?|groups?|cohorts?|panels?|periods?|waves?|quartiles?|quintiles?|deciles?)\s+\d""")
     private val parentheticalUnitCohortNoise = Regex("""(?i)\(\s*\d+(?:\s*[-–—]\s*\d+)?\s*(?:yrs?|years?|mos?|months?|wks?|weeks?|days?|hrs?|hours?|mins?|%|kg|mg|cm|mm)\s*\)""")
     private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise|but)\s+""")
@@ -513,6 +518,23 @@ internal object CourseExamPoints {
         return numericLeadValue.containsMatchIn(trimmed) && alphaWords < 3
     }
 
+    /** PDF text flattens a rank and its neighbouring cell into what looks like a numbered section. */
+    private fun rankedTableRows(lines: List<String>): Set<Int> = buildSet {
+        for ((caption, line) in lines.withIndex()) {
+            if (!tableCaption.containsMatchIn(line)) continue
+            // A caption can wrap, followed by a column header. Only suppress a run of consecutive ranks.
+            val first = (caption + 1 until minOf(lines.size, caption + 5))
+                .firstOrNull { rankedCell.containsMatchIn(lines[it]) } ?: continue
+            var rank = rankedCell.find(lines[first])!!.groupValues[1].toInt()
+            var end = first + 1
+            while (end < lines.size && rankedCell.find(lines[end])?.groupValues?.get(1)?.toInt() == rank + 1) {
+                rank++
+                end++
+            }
+            if (end - first >= 2) addAll(first until end)
+        }
+    }
+
     fun isValidExamPointTitle(
         rawLine: String,
         heading: String,
@@ -522,6 +544,14 @@ internal object CourseExamPoints {
         officialTocSection: Boolean = false,
     ): Boolean {
         if (heading.length !in 2..64) return false
+        if (navigationHeading.containsMatchIn(heading) || urlInHeading.containsMatchIn(heading)) return false
+        var openParens = 0
+        for (c in heading) {
+            if (c == '(' || c == '（') openParens++
+            if (c == ')' || c == '）') openParens--
+            if (openParens < 0) return false
+        }
+        if (openParens != 0) return false
         if (heading.any { it in "。！？!?；;.:：" }) return false
         if (heading.none(Char::isLetter)) return false
         if (ExplainClassifier.isTocLine(rawLine) || hasTrailingPageNumber(rawLine) || hasTrailingPageNumber(heading)) {
@@ -610,6 +640,10 @@ internal object CourseExamPoints {
             val openingStart = structure?.tocNodes?.let { BookBoundaries.openingNode(it)?.startPage }
             val first = corrected ?: structure?.correctedStart ?: structure?.nativeBodyStart?.importPage ?: openingStart ?: 1
             val hasChapters = structure?.tocNodes?.any { it.kind == TocNodeKind.CHAPTER } == true
+            val recovered = if (standaloneTextbook && structure != null) {
+                bodyConfirmedSections(structure.tocNodes, bookPages)
+            } else emptyList()
+            val recoveredPages = recovered.flatMapTo(hashSetOf()) { it.pages }
             if (structure != null) {
                 val chapterNodes = structure.tocNodes.filter { it.kind == TocNodeKind.CHAPTER }
                 val starts = chapterNodes.map { it.startPage }.toSet()
@@ -625,30 +659,53 @@ internal object CourseExamPoints {
                 val spans = structure.tocNodes
                     .filter { it.kind in setOf(TocNodeKind.SECTION, TocNodeKind.SUBSECTION) }
                     .mapNotNull { node ->
-                        val rawTitle = node.title.trim()
+                        val rawTitle = if (standaloneTextbook && node.source == HeadingSource.PDF_OUTLINE) {
+                            node.title.trim().trimEnd('*')
+                        } else node.title.trim()
                         if (exerciseHeadingLine.matches(rawTitle)) return@mapNotNull null
                         val cleanTitle = rawTitle.replace(sectionNumber, "").trim().trimEnd(':', '：', '-', '–', '—').trim()
                         val normTitle = normalize(cleanTitle)
                         if (normTitle.length < 2 || normTitle in boilerplate) return@mapNotNull null
                         ExamSectionSpan(cleanTitle, normTitle, node.startPage..node.endPage.coerceAtLeast(node.startPage))
-                    }
+                    } + recovered
                 if (spans.isNotEmpty()) sectionSpansByBook[mat.bookId] = spans
             }
             for (page in bookPages) {
                 if (page.number < first || page.ocrPending || excludedRanges.any { page.number in it }) continue
                 val role = structure?.pageRole(page.number)
-                if (role in setOf(BookPageRole.TOC, BookPageRole.COPYRIGHT, BookPageRole.INDEX, BookPageRole.REFERENCES, BookPageRole.BLANK)) {
+                val sectionEvidence = role == BookPageRole.REFERENCES && page.number in recoveredPages
+                if (!sectionEvidence && role in setOf(BookPageRole.TOC, BookPageRole.COPYRIGHT, BookPageRole.INDEX, BookPageRole.REFERENCES, BookPageRole.BLANK)) {
                     continue
                 }
                 if (role == BookPageRole.FRONT_MATTER && (hasChapters || BookBoundaries.looksLikeFrontMatter(page.text))) {
                     continue
                 }
                 if (isTocOrIndexPage(page.text)) continue
-                pages += ExamTeachingPage(mat.bookId, page.number, mat.role, page.text)
+                pages += ExamTeachingPage(mat.bookId, page.number, mat.role, page.text, sectionEvidenceOnly = sectionEvidence)
             }
         }
         val cleaned = stripExercisesFromTextbookPages(pages, chapterStartsByBook)
         return identifyFromPages(courseId, cleaned, chapterStartsByBook, sectionSpansByBook, chapterRangesByBook, fullTocTitlesByBook)
+    }
+
+    // Some PDF outlines classify every section after the first chapter glossary as back matter.
+    // Only trust a numbered native bookmark if its destination prints the same number and heading.
+    internal fun bodyConfirmedSections(nodes: List<BookTocNode>, bookPages: List<BookPage>): List<ExamSectionSpan> {
+        val byPage = bookPages.associateBy { it.number }
+        return nodes.mapNotNull { node ->
+            val number = node.numberLabel ?: return@mapNotNull null
+            if (node.source != HeadingSource.PDF_OUTLINE || node.kind != TocNodeKind.BACK_MATTER ||
+                !nativeSectionNumber.matches(number)) return@mapNotNull null
+            val title = node.title.replace(sectionNumber, "").trimEnd('*').trim()
+            if (!isValidExamPointTitle(title, title, defined = false, numbered = true, markdown = false, officialTocSection = true)) return@mapNotNull null
+            val page = byPage[node.startPage] ?: return@mapNotNull null
+            val key = normalize(title)
+            val words = key.split(' ').joinToString("""\s+""", transform = Regex::escape)
+            val heading = Regex("""(?m)^${Regex.escape(number)}\s*[|.:：–—-]?\s*$words(?!\p{L})""")
+            val lines = page.text.lineSequence().joinToString("\n", transform = ::normalize)
+            if (!heading.containsMatchIn(lines) || !hasSubstantiveBody(page.text)) return@mapNotNull null
+            ExamSectionSpan(title, key, node.startPage..node.endPage)
+        }
     }
 
     private fun normalizeEdgeCandidate(line: String): String {
@@ -688,6 +745,7 @@ internal object CourseExamPoints {
             pages.filter { it.role in teachingRoles && it.text.isNotBlank() && !isTocOrIndexPage(it.text) },
             chapterStartPagesByBook,
         )
+        val headingPages = bodyPages.filterNot { it.sectionEvidenceOnly }
         // Detect repeating running headers / slide footers without suppressing legitimate multi-slide topic titles
         // or textbook chapter titles that repeat as running headers.
         val pageCountByBook = HashMap<String, Int>()
@@ -697,7 +755,7 @@ internal object CourseExamPoints {
         val textbookEdgeFreqByBook = HashMap<Pair<String, String>, Int>()
         val slideTopEdgeBooks = HashMap<String, MutableSet<String>>()
         val slideBottomEdgeBooks = HashMap<String, MutableSet<String>>()
-        for (page in bodyPages) {
+        for (page in headingPages) {
             pageCountByBook[page.bookId] = (pageCountByBook[page.bookId] ?: 0) + 1
             roleByBook[page.bookId] = page.role
             val nonEmpty = page.text.lineSequence().map(String::trim)
@@ -744,7 +802,7 @@ internal object CourseExamPoints {
             .mapValues { (_, pgs) -> pgs.toSet() }
         // Narrative prose lines in the textbook (excluding numeric table rows & chart ticks) let us confirm
         // whether a term has dedicated textbook body discussion before suppressing it via slide/table heuristics.
-        val textbookProseLines = bodyPages
+        val textbookProseLines = headingPages
             .asSequence()
             .filter { it.role == CourseMaterialRole.CORE_TEXTBOOK }
             .flatMap { it.text.lineSequence() }
@@ -785,11 +843,12 @@ internal object CourseExamPoints {
             sectionSpansByBook.values.flatten().map { it.normalizedTitle }.toSet()
 
         val indexed = mutableListOf<ExamTeachingPage>()
-        for (page in bodyPages) {
+        for (page in headingPages) {
             val lines = page.text.lineSequence().map(String::trim)
                 .filter { it.isNotEmpty() && !PRINTED_PAGE_MARK.matches(it) }
                 .toList()
             val isSlideLike = page.role != CourseMaterialRole.CORE_TEXTBOOK
+            val tableRows = rankedTableRows(lines)
             val bookTocTitles = fullTocTitlesByBook[page.bookId].orEmpty() +
                 sectionSpansByBook[page.bookId].orEmpty().map { it.normalizedTitle }
             fun isRepeatingSlideEdge(candidate: String): Boolean {
@@ -811,6 +870,7 @@ internal object CourseExamPoints {
                     (page.bookId to stripped) in repeatingTextbookEdgesByBook
             }
             for ((index, line) in lines.withIndex()) {
+                if (index in tableRows) continue
                 val bulletMatch = if (!isSlideLike) bulletDefinition.matchEntire(line) else null
                 val defMatch = if (bulletMatch == null) definition.matchEntire(line) else null
                 val numericTableDef = defMatch != null && isNumericTableRowValue(defMatch.groupValues[2])
@@ -1003,4 +1063,5 @@ internal data class ExamTeachingPage(
     val page: Int,
     val role: CourseMaterialRole,
     val text: String,
+    val sectionEvidenceOnly: Boolean = false,
 )

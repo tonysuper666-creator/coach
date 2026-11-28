@@ -1,16 +1,25 @@
 package com.coach.desktop.books
 
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import com.coach.ui.CoachTheme
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.sql.DriverManager
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 @OptIn(ExperimentalTestApi::class)
 class MyLibraryScreenTest {
@@ -70,5 +79,121 @@ class MyLibraryScreenTest {
         waitUntil(timeoutMillis = 10_000) {
             runCatching { onNodeWithTag("library-empty").assertExists() }.isSuccess
         }
+    }
+
+    @Test fun offlineAskShowsTheSentenceAndJumpsWithoutCallingOut() = runSkikoComposeUiTest {
+        val root = Files.createTempDirectory("library-ask-offline-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val page = "Opportunity cost is the value of the next best alternative that is given up. Scarcity forces every choice to leave something else undone."
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched,reading_page) VALUES('b1','Open Principles','md',1,1)")
+                sql.executeUpdate("INSERT INTO pages(book,page,text) VALUES('b1',12,'${page.replace("'", "''")}')")
+            }
+        }
+        val remote = AtomicInteger()
+        var opened = ""
+        setContent {
+            CoachTheme(false) {
+                CompositionLocalProvider(LocalCoachConnectivity provides CoachConnectivityStatus.OFFLINE) {
+                    MyLibraryScreen(library, onBack = {}, onOpenBook = { opened = it }, askOnline = {
+                        remote.incrementAndGet()
+                        error("offline")
+                    })
+                }
+            }
+        }
+        onNodeWithTag("library-ask").performTextInput("opportunity cost")
+        onNodeWithTag("library-ask-submit").performClick()
+        waitUntil(timeoutMillis = 10_000) {
+            runCatching { onNodeWithTag("library-ask-cite-0").assertExists() }.isSuccess
+        }
+        onNodeWithTag("library-ask-claim-0").assertTextContains("Opportunity cost", substring = true)
+        onNodeWithTag("library-ask-network").assertExists()
+        assertEquals(0, remote.get())
+        onNodeWithTag("library-ask-cite-0").performClick()
+        assertEquals("b1", opened)
+        assertEquals(12, library.savedReadSpot("b1")?.first)
+        val jump = library.peekQuoteJump("b1")
+        assertNotNull(jump)
+        assertEquals(12, jump.page)
+        assertTrue(jump.text.startsWith("Opportunity cost"))
+        assertEquals(jump.text, page.substring(jump.start, jump.end))
+    }
+
+    @Test fun missingQuestionSaysSoAndAVagueOneAsksForTheConcept() = runSkikoComposeUiTest {
+        val root = Files.createTempDirectory("library-ask-missing-")
+        val library = TextbookLibrary(root.resolve("library"))
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched,reading_page) VALUES('b1','Open Principles','md',1,1)")
+                sql.executeUpdate("INSERT INTO pages(book,page,text) VALUES('b1',12,'Opportunity cost is the value of the next best alternative that is given up.')")
+            }
+        }
+        setContent {
+            CoachTheme(false) {
+                CompositionLocalProvider(LocalCoachConnectivity provides CoachConnectivityStatus.OFFLINE) {
+                    MyLibraryScreen(library, onBack = {}, onOpenBook = {})
+                }
+            }
+        }
+        onNodeWithTag("library-ask").performTextInput("这是什么")
+        onNodeWithTag("library-ask-submit").performClick()
+        waitUntil(timeoutMillis = 10_000) {
+            runCatching { onNodeWithTag("library-ask-vague").assertExists() }.isSuccess
+        }
+        onNodeWithTag("library-ask").performTextReplacement("quantum entanglement")
+        onNodeWithTag("library-ask-submit").performClick()
+        waitUntil(timeoutMillis = 10_000) {
+            runCatching { onNodeWithTag("library-ask-missing").assertExists() }.isSuccess
+        }
+    }
+
+    @Test fun onlineAskRewritesTheSentenceAndStillJumpsToTheLocalOffset() = runSkikoComposeUiTest {
+        val root = Files.createTempDirectory("library-ask-online-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val page = "Opportunity cost is the value of the next best alternative that is given up."
+        DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.createStatement().use { sql ->
+                sql.executeUpdate("INSERT INTO books(id,title,format,touched,reading_page) VALUES('b1','Open Principles','md',1,1)")
+                sql.executeUpdate("INSERT INTO pages(book,page,text) VALUES('b1',12,'${page.replace("'", "''")}')")
+            }
+        }
+        val remote = AtomicInteger()
+        var opened = ""
+        setContent {
+            CoachTheme(false) {
+                MyLibraryScreen(library, onBack = {}, onOpenBook = { opened = it }, askOnline = {
+                    remote.incrementAndGet()
+                    CourseServerCallResult(
+                        buildJsonObject {
+                            put("sentences", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("claim", "Opportunity cost means the next best alternative is given up.")
+                                    put("blockId", "B1")
+                                    put("quoteAnchor", "next best alternative")
+                                })
+                            })
+                        },
+                        null,
+                    )
+                })
+            }
+        }
+        onNodeWithTag("library-ask").performTextInput("opportunity cost")
+        onNodeWithTag("library-ask-submit").performClick()
+        waitUntil(timeoutMillis = 10_000) {
+            runCatching {
+                onNodeWithTag("library-ask-claim-0").assertTextContains("means the next best alternative", substring = true)
+            }.isSuccess
+        }
+        assertEquals(1, remote.get())
+        onNodeWithTag("library-ask-cite-0").performClick()
+        assertEquals("b1", opened)
+        val jump = library.peekQuoteJump("b1")
+        assertNotNull(jump)
+        assertEquals(page, jump.text)
+        assertEquals(0, jump.start)
+        assertEquals(page.length, jump.end)
     }
 }

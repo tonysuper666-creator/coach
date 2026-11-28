@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -29,6 +30,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,15 +43,18 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.coach.protocol.BookStance
+import com.coach.ui.input.EnterGate
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.CoachLoadingDots
 import com.coach.ui.v7.PaperButton
@@ -79,6 +84,7 @@ internal fun MyLibraryScreen(
     collections: List<CollectionSummary> = emptyList(),
     onAskCollection: (suspend (JsonObject) -> CourseServerCallResult)? = null,
     onJumpCollectionCitation: ((CollectionQaCitation) -> Unit)? = null,
+    askOnline: (suspend (JsonObject) -> CourseServerCallResult)? = null,
 ) {
     val colors = CoachTheme.colors
     val scope = rememberCoroutineScope()
@@ -286,6 +292,7 @@ internal fun MyLibraryScreen(
         if (status != null) {
             Text(status.orEmpty(), style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary, modifier = Modifier.padding(top = 6.dp).testTag("library-status"))
         }
+        LibraryAskPanel(library, onOpenBook, askOnline)
         // 库里跨书提问框：默认直接对全部书提问，不出弹窗、不拦路、不抢焦点；回答出在下方结果区。
         Column(
             Modifier
@@ -525,6 +532,181 @@ internal fun MyLibraryScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LibraryAskPanel(
+    library: TextbookLibrary,
+    onOpenBook: (String) -> Unit,
+    askOnline: (suspend (JsonObject) -> CourseServerCallResult)?,
+) {
+    val colors = CoachTheme.colors
+    val scope = rememberCoroutineScope()
+    val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
+    var draft by remember { mutableStateOf(TextFieldValue("")) }
+    var claims by remember { mutableStateOf<List<LibraryAskClaim>>(emptyList()) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    var noticeTag by remember { mutableStateOf("library-ask-missing") }
+    var network by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    fun jump(claim: LibraryAskClaim) {
+        stagePassageJump(library, claim.bookId, claim.page, claim.startUtf16, claim.endUtf16, claim.quote)
+        onOpenBook(claim.bookId)
+    }
+    fun submit() {
+        val asked = draft.text.trim()
+        if (asked.isEmpty() || busy) return
+        val offlineNow = offline
+        scope.launch {
+            busy = true
+            network = false
+            val answer = withContext(Dispatchers.IO) {
+                runCatching {
+                    openLibraryCorpus(library.directory).use { db -> LibraryAsk.answer(db, asked) }
+                }.getOrElse { LibraryAskAnswer(asked, emptyList(), LibraryAskKind.MISSING, searchedNotes = false) }
+            }
+            when (answer.kind) {
+                LibraryAskKind.VAGUE -> {
+                    claims = emptyList()
+                    notice = LibraryAsk.VAGUE
+                    noticeTag = "library-ask-vague"
+                    network = false
+                    busy = false
+                }
+                LibraryAskKind.MISSING -> {
+                    claims = emptyList()
+                    notice = LibraryAsk.missingCopy(answer)
+                    noticeTag = "library-ask-missing"
+                    network = false
+                    busy = false
+                }
+                LibraryAskKind.FOUND -> {
+                    claims = answer.claims
+                    notice = null
+                    if (offlineNow) {
+                        network = true
+                        busy = false
+                    } else {
+                        val remote = askOnline ?: { payload -> BookExplainer(library = library).askCollection(payload) }
+                        val prose = LibraryAsk.polish(asked, answer.claims, remote)
+                        if (prose.claims.isNotEmpty()) {
+                            val upgraded = prose.claims.associateBy { Triple(it.bookId, it.page, it.startUtf16) }
+                            claims = answer.claims.map { local ->
+                                upgraded[Triple(local.bookId, local.page, local.startUtf16)] ?: local
+                            }
+                        }
+                        network = prose.unreachable
+                        busy = false
+                    }
+                }
+            }
+        }
+    }
+    Column(Modifier.widthIn(max = 880.dp).padding(top = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LibraryAskField(draft, { draft = it }, { submit() }, Modifier.weight(1f))
+            PaperButton(
+                onClick = { submit() },
+                enabled = draft.text.isNotBlank() && !busy,
+                modifier = Modifier.padding(start = 8.dp).testTag("library-ask-submit"),
+            ) { Text("提问") }
+        }
+        if (busy || claims.isNotEmpty() || notice != null || network) {
+            Column(
+                Modifier.padding(top = 8.dp).heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (busy) {
+                    Text(
+                        if (claims.isEmpty()) "正在找…" else "正在把这几句整理成一段话…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag("library-ask-busy"),
+                    )
+                }
+                claims.forEachIndexed { index, claim ->
+                    LibraryAskClaimCard(claim, index) { jump(claim) }
+                }
+                val message = notice
+                if (message != null) {
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag(noticeTag),
+                    )
+                }
+                if (network) {
+                    OfflineNeedsNetworkNotice(
+                        message = LibraryAsk.NETWORK,
+                        onRetry = { submit() },
+                        tag = "library-ask-network",
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryAskField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    onSubmit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(10.dp)
+    val gate = remember { EnterGate() }
+    val current by rememberUpdatedState(value)
+    BasicTextField(
+        value = value,
+        onValueChange = { next ->
+            gate.onEdit(current.composition != null, next.composition != null)
+            onValueChange(next)
+        },
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary),
+        cursorBrush = SolidColor(colors.fgPrimary),
+        modifier = modifier.fillMaxWidth().testTag("library-ask").onPreviewKeyEvent { event ->
+            if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
+            val down = event.type == KeyEventType.KeyDown
+            when {
+                gate.shouldSend(true, down, event.isShiftPressed, current.composition != null) -> {
+                    onSubmit()
+                    true
+                }
+                down && !event.isShiftPressed -> true
+                else -> false
+            }
+        },
+        decorationBox = { inner ->
+            Box(
+                Modifier.fillMaxWidth().clip(shape).background(colors.surface1).padding(horizontal = 12.dp, vertical = 10.dp),
+            ) {
+                if (value.text.isEmpty()) {
+                    Text("问我读过的书，例如谁讲过机会成本", style = MaterialTheme.typography.bodyMedium, color = colors.fgTertiary)
+                }
+                inner()
+            }
+        },
+    )
+}
+
+@Composable
+private fun LibraryAskClaimCard(claim: LibraryAskClaim, index: Int, onOpen: () -> Unit) {
+    val colors = CoachTheme.colors
+    PaperCard(Modifier.pointerHoverIcon(PointerIcon.Hand), color = colors.surface1) {
+        Text(
+            claim.shownText(),
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.fgPrimary,
+            modifier = Modifier.clickable(onClick = onOpen).testTag("library-ask-claim-$index"),
+        )
+        V7TextButton(onClick = onOpen, modifier = Modifier.testTag("library-ask-cite-$index")) {
+            Text(claim.citeLabel())
         }
     }
 }

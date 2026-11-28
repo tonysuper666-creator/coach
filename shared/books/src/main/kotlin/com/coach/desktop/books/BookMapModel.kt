@@ -65,6 +65,7 @@ internal data class BookMapDocument(
     val model: String = "claude-haiku-5-5",
     val staleChapterIds: Set<String> = emptySet(),
     val reconciledFromSkeleton: Boolean = false,
+    val primaryEvidenceReviewed: Boolean = false,
 ) {
     val totalPoints: Int get() = chapters.sumOf { it.points.size }
 
@@ -942,6 +943,8 @@ internal object BookMapWire {
             model = model,
             staleChapterIds = emptySet(),
             reconciledFromSkeleton = false,
+            primaryEvidenceReviewed = response["primaryEvidenceReviewed"]?.jsonPrimitive?.booleanOrNull == true &&
+                (existingToMerge?.primaryEvidenceReviewed != false || spans.all { it.tocNodeId in parsedById }),
         )
         return BookMapBatchParseResult.Ready(doc)
     }
@@ -956,6 +959,7 @@ internal object BookMapWire {
         put("generatedAt", doc.generatedAt)
         put("model", doc.model)
         put("reconciledFromSkeleton", doc.reconciledFromSkeleton)
+        put("primaryEvidenceReviewed", doc.primaryEvidenceReviewed)
         put("staleChapterIds", buildJsonArray { doc.staleChapterIds.forEach { add(JsonPrimitive(it)) } })
         put(
             "chapters",
@@ -1056,6 +1060,7 @@ internal object BookMapWire {
             staleChapterIds = (obj["staleChapterIds"] as? JsonArray).orEmpty()
                 .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                 .toSet(),
+            primaryEvidenceReviewed = obj["primaryEvidenceReviewed"]?.jsonPrimitive?.booleanOrNull == true,
             reconciledFromSkeleton = obj["reconciledFromSkeleton"]?.jsonPrimitive?.booleanOrNull == true,
         )
     }.getOrNull()

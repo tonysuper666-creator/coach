@@ -435,9 +435,9 @@ internal class TextbookLibrary(
     }
 
     fun pdfTextLayer(book: Textbook, page: BookPage): ReaderTextUnit? {
-        if (book.format != "pdf" || page.ocr || page.text.isBlank()) return null
+        if (book.format != "pdf" || page.text.isBlank() || (page.ocr && ocr !is PositionedBookOcr)) return null
         val cacheKey = book.id to page.number
-        synchronized(textLayerLock) { textLayerCache[cacheKey] }?.let { return it }
+        synchronized(textLayerLock) { textLayerCache[cacheKey] }?.takeIf { it.text == page.text }?.let { return it }
         if (book.id == startupReaderBookId) {
             if (firstRenderGates[book.id]?.isDone != true) {
                 awaitFirstRenderOrTimeout(book.id, 400L)
@@ -460,20 +460,32 @@ internal class TextbookLibrary(
                 renderIdleLock.unlock()
             }
         }
-        val saved = page.textLayout ?: pageTextLayout(book.id, page.number)
-        val unit = BookPdfLoader.readCached(original(book.id, book.format).toFile()) { pdf ->
-            if (!pdf.currentAccessPermission.canExtractContent()) return@readCached null
+        val saved = (page.textLayout ?: pageTextLayout(book.id, page.number))
+            ?.takeIf { !page.ocr || it.boxes.isNotEmpty() }
+        val file = original(book.id, book.format).toFile()
+        fun load(pdf: BookPdfDocument): ReaderTextUnit? {
+            if (!pdf.currentAccessPermission.canExtractContent()) return null
             if (saved != null) {
                 val restored = try { PdfPageTextExtraction.restore(pdf, page, saved) }
                 catch (_: IllegalArgumentException) { null }
-                if (restored != null) return@readCached restored
+                if (restored != null) return restored
             }
-            val extracted = PdfPageTextExtraction.extractMatching(pdf, page) ?: return@readCached null
+            val extracted = if (page.ocr) {
+                val scan = PdfPageTextExtraction.recognizeScan(file, pdf, page.number, ocr, BookImportControl())
+                val layout = scan.textLayout?.takeIf { scan.text == page.text } ?: return null
+                val unit = PdfPageTextExtraction.restore(pdf, page, layout) ?: return null
+                unit to layout
+            } else {
+                val measured = PdfPageTextExtraction.extractMatching(pdf, page) ?: return null
+                measured.unit to measured.pageLayout()
+            }
             database().use { db ->
-                BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.pageLayout()))
+                BookPageTextBoxStore.saveInTransaction(db, book.id, mapOf(page.number to page.text), listOf(extracted.second))
             }
-            extracted.unit
+            return extracted.first
         }
+        // Old scan imports lack geometry. Keep their one-time OCR off the renderer's document lock.
+        val unit = if (page.ocr && saved == null) BookPdfLoader.read(file, ::load) else BookPdfLoader.readCached(file, ::load)
         if (unit != null) {
             synchronized(textLayerLock) {
                 textLayerCache[cacheKey] = unit
@@ -2212,7 +2224,7 @@ internal class TextbookLibrary(
                         }
                         val started = System.nanoTime()
                         val recognized = try {
-                            recognizePdfPage(file, pdf, pageNumber, control)
+                            PdfPageTextExtraction.recognizeScan(file, pdf, pageNumber, ocr, control)
                         } catch (c: java.util.concurrent.CancellationException) {
                             throw c
                         } catch (_: Exception) {
@@ -2234,7 +2246,7 @@ internal class TextbookLibrary(
                         }
                         estimator.record(((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L))
                         control.check()
-                        updateRecognizedPage(initial.id, pageNumber, recognized)
+                        updateRecognizedPage(initial.id, pageNumber, recognized.text, recognized.textLayout)
                         completedInSession++
                         val etaAfter = estimator.estimateRemainingSeconds(pending.size - completedInSession)
                         val progress = BookImportProgress(
@@ -2282,7 +2294,7 @@ internal class TextbookLibrary(
         }
     }
 
-    @Synchronized fun updateRecognizedPage(bookId: String, pageNumber: Int, text: String) {
+    @Synchronized fun updateRecognizedPage(bookId: String, pageNumber: Int, text: String, layout: PageTextLayout? = null) {
         database().use { db ->
             db.autoCommit = false
             try {
@@ -2292,6 +2304,7 @@ internal class TextbookLibrary(
                 db.prepareStatement("UPDATE books SET touched=? WHERE id=?").use { sql ->
                     sql.setLong(1, System.currentTimeMillis()); sql.setString(2, bookId); sql.executeUpdate()
                 }
+                BookPageTextBoxStore.replaceRecognizedPage(db, bookId, pageNumber, text, layout)
                 BookFtsStore.upsertPage(db, bookId, pageNumber, text)
                 db.commit()
             } catch (error: Exception) { db.rollback(); throw error }

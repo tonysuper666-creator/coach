@@ -71,6 +71,23 @@ internal object PdfPageTextExtraction {
             .extract(document).takeIf { it.unit.text == page.text }
     }
 
+    /** Capture geometry during the same recognition pass that supplies the imported transcript. */
+    fun recognizeScan(file: java.io.File, pdf: BookPdfDocument, number: Int, ocr: BookOcr, control: BookImportControl): BookPage {
+        val bounds = pdf.getPage(number - 1).cropBox
+        val scale = minOf(bookOcrTargetDpi / 72f, bookOcrMaxSide / maxOf(bounds.width, bounds.height))
+        BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+        val image = OcrTiming.measure("page${number}.render") { renderBookPdfPage(file, pdf, number - 1, scale) }
+        try {
+            if (ocr !is PositionedBookOcr) return BookPage(number, ocr.recognize(image, control), ocr = true)
+            val words = ocr.recognizeWithBoxes(image, control, Math.floorMod(pdf.getPage(number - 1).rotation, 360))
+            val layout = words.boxes.takeIf { it.isNotEmpty() }?.let {
+                PageTextLayout(number, bounds.upperRightX.toDouble() - bounds.lowerLeftX,
+                    bounds.upperRightY.toDouble() - bounds.lowerLeftY, it)
+            }
+            return BookPage(number, words.text, ocr = true, textLayout = layout)
+        } finally { releaseBookBitmap(image) }
+    }
+
     fun extractPlainText(document: BookPdfDocument, page: Int): String {
         require(page in 1..document.numberOfPages)
         require(document.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取。" }

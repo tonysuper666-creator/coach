@@ -272,6 +272,12 @@ $noBannerBodyBack = @((Row '书架' 180 60), (Row '目录' 180 200))
 if ($null -ne (Find-Step2ReaderBack $noBannerBodyBack 800 600)) { throw 'Accepted body 书架 without import banner' }
 $farBelowBannerBack = @((Row '正在读取教材 · 第 620 / 620 页' 60 60), (Row '书架' 310 60), (Row '目录' 310 200))
 if ($null -ne (Find-Step2ReaderBack $farBelowBannerBack 800 600)) { throw 'Accepted body 书架 far below import banner' }
+$curlyQuoteBackLines = @((Row '“书架' 68 22), (Row '目录' 69 108))
+$curlyQuoteHit = Find-Step2ReaderBack $curlyQuoteBackLines 800 600
+if (-not $curlyQuoteHit -or $curlyQuoteHit.X -ne 82 -or $curlyQuoteHit.Y -ne 78) { throw "Expected curly-quote back at (82,78), got ($($curlyQuoteHit.X),$($curlyQuoteHit.Y))" }
+if ($null -ne (Find-Step2ReaderBack @((Row '“书架' 68 22)) 800 600)) { throw 'Accepted curly-quote 书架 without toolbar peer' }
+$proseWithPeer = @((Row '正在读取教材' 60 60), (Row '把书放回书架后继续阅读' 175 60), (Row '目录' 175 200))
+if ($null -ne (Find-Step2ReaderBack $proseWithPeer 800 600)) { throw 'Accepted body prose containing 书架 even with peer on row' }
 
 # Show-ReaderTop shares toolbar detection and skips prose containing 书架 to hover below the banner
 $origHover = ${function:Hover}

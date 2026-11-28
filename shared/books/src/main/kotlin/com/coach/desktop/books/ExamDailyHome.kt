@@ -82,7 +82,8 @@ internal object ExamDailyStateStore {
                    updated_at=excluded.updated_at""",
         ).use { sql ->
             sql.setString(1, courseId)
-            sql.setInt(2, (minutes ?: 90).coerceIn(15, 240))
+            // No saved budget yet: same 30-minute first-run default as the shared daily card.
+            sql.setInt(2, (minutes ?: 30).coerceIn(15, 240))
             sql.setString(3, encodePins(merged))
             sql.setLong(4, now)
             sql.executeUpdate()
@@ -155,7 +156,8 @@ internal object ExamDailyHome {
                 val (_, pins) = ExamDailyStateStore.read(db, course.id)
                 CourseDayInput(course.id, course.title, course.exam, loadPoints(db, course.id), pins)
             }
-            val budget = ExamDailyStateStore.read(db, ExamDailyStateStore.SHARED_BUDGET_ID).first ?: 90
+            // 第一次用 30 分钟；之后沿用上次选的时长。选完立刻按它排。
+            val budget = ExamDailyStateStore.read(db, ExamDailyStateStore.SHARED_BUDGET_ID).first ?: 30
             ExamDayBoard(budget, MultiCourseDailyPlanner.preview(today, inputs, budget, days = 5))
         }
 

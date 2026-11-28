@@ -150,7 +150,7 @@ class SingleColumnHomeAndImportTest {
         }
     }
 
-    @Test fun multiFileDropShowsSingleLineInquiryBarAndCreatesCourse() {
+    @Test fun multiFileDropImportsEachBookThenOffersCourseOrBooklistOnToast() {
         val root = Files.createTempDirectory("coach-multi-drop-")
         try {
             val f1 = root.resolve("week1-slides.md").also { Files.writeString(it, "# Week 1\n\nIntroduction to demand elasticity.") }
@@ -162,16 +162,21 @@ class SingleColumnHomeAndImportTest {
                 setContent { WindowsTextbookHost(c) { null } }
                 ready(c) { it.initialized }
 
+                // 多文件拖入先各自导入，不在导入前拦着问用途。
                 c.launchDroppedBooks(listOf(f1, f2))
-                waitForIdle()
-                onNodeWithTag("multi-drop-bar").assertIsDisplayed()
-                onNodeWithTag("multi-drop-course").assertIsDisplayed().assertTextContains("建课程")
-                onNodeWithTag("multi-drop-booklist").assertIsDisplayed().assertTextContains("建书单")
-                onNodeWithTag("multi-drop-separate").assertIsDisplayed().assertTextContains("分开单放")
+                ready(c) { it.catalog.size == 2 && it.importNotice != null }
+                onAllNodesWithTag("multi-drop-bar").assertCountEquals(0)
 
-                onNodeWithTag("multi-drop-course").performClick()
+                // 导入完成后提示条给按需按钮。
+                onNodeWithTag("book-import-toast").assertIsDisplayed()
+                onNodeWithTag("import-toast-course").assertIsDisplayed().assertTextContains("合并成课程")
+                onNodeWithTag("import-toast-booklist").assertIsDisplayed().assertTextContains("建成书单")
+
+                onNodeWithTag("import-toast-course").performClick()
+                onNodeWithTag("create-collection-dialog").assertIsDisplayed()
+                onNodeWithTag("collection-title-input").performTextInput("两讲合成课")
+                onNodeWithTag("collection-confirm").performClick()
                 ready(c) { it.collections.any { col -> col.record.kind == CollectionKind.COURSE } && it.catalog.size == 2 }
-                onNodeWithTag("multi-drop-bar").assertDoesNotExist()
                 onNodeWithTag("home-section-courses").assertIsDisplayed()
             }
         } finally {

@@ -3,8 +3,9 @@ package com.coach.desktop
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,12 @@ internal fun updateWouldInterrupt(screen: BookScreen): Boolean = when (screen) {
 internal fun shouldShowUpdateLine(idle: Boolean, ready: Boolean, failed: Boolean, deferred: Boolean): Boolean =
     idle && !deferred && (ready || failed)
 
+private const val UPDATE_SKIP_FILE = "update-skip-version"
+
+/** 用户点过「这一版不再提示」的版本号；只跳一个版本，下一版还会说。 */
+internal fun readSkippedUpdateVersion(libraryDir: Path): String =
+    runCatching { Files.readString(libraryDir.resolve(UPDATE_SKIP_FILE)).trim() }.getOrDefault("")
+
 internal class UpdateSession(
     private val libraryDir: Path,
     private val updatesDir: Path,
@@ -61,6 +68,10 @@ internal class UpdateSession(
         private set
     var deferred by mutableStateOf(false)
         private set
+    var dismissed by mutableStateOf(false)
+        private set
+    var skippedVersion by mutableStateOf(readSkippedUpdateVersion(libraryDir))
+        private set
     var busy by mutableStateOf(false)
         private set
     var rollbackStatus by mutableStateOf("")
@@ -72,6 +83,8 @@ internal class UpdateSession(
         ready = release
         staged = msi
         message = ""
+        // A fresh offer is a new fact: show it again unless this exact version was skipped.
+        dismissed = false
     }
 
     fun fail(text: String) {
@@ -88,6 +101,22 @@ internal class UpdateSession(
 
     fun defer() {
         deferred = true
+    }
+
+    /** 关掉这一条，这一轮不再出现；安装或检查仍在后台继续。 */
+    fun dismiss() {
+        dismissed = true
+    }
+
+    /** 关的时候选了「这一版不再提示」：记住版本号，下一版照常提醒。 */
+    fun skipVersion() {
+        val version = ready?.version ?: return
+        dismissed = true
+        skippedVersion = version
+        runCatching {
+            Files.createDirectories(libraryDir)
+            Files.writeString(libraryDir.resolve(UPDATE_SKIP_FILE), version)
+        }
     }
 
     fun install() {
@@ -202,41 +231,53 @@ internal fun rememberWindowsUpdateSession(
     return session
 }
 
+/**
+ * 顶栏下面的一行提示，占自己的位置，不压在顶栏上，也不盖住阅读区。
+ * 任何状态都能关：有新版可以「这一版不再提示」，失败、回滚失败也有「关闭」。
+ */
 @Composable
-internal fun BoxScope.UpdateBanner(session: UpdateSession, idle: Boolean) {
+internal fun UpdateBanner(session: UpdateSession, idle: Boolean, modifier: Modifier = Modifier) {
     val release = session.ready
     val failed = session.message.isNotEmpty() && release == null
+    val rollbackFailed = release == null && session.message.isEmpty() && session.rollbackStatus.isNotEmpty()
     val installing = session.busy && session.message.isNotEmpty()
-    if (!shouldShowUpdateLine(idle, release != null || installing, failed, session.deferred)) return
+    val skipped = release != null && release.version == session.skippedVersion
+    if (session.dismissed || skipped) return
+    if (!shouldShowUpdateLine(idle, release != null || installing, failed || rollbackFailed, session.deferred)) return
     val colors = com.coach.ui.theme.CoachTheme.colors
     val line = when {
         session.message.isNotEmpty() -> session.message
         release != null -> "新版本 ${release.version} 已经下好了。"
+        rollbackFailed -> session.rollbackStatus
         else -> return
     }
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
-    Row(
-        Modifier.align(Alignment.TopCenter)
-            .padding(top = 12.dp, start = 16.dp, end = 16.dp)
-            .clip(shape)
-            .background(colors.surface1)
-            .border(1.dp, colors.borderSubtle, shape)
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-            .testTag("update-banner"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            line,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.fgPrimary,
-            modifier = Modifier.testTag("update-banner-text"),
-        )
-        if (release != null && !session.busy) {
-            V7TextButton(session::install, Modifier.testTag("update-now"), ringInside = true) { Text("现在更新") }
-            V7TextButton(session::defer, Modifier.testTag("update-later"), ringInside = true) { Text("下次打开再更") }
+    Box(modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp), contentAlignment = Alignment.CenterEnd) {
+        Row(
+            Modifier.clip(shape)
+                .background(colors.surface1)
+                .border(1.dp, colors.borderSubtle, shape)
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .testTag("update-banner"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                line,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fgPrimary,
+                modifier = Modifier.weight(1f, fill = false).testTag("update-banner-text"),
+            )
+            if (release != null && !session.busy) {
+                V7TextButton(session::install, Modifier.testTag("update-now"), ringInside = true) { Text("现在更新") }
+                V7TextButton(session::defer, Modifier.testTag("update-later"), ringInside = true) { Text("下次打开再更") }
+                V7TextButton(session::skipVersion, Modifier.testTag("update-banner-skip"), ringInside = true) {
+                    Text("这一版不再提示")
+                }
+            }
+            V7TextButton(session::dismiss, Modifier.testTag("update-banner-close"), ringInside = true) { Text("关闭") }
         }
     }
 }

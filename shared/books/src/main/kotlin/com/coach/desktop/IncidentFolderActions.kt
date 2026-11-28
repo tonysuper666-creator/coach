@@ -13,7 +13,7 @@ internal val LocalIncidentFolderActions = staticCompositionLocalOf<IncidentFolde
 
 /** Desktop gate installs this so the exit prompt renders on Home and stays off the reader and subpages. */
 internal class IncidentPromptHost(
-    val onHostMounted: (Boolean) -> Unit,
+    val onHostMounted: (Boolean) -> Unit = {},
     val prompt: @Composable () -> Unit,
 )
 

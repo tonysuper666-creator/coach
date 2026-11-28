@@ -65,7 +65,13 @@ internal fun IncidentPromptLayer(
     Box(Modifier.fillMaxSize()) {
         CompositionLocalProvider(LocalIncidentPromptHost provides host) { content() }
         if (!hostManagesPrompt) {
-            IncidentExitPrompt(identity, Modifier.align(Alignment.TopCenter).padding(top = 8.dp), darkTheme, state)
+            // 没有顶栏的窗口：徽标缩在右上角，不再占一整行。
+            IncidentExitPrompt(
+                identity = identity,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                darkTheme = darkTheme,
+                state = state,
+            )
         }
     }
 }

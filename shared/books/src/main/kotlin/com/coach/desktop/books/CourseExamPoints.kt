@@ -38,6 +38,7 @@ internal object CourseExamPoints {
     private val nativeSectionNumber = Regex("""\d{1,2}\.\d{1,2}""")
     private val tableCaption = Regex("""(?i)^(?:table\s+|表\s*)\d+""")
     private val rankedCell = Regex("""^(\d{1,3})\s+\p{L}""")
+    private val exampleStep = Regex("""(?i)^(strategy|solution|discussion)(?:\s+for\s+\([a-z0-9]+\))?[:：]?$""")
     private val numericCohortLabelNoise = Regex("""(?i)^(?:ages?|years?|months?|days?|grades?|groups?|cohorts?|panels?|periods?|waves?|quartiles?|quintiles?|deciles?)\s+\d""")
     private val parentheticalUnitCohortNoise = Regex("""(?i)\(\s*\d+(?:\s*[-–—]\s*\d+)?\s*(?:yrs?|years?|mos?|months?|wks?|weeks?|days?|hrs?|hours?|mins?|%|kg|mg|cm|mm)\s*\)""")
     private val conditionalLeadNoise = Regex("""(?i)^(?:if|unless|whether|whereas|although|though|because|however|therefore|moreover|furthermore|nevertheless|meanwhile|otherwise|but)\s+""")
@@ -535,6 +536,14 @@ internal object CourseExamPoints {
         }
     }
 
+    private fun isWorkedExampleStep(title: String, pageText: String): Boolean {
+        val step = exampleStep.matchEntire(title)?.groupValues?.get(1) ?: return false
+        return pageText.lineSequence().any { line ->
+            val other = exampleStep.matchEntire(line.trim())?.groupValues?.get(1)
+            other != null && !other.equals(step, ignoreCase = true)
+        }
+    }
+
     fun isValidExamPointTitle(
         rawLine: String,
         heading: String,
@@ -842,6 +851,7 @@ internal object CourseExamPoints {
         }
 
         val titles = linkedMapOf<String, String>()
+        val pageTexts = headingPages.associateBy { it.bookId to it.page }
         val textbookStrong = mutableSetOf<String>()
         val officialTocSectionKeys = HashSet<String>()
         // 1. Seed official textbook TOC SECTION/SUBSECTION titles on cleaned body pages FIRST.
@@ -850,6 +860,7 @@ internal object CourseExamPoints {
             val available = cleanedTextbookPagesByBook[bookId].orEmpty()
             for (span in spans) {
                 if (span.pages.none { it in available }) continue
+                if (isWorkedExampleStep(span.title, pageTexts[bookId to span.pages.first]?.text.orEmpty())) continue
                 if (!isValidExamPointTitle(span.title, span.title, defined = false, numbered = true, markdown = false, officialTocSection = true)) {
                     continue
                 }
@@ -935,6 +946,7 @@ internal object CourseExamPoints {
                 if (isSlideLike && !bodyBacked && (isRepeatingSlideEdge(line) || isRepeatingSlideEdge(heading))) continue
                 if (!isSlideLike && !defined && !numbered && !markdown && isRepeatingTextbookEdge(heading)) continue
                 if (!isValidExamPointTitle(line, heading, defined, numbered, markdown, officialTocSection = key in officialTocSectionKeys)) continue
+                if (isWorkedExampleStep(heading, page.text)) continue
                 titles.putIfAbsent(key, heading)
                 if (page.role == CourseMaterialRole.CORE_TEXTBOOK && (defined || numbered || markdown)) textbookStrong += key
             }

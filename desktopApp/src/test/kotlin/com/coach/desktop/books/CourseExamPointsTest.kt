@@ -715,13 +715,18 @@ class CourseExamPointsTest {
                 4 Cellular transport
                 2.3 Memory consolidation
                 Learning stabilizes through a sequence of changes after initial acquisition.
+                Strategy
+                Apply the rule to an unfamiliar example.
+                Solution for (a)
+                The later measurement corresponds to a stronger memory trace.
             """.trimIndent()),
             ExamTeachingPage("book", 12, CourseMaterialRole.CORE_TEXTBOOK, """
                 4 Cellular transport
                 Cells move molecules across membranes by several distinct mechanisms.
             """.trimIndent()),
         )
-        val titles = CourseExamPoints.identifyFromPages("ranked-cells", pages).map { it.title }.toSet()
+        val spans = listOf("Strategy", "Solution for (a)").map { ExamSectionSpan(it, it.lowercase(), 11..11) }
+        val titles = CourseExamPoints.identifyFromPages("ranked-cells", pages, sectionSpansByBook = mapOf("book" to spans)).map { it.title }.toSet()
         assertEquals(setOf("Cognitive mapping (CM)", "Memory consolidation", "Cellular transport"), titles)
     }
 

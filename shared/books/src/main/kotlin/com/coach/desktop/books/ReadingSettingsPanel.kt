@@ -73,11 +73,15 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
         val papers = remember { PaperColor.entries.map { FocusRequester() } }
         val guides = remember { AutoGuideOption.entries.map { FocusRequester() } }
         val summaries = remember { AutoGuideOption.entries.map { FocusRequester() } }
+        val whispers = remember { AutoGuideOption.entries.map { FocusRequester() } }
+        val checkpoints = remember { AutoGuideOption.entries.map { FocusRequester() } }
         fun focusSize() = sizes[settings.size.ordinal].requestFocus()
         fun focusFont() = fonts[settings.font.ordinal].requestFocus()
         fun focusPaper() = papers[settings.paper.ordinal].requestFocus()
         fun focusGuide() = guides[if (settings.autoGuide) 0 else 1].requestFocus()
         fun focusSummary() = summaries[if (settings.sectionSummary) 0 else 1].requestFocus()
+        fun focusWhisper() = whispers[if (settings.proactiveWhispers) 0 else 1].requestFocus()
+        fun focusCheckpoint() = checkpoints[if (settings.endOfSectionCheckpoint) 0 else 1].requestFocus()
         Column(Modifier.width(360.dp).clip(shape)
             .background(if (colors.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg)
             .border(1.dp, if (colors.dark) CoachV7.Dark.menuSep else CoachV7.Light.menuSep, shape)
@@ -91,10 +95,10 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
                 HorizontalDivider(color = if (colors.dark) CoachV7.Dark.menuSep else CoachV7.Light.menuSep)
             }
             SettingRow("字号", "size", ReadingSize.entries, settings.size, { it.label }, sizes, !original,
-                previousRow = { focusSummary() }, nextRow = { focusPaper() }, choose = settings::chooseSize)
+                previousRow = { focusCheckpoint() }, nextRow = { focusPaper() }, choose = settings::chooseSize)
             if (original) Text("原版按原书大小显示", style = MaterialTheme.typography.labelSmall, color = colors.fgTertiary)
             SettingRow("纸色", "paper", PaperColor.entries, settings.paper, { it.label }, papers, true,
-                previousRow = { if (!original) focusSize() else focusSummary() }, nextRow = { focusGuide() },
+                previousRow = { if (!original) focusSize() else focusCheckpoint() }, nextRow = { focusGuide() },
                 choose = settings::choosePaper)
             SettingRow("自动备好导读", "autoGuide", AutoGuideOption.entries,
                 if (settings.autoGuide) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, guides, true,
@@ -102,8 +106,16 @@ internal fun ReadingSettingsPanel(settings: ReadingSettings, isOriginal: () -> B
                 choose = { settings.chooseAutoGuide(it.enabled) })
             SettingRow("节末小结", "sectionSummary", AutoGuideOption.entries,
                 if (settings.sectionSummary) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, summaries, true,
-                previousRow = { focusGuide() }, nextRow = { if (!original) focusSize() else focusPaper() },
+                previousRow = { focusGuide() }, nextRow = { focusWhisper() },
                 choose = { settings.chooseSectionSummary(it.enabled) })
+            SettingRow("主动耳语", "proactiveWhispers", AutoGuideOption.entries,
+                if (settings.proactiveWhispers) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, whispers, true,
+                previousRow = { focusSummary() }, nextRow = { focusCheckpoint() },
+                choose = { settings.chooseProactiveWhispers(it.enabled) })
+            SettingRow("节末自测", "endOfSectionCheckpoint", AutoGuideOption.entries,
+                if (settings.endOfSectionCheckpoint) AutoGuideOption.ON else AutoGuideOption.OFF, { it.label }, checkpoints, true,
+                previousRow = { focusWhisper() }, nextRow = { if (!original) focusSize() else focusPaper() },
+                choose = { settings.chooseEndOfSectionCheckpoint(it.enabled) })
         }
         LaunchedEffect(Unit) { if (original) focusPaper() else focusSize() }
     }

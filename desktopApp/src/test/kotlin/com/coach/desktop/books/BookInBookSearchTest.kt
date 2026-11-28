@@ -190,6 +190,8 @@ class BookInBookSearchTest {
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()

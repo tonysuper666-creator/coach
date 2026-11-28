@@ -304,7 +304,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         }
                     }
                     val damagedPages = ui.book?.damagedPages.orEmpty()
-                    if (ui.screen == BookScreen.READER && damagedPages.isNotEmpty()) {
+                    if (ui.screen != BookScreen.READER && damagedPages.isNotEmpty()) {
                         Text(
                             BookImportMessages.damagedPages(damagedPages),
                             Modifier.padding(horizontal = 16.dp, vertical = 4.dp).testTag("damaged-pages"),
@@ -312,24 +312,28 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             color = v7Alert(),
                         )
                     }
-                    ui.error?.let { error ->
-                        ShellErrorRow(
-                            message = error,
-                            busy = ui.busy || ui.importing != null,
-                            onRetry = {
-                                scope.launch {
-                                    if (drafts.flush() && controller.state.value.error != null) {
-                                        (activeRetry.lastAction ?: { controller.load() })()
+                    var dismissedError by remember(ui.error) { mutableStateOf(false) }
+                    if (ui.screen != BookScreen.READER && !dismissedError) {
+                        ui.error?.let { error ->
+                            ShellErrorRow(
+                                message = error,
+                                busy = ui.busy || ui.importing != null,
+                                onRetry = {
+                                    scope.launch {
+                                        if (drafts.flush() && controller.state.value.error != null) {
+                                            (activeRetry.lastAction ?: { controller.load() })()
+                                        }
                                     }
-                                }
-                            },
-                            textTag = "book-error",
-                            retryTag = "book-error-retry",
-                            surfaceCard = true,
-                            modifier = Modifier
-                                .padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s2)
-                                .testTag("book-error-banner"),
-                        )
+                                },
+                                onDismiss = { dismissedError = true },
+                                textTag = "book-error",
+                                retryTag = "book-error-retry",
+                                surfaceCard = true,
+                                modifier = Modifier
+                                    .padding(horizontal = CoachV7.Space.s6, vertical = CoachV7.Space.s2)
+                                    .testTag("book-error-banner"),
+                            )
+                        }
                     }
                     if (ui.passwordPromptPath != null) {
                         var pdfPassword by remember(ui.passwordPromptPath, ui.error) { mutableStateOf("") }
@@ -733,7 +737,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                         }
                                     }
                                 }, onBack = { returnFromReader() },
-                                onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
+                                onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } },
+                                workspaceError = ui.error,
+                                onRetryWorkspaceError = {
+                                    scope.launch {
+                                        if (drafts.flush() && controller.state.value.error != null) {
+                                            (activeRetry.lastAction ?: { controller.load() })()
+                                        }
+                                    }
+                                })
                         }
                         else -> {
                             val activeBook = checkNotNull(book)
@@ -958,6 +970,8 @@ internal fun ShellErrorRow(
     retryTag: String,
     modifier: Modifier = Modifier,
     surfaceCard: Boolean = false,
+    onDismiss: (() -> Unit)? = null,
+    dismissTag: String = "book-error-dismiss",
 ) {
     val colors = com.coach.ui.theme.CoachTheme.colors
     val kind = classifyShellError(message)
@@ -983,6 +997,18 @@ internal fun ShellErrorRow(
                 color = textColor,
                 modifier = Modifier.weight(1f).testTag(textTag),
             )
+            if (onDismiss != null) {
+                Text(
+                    "×",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.fgTertiary,
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onDismiss)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag(dismissTag),
+                )
+            }
         }
     }
     if (surfaceCard) {

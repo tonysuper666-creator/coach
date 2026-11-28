@@ -4,11 +4,14 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.lang.ref.WeakReference
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.SQLException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 internal val LocalReadingAutoGuide = compositionLocalOf { true }
 internal val LocalReadingSectionSummary = compositionLocalOf { true }
@@ -34,6 +37,7 @@ internal enum class AutoGuideOption(val label: String, val enabled: Boolean) {
 
 /** Global to the local library, including when a development launch uses an isolated library. */
 internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int = DEFAULT_BUSY_TIMEOUT_MS) {
+    private val dirKey = directory.toAbsolutePath().normalize().toString()
     private val url = "jdbc:sqlite:${directory.resolve("library.sqlite")}"
     var size by mutableStateOf(ReadingSize.MEDIUM)
         private set
@@ -46,6 +50,10 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
     var sectionSummary by mutableStateOf(true)
         private set
     var aiExplain by mutableStateOf(true)
+        private set
+    var proactiveWhispers by mutableStateOf(true)
+        private set
+    var endOfSectionCheckpoint by mutableStateOf(true)
         private set
 
     init {
@@ -68,11 +76,14 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
                             "autoGuide" -> autoGuide = value != "false"
                             "sectionSummary" -> sectionSummary = value != "false"
                             "aiExplain" -> aiExplain = value != "false"
+                            "proactiveWhispers" -> proactiveWhispers = value != "false"
+                            "endOfSectionCheckpoint" -> endOfSectionCheckpoint = value != "false"
                         }
                     }
                 }
             }
         }
+        registerInstance(dirKey, this)
     }
 
     private fun database(): Connection = DriverManager.getConnection(url).apply {
@@ -126,6 +137,16 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
         aiExplain = enabled
     }
 
+    fun chooseProactiveWhispers(enabled: Boolean) {
+        save("proactiveWhispers", enabled.toString())
+        syncForDirectory(dirKey) { it.proactiveWhispers = enabled }
+    }
+
+    fun chooseEndOfSectionCheckpoint(enabled: Boolean) {
+        save("endOfSectionCheckpoint", enabled.toString())
+        syncForDirectory(dirKey) { it.endOfSectionCheckpoint = enabled }
+    }
+
     @Synchronized
     private fun save(name: String, value: String) {
         withBusyRetry { db ->
@@ -141,5 +162,24 @@ internal class ReadingSettings(directory: Path, private val busyTimeoutMs: Int =
         internal const val DEFAULT_BUSY_TIMEOUT_MS = 5_000
         private const val BUSY_RETRY_ATTEMPTS = 2
         private const val SQLITE_BUSY = 5
+        private val liveInstances = ConcurrentHashMap<String, CopyOnWriteArrayList<WeakReference<ReadingSettings>>>()
+
+        private fun registerInstance(dirKey: String, instance: ReadingSettings) {
+            val list = liveInstances.computeIfAbsent(dirKey) { CopyOnWriteArrayList() }
+            list.removeIf { it.get() == null }
+            list.add(WeakReference(instance))
+        }
+
+        private fun syncForDirectory(dirKey: String, update: (ReadingSettings) -> Unit) {
+            val list = liveInstances[dirKey] ?: return
+            list.removeIf { ref ->
+                val target = ref.get()
+                if (target == null) true
+                else {
+                    update(target)
+                    false
+                }
+            }
+        }
     }
 }

@@ -107,6 +107,8 @@ class ReadingSettingsTest {
             }
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()
@@ -195,6 +197,8 @@ class ReadingSettingsTest {
             val dbUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()

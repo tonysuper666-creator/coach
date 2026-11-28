@@ -32,7 +32,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.CoachCardMeta
@@ -58,6 +60,7 @@ internal fun StudyModeSelectorButton(
     tag: String = "study-mode-trigger",
     modifier: Modifier = Modifier,
     noun: String = "学法",
+    maxMenuHeight: Dp = 320.dp,
 ) {
     val colors = CoachTheme.colors
     var expanded by remember { mutableStateOf(false) }
@@ -101,29 +104,32 @@ internal fun StudyModeSelectorButton(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             containerColor = colors.surface1,
-            modifier = Modifier.widthIn(min = 310.dp, max = 360.dp).testTag("study-mode-popover"),
+            modifier = Modifier
+                .widthIn(min = 248.dp, max = 280.dp)
+                .heightIn(max = maxMenuHeight)
+                .testTag("study-mode-popover"),
         ) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                Text(
-                    "这本书怎么学",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = colors.fgPrimary,
-                )
                 val safeDefaultReason = if (!preference.examMode && preference.defaultReason.contains("考")) {
                     "按章节顺序读，随时可以切换学法。"
                 } else {
                     preference.defaultReason
                 }
                 if (safeDefaultReason.isNotBlank()) {
-                    CoachCardMeta(
+                    Text(
                         safeDefaultReason,
-                        Modifier.testTag("study-mode-default-reason"),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        color = colors.fgTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("study-mode-default-reason"),
                     )
                 }
-                HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
 
                 for (mode in BookStudyMode.availableModes(preference.examMode)) {
                     val selected = effectiveMode == mode
@@ -157,27 +163,28 @@ internal fun StudyModeSelectorButton(
                                 )
                             }
                             .pointerHoverIcon(PointerIcon.Hand)
-                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                             .testTag(mode.tag),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                mode.displayTitle(preference.examMode) + if (selected) " · 当前" else "",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = if (selected) colors.actionPrimary else colors.fgPrimary,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                                maxLines = 1,
-                            )
-                            Text(
-                                mode.displaySummary(preference.examMode),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.fgSecondary,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                        Text(
+                            mode.displayTitle(preference.examMode) + if (selected) " · 当前" else "",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) colors.actionPrimary else colors.fgPrimary,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                        Text(
+                            mode.displaySummary(preference.examMode),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 11.sp,
+                            color = colors.fgTertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
 
@@ -233,7 +240,6 @@ internal fun StudyModeSelectorButton(
                         onUpdatePreference(nextPref, false)
                     },
                 )
-                CoachCardMeta("切换学法时，当前页码、高亮与批注全部保留。")
             }
         }
     }
@@ -281,7 +287,7 @@ private fun <T> AdjustmentPillRow(
                         .border(1.dp, if (active) colors.actionPrimary.copy(alpha = 0.4f) else colors.borderSubtle, pillShape)
                         .clickable(role = Role.Button) { onSelect(opt) }
                         .pointerHoverIcon(PointerIcon.Hand)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
                         .testTag(optionTag(opt)),
                 )
             }

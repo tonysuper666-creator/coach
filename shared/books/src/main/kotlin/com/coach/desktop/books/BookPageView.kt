@@ -40,6 +40,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontFamily
@@ -298,6 +301,7 @@ internal fun BookPageView(
     /** EPUB 书内链接（尾注编号、返回箭头等）；点中链接文字时用 [onFollowLink] 跳到目标位置。 */
     links: EpubLinks = EpubLinks.NONE,
     onFollowLink: ((BookPageAnchor) -> Unit)? = null,
+    onSelectTextBounds: ((Rect?) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { figure ->
@@ -327,6 +331,38 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
+    val latestOnSelectTextBounds by rememberUpdatedState(onSelectTextBounds)
+    val selectionHalfLinePx = with(density) { (body.lineHeight.toPx() * 0.6f).coerceAtLeast(12.dp.toPx()) }
+    fun reportSelection(
+        block: SourceBlock?,
+        gesture: ReadingPointerGesture,
+        coords: LayoutCoordinates?,
+    ) {
+        latestOnSelectText?.invoke(block)
+        val boundsCb = latestOnSelectTextBounds ?: return
+        if (block == null) {
+            boundsCb(null)
+            return
+        }
+        val activeCoords = coords?.takeIf { it.isAttached } ?: run {
+            boundsCb(null)
+            return
+        }
+        val minX = minOf(gesture.down.x, gesture.up.x)
+        val maxX = maxOf(gesture.down.x, gesture.up.x).coerceAtLeast(minX + 8f)
+        val minY = (minOf(gesture.down.y, gesture.up.y) - selectionHalfLinePx).coerceAtLeast(0f)
+        val maxY = maxOf(gesture.down.y, gesture.up.y) + selectionHalfLinePx
+        val topLeft = activeCoords.localToRoot(Offset(minX, minY))
+        val bottomRight = activeCoords.localToRoot(Offset(maxX, maxY))
+        boundsCb(
+            Rect(
+                left = minOf(topLeft.x, bottomRight.x),
+                top = minOf(topLeft.y, bottomRight.y),
+                right = maxOf(topLeft.x, bottomRight.x),
+                bottom = maxOf(topLeft.y, bottomRight.y),
+            ),
+        )
+    }
     val windowsPaged = immersive && readMode.isWindowsPaged()
     // Reflowed PDF already has chapter and page navigation in the reader HUD.
     val topMargin = when {
@@ -359,7 +395,7 @@ internal fun BookPageView(
             }
             .testTag("book-page-layout"),
         linePitchPx, topMargin,
-    ) { maxWidth, maxHeight, viewportWidth ->
+    ) { maxWidth, maxHeight, viewportWidth, zoom ->
         val column = with(density) { (body.fontSize * (if (immersive) 38 else 33)).toDp() }
         val scrolling = readMode == BookReadMode.Scroll
         val visibleColumns = when {
@@ -388,14 +424,21 @@ internal fun BookPageView(
         // 沉浸式行宽封顶 720dp，多出来的宽度全给页边，外侧不窄于书脊侧。
         val (outerExtra, spineExtra) = if (!immersive) Pair(0f, 0f) else {
             val minMargins = (minLeftInset + minRightInset).value
-            // maxWidth 是基线网格里的宽度，viewportWidth 是屏幕上的宽度，两者之比就是网格放大倍数的倒数。
-            val gridPerScreen = if (viewportWidth.value > 0f) maxWidth.value / viewportWidth.value else 1f
-            val text = bookImmersiveTextDp(sheetWidth.value, minMargins, BOOK_IMMERSIVE_MAX_TEXT_DP * gridPerScreen)
+            // zoom 是基线网格放大倍数；屏上行宽 = 网格行宽 * zoom，网格内行宽上限为 720dp / zoom。
+            val text = bookImmersiveTextDp(sheetWidth.value, minMargins, BOOK_IMMERSIVE_MAX_TEXT_DP / zoom)
             bookImmersiveExtraMargins(sheetWidth.value - minMargins - text, spread)
         }
         val leftInset = minLeftInset + outerExtra.dp
         val rightInset = minRightInset + spineExtra.dp
-        val widthPx = with(density) { (sheetWidth - leftInset - rightInset).roundToPx().coerceAtLeast(1) }
+        val widthPx = with(density) {
+            val rawPx = (sheetWidth - leftInset - rightInset).toPx()
+            if (immersive) {
+                val maxGridPx = kotlin.math.floor((BOOK_IMMERSIVE_MAX_TEXT_DP / zoom).dp.toPx().toDouble()).toInt().coerceAtLeast(1)
+                kotlin.math.floor(rawPx.toDouble()).toInt().coerceIn(1, maxGridPx)
+            } else {
+                rawPx.roundToInt().coerceAtLeast(1)
+            }
+        }
         val bodyHeight = with(density) { (maxHeight - if (immersive) topMargin else 116.dp).roundToPx().coerceAtLeast(1) }
         val failed = remember(book.id, libraryDirectory) { mutableStateListOf<BookIllustration>() }
         val layoutPages = remember(book.pages, libraryDirectory, failed.toList()) {
@@ -580,19 +623,25 @@ internal fun BookPageView(
                         scrollbar = { BookReadScrollbar(it) }) { index ->
                         val page = pages[index]
                         val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
+                        var sheetCoords by remember(page) { mutableStateOf<LayoutCoordinates?>(null) }
                         val downPos = remember(scrollState) { arrayOf<ScrollReadPosition?>(null) }
                         val scrollSpot = rememberUpdatedState { g: ReadingPointerGesture ->
-                            val cb = latestOnSelectText ?: return@rememberUpdatedState
+                            if (latestOnSelectText == null) return@rememberUpdatedState
                             val moved = downPos[0] != null && downPos[0] != scrollState.position
                             when {
                                 !moved && (g.longPressed || (!g.isTouch && g.dragged)) ->
-                                    cb(page.selectionForGesture(book, g, scrollInsetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered))
-                                !g.dragged && !g.longPressed -> cb(null)
+                                    reportSelection(
+                                        page.selectionForGesture(book, g, scrollInsetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered),
+                                        g,
+                                        sheetCoords,
+                                    )
+                                !g.dragged && !g.longPressed -> reportSelection(null, g, sheetCoords)
                             }
                         }
                         val recordDown = rememberUpdatedState { downPos[0] = scrollState.position }
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds()
+                                .onGloballyPositioned { sheetCoords = it }
                                 .readingSpot(scrollSpot, onDown = recordDown).testTag("book-sheet-0")) {
                                 val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
                                     pages.take(index + 1).count { it.chapter == page.chapter }
@@ -631,22 +680,27 @@ internal fun BookPageView(
             val isLast = spread && side == visibleColumns - 1
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
+            var sheetCoords by remember(page) { mutableStateOf<LayoutCoordinates?>(null) }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
-                val cb = latestOnSelectText ?: return@rememberUpdatedState
+                if (latestOnSelectText == null) return@rememberUpdatedState
                 when {
-                    windowsPaged && !g.isTouch && g.dragged -> cb(book.highlightedPassage(selection.selectedTexts))
+                    windowsPaged && !g.isTouch && g.dragged -> reportSelection(book.highlightedPassage(selection.selectedTexts), g, sheetCoords)
                     g.longPressed || (!g.isTouch && g.dragged) -> {
                         val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
-                        cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
-                            if (page.opener) openerTopMarginPx else topMarginPx, rendered))
+                        reportSelection(
+                            page?.selectionForGesture(book, local, with(density) { inset.toPx() },
+                                if (page.opener) openerTopMarginPx else topMarginPx, rendered),
+                            g,
+                            sheetCoords,
+                        )
                     }
-                    !g.dragged -> cb(null)
+                    !g.dragged -> reportSelection(null, g, sheetCoords)
                 }
             }
-            Box(sheetModifier.background(paper).clipToBounds().readingSpot(sheetSpot, ignoreDown)
+            Box(sheetModifier.background(paper).clipToBounds().onGloballyPositioned { sheetCoords = it }.readingSpot(sheetSpot, ignoreDown)
                 .testTag("book-sheet-$side")) {
                 if (page != null) {
                     val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
@@ -754,14 +808,14 @@ private fun BookPageViewport(
     modifier: Modifier,
     linePitchPx: Int?,
     topMargin: Dp,
-    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp) -> Unit,
+    content: @Composable BoxScope.(width: Dp, height: Dp, viewportWidth: Dp, zoom: Float) -> Unit,
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
         val reservedPx = with(density) { topMargin.roundToPx() + 2.dp.roundToPx() }
         val rows = if (linePitchPx != null) (constraints.maxHeight - reservedPx) / linePitchPx else 0
         if (linePitchPx == null || rows < 8 || !constraints.hasBoundedHeight || !constraints.hasBoundedWidth) {
-            content(maxWidth, maxHeight, maxWidth)
+            content(maxWidth, maxHeight, maxWidth, 1f)
             return@BoxWithConstraints
         }
         val gridHeight = rows * linePitchPx + reservedPx
@@ -778,7 +832,7 @@ private fun BookPageViewport(
                 }
             }
         }) {
-            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth) }
+            with(density) { content(gridWidth.toDp(), gridHeight.toDp(), viewportWidth, zoom) }
         }
     }
 }

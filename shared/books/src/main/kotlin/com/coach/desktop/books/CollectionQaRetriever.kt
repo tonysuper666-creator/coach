@@ -2030,6 +2030,7 @@ internal object CollectionQaEngine {
                         hasMaterialConflict = false,
                         conflictSummaryZh = "",
                         fallbackMessage = msg,
+                        collectionId = bundle.collection.id,
                     ),
                 )
             }
@@ -2041,6 +2042,7 @@ internal object CollectionQaEngine {
                         hasMaterialConflict = false,
                         conflictSummaryZh = "",
                         fallbackMessage = "当前材料中暂时没有检索到相关段落，请换个关键词再试。",
+                        collectionId = bundle.collection.id,
                     ),
                 )
             }

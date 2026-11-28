@@ -4,6 +4,7 @@ import com.coach.desktop.books.CollectionQaJson.arr
 import com.coach.desktop.books.CollectionQaJson.boolOrFalse
 import com.coach.desktop.books.CollectionQaJson.intOrNull
 import com.coach.desktop.books.CollectionQaJson.str
+import com.coach.protocol.BookStance
 import com.coach.protocol.BookStanceCopy
 import com.coach.protocol.BookStanceGuard
 import kotlinx.serialization.json.JsonObject
@@ -544,13 +545,15 @@ internal object SentenceCitationGate {
             conflictCards = conflictCards,
             fallbackMessage = fallback,
             droppedUnverifiedCount = dropped,
+            collectionId = collectionId,
         )
     }
 
     /**
      * 阶段 2（TON-1978）按立场分层回答的客户端逐句复核：
      * - 校验每一句的 UTF-16 原句切片、小说有效进度页码边界；
-     * - 任一「本书」块中有句子出处无法核对时整块丢弃（fail-closed）；
+     * - 逐句校验，单句出处无法核对时仅丢弃该句并计入丢句数，保留同段已核实句子；
+     * - 未绑定到相邻已核实人生类「本书」段落的「推想」一并剔除；
      * - 同时兼容 high_risk 直接回答与缺失阅读记录提示。
      */
     fun verifyStanceCollectionResponse(
@@ -574,9 +577,9 @@ internal object SentenceCitationGate {
                     if (!decoded.highRisk) verifiedLayers += layer
                 }
                 is StanceLayer.Book -> {
-                    var blockValid = true
                     val verifiedBookSents = mutableListOf<StanceBookSentence>()
                     for (sent in layer.sentences) {
+                        var sentenceValid = true
                         val verifiedCites = mutableListOf<StanceCitation>()
                         for (cite in sent.citations) {
                             val bookId = cite.bookId.ifBlank {
@@ -586,13 +589,13 @@ internal object SentenceCitationGate {
                             if (bs != null && BookStanceGuard.FICTION in bs.guards) {
                                 val rtp = bs.readThroughPage
                                 if (bs.missingReadingRecord || rtp == null || cite.page > rtp) {
-                                    blockValid = false
+                                    sentenceValid = false
                                     break
                                 }
                             }
                             val rawPageText = rawPagesByKey[bookId to cite.page]
                             if (rawPageText == null) {
-                                blockValid = false
+                                sentenceValid = false
                                 break
                             }
                             val exact = cite.startUtf16 in 0 until cite.endUtf16 &&
@@ -606,7 +609,7 @@ internal object SentenceCitationGate {
                             } else {
                                 val snapped = verifyOrSnapAnchor(cite.quote, rawPageText)
                                 if (!snapped.verified || snapped.endUtf16 <= snapped.startUtf16) {
-                                    blockValid = false
+                                    sentenceValid = false
                                     break
                                 }
                                 cite.copy(
@@ -619,14 +622,13 @@ internal object SentenceCitationGate {
                             }
                             verifiedCites += finalCite
                         }
-                        if (!blockValid || verifiedCites.isEmpty()) {
-                            blockValid = false
-                            break
+                        if (!sentenceValid || verifiedCites.isEmpty()) {
+                            extraDropped++
+                            continue
                         }
                         verifiedBookSents += StanceBookSentence(sent.text, verifiedCites)
                     }
-                    if (!blockValid || verifiedBookSents.isEmpty()) {
-                        extraDropped += layer.sentences.size
+                    if (verifiedBookSents.isEmpty()) {
                         continue
                     }
                     val resolvedBookId = layer.bookId.ifBlank {
@@ -662,6 +664,34 @@ internal object SentenceCitationGate {
             }
         }
 
+        // Bind Guess layers only to an adjacent verified life-stance Book layer.
+        fun isVerifiedLifeBookLayer(candidate: StanceLayer?): StanceLayer.Book? {
+            val b = candidate as? StanceLayer.Book ?: return null
+            if (b.sentences.isEmpty()) return null
+            val bs = stanceByBookId[b.bookId] ?: return null
+            val supportsLife = bs.defaultStance == BookStance.LIFE ||
+                bs.secondaryStance == BookStance.LIFE ||
+                decoded.stance == BookStance.LIFE
+            return b.takeIf { supportsLife }
+        }
+        val boundLayers = verifiedLayers.mapIndexedNotNull { idx, layer ->
+            if (layer !is StanceLayer.Guess) {
+                layer
+            } else {
+                val prev = isVerifiedLifeBookLayer(verifiedLayers.getOrNull(idx - 1))
+                val next = isVerifiedLifeBookLayer(verifiedLayers.getOrNull(idx + 1))
+                val target = if (layer.bookId.isNotBlank()) {
+                    listOfNotNull(prev, next).firstOrNull { it.bookId == layer.bookId }
+                } else {
+                    prev ?: next
+                } ?: return@mapIndexedNotNull null
+                layer.copy(
+                    bookId = target.bookId,
+                    bookTitle = layer.bookTitle.ifBlank { target.bookTitle },
+                )
+            }
+        }
+
         val allRelevantFiction = bookStances.isNotEmpty() &&
             bookStances.all { BookStanceGuard.FICTION in it.guards }
         val finalNoBookNotice = if (flatSentences.isEmpty()) {
@@ -673,7 +703,7 @@ internal object SentenceCitationGate {
         } else null
 
         val verifiedAnswer = decoded.copy(
-            layers = verifiedLayers,
+            layers = boundLayers,
             noBookNotice = finalNoBookNotice,
             droppedSentences = decoded.droppedSentences + extraDropped,
         )
@@ -691,6 +721,7 @@ internal object SentenceCitationGate {
             fallbackMessage = fallbackMsg,
             droppedUnverifiedCount = verifiedAnswer.droppedSentences,
             stanceAnswer = verifiedAnswer,
+            collectionId = collectionId,
         )
     }
 

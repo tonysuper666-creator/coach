@@ -341,4 +341,82 @@ class CollectionQaStanceTest {
         assertNull(res["layers"])
         assertEquals(1, res.getValue("sentences").jsonArray.size)
     }
+
+    @Test
+    fun mixedCollectionRejectsGuessWithoutAdjacentVerifiedLifeBookParagraph() = runBlocking {
+        val econPage = "Supply and demand interact to determine market equilibrium price."
+        val waldenPage = "I went to the woods because I wished to live deliberately."
+        var calls = 0
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                calls++
+                assertTrue("immediately adjacent to a verified" in systemPrompt)
+                // Both attempts cite only knowledge book (econ) yet include a Guess (even naming book-walden)
+                val modelJson = """{"paragraphs":[
+                    {"layer":"book","bookId":"book-econ","sentences":[{"text":"供求决定市场均衡价格。","anchors":["S1"],"quote":"Supply and demand interact"}]},
+                    {"layer":"guess","bookId":"book-walden","text":"按他简朴生活的办法推想，消费越少越自由。"}
+                ],"boundary":null}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "mixed")
+            put("question", "怎么看待消费和简单生活？")
+            put("bookStances", mixedBooksSpec())
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-econ"); put("docLabel", "Economics 2e"); put("page", 10); put("text", econPage)
+                })
+                add(buildJsonObject {
+                    put("blockId", "B2"); put("bookId", "book-walden"); put("docLabel", "Walden"); put("page", 5); put("text", waldenPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertEquals(2, calls, "invalid guess should trigger repair retry then fail closed")
+        assertTrue(res.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        assertTrue(res.getValue("layers").jsonArray.isEmpty())
+        assertTrue(res.getValue("sentences").jsonArray.isEmpty())
+    }
+
+    @Test
+    fun mixedCollectionBindsGuessToAdjacentVerifiedLifeBookParagraph() = runBlocking {
+        val econPage = "Supply and demand interact to determine market equilibrium price."
+        val waldenPage = "I went to the woods because I wished to live deliberately."
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                val modelJson = """{"paragraphs":[
+                    {"layer":"book","bookId":"book-econ","sentences":[{"text":"供给与需求互动共同决定市场均衡价格。","anchors":["S1"],"quote":"Supply and demand interact to determine market equilibrium price"}]},
+                    {"layer":"book","bookId":"book-walden","sentences":[{"text":"梭罗写到走进森林是为了过简朴审慎的生活。","anchors":["S2"],"quote":"wished to live deliberately"}]},
+                    {"layer":"guess","text":"按他简朴生活的办法推想，消费减半可以减少焦虑。"}
+                ],"boundary":null}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "mixed")
+            put("question", "怎么看待消费和简单生活？")
+            put("bookStances", mixedBooksSpec())
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-econ"); put("docLabel", "Economics 2e"); put("page", 10); put("text", econPage)
+                })
+                add(buildJsonObject {
+                    put("blockId", "B2"); put("bookId", "book-walden"); put("docLabel", "Walden"); put("page", 5); put("text", waldenPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertFalse(res.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        val layers = res.getValue("layers").jsonArray
+        assertEquals(3, layers.size)
+        val guessLayer = layers[2].jsonObject
+        assertEquals("guess", guessLayer.getValue("layer").jsonPrimitive.content)
+        assertEquals("book-walden", guessLayer.getValue("bookId").jsonPrimitive.content)
+        assertEquals("Walden", guessLayer.getValue("bookTitle").jsonPrimitive.content)
+    }
 }

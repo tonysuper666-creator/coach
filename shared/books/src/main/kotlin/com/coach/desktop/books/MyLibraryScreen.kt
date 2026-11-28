@@ -94,7 +94,11 @@ internal fun MyLibraryScreen(
     var qaPanelOpen by remember { mutableStateOf(false) }
     val qaResultScroll = rememberScrollState()
 
-    fun submitLibraryAsk(questionText: String = qaDraft, overrideStance: BookStance? = null) {
+    fun submitLibraryAsk(
+        questionText: String = qaDraft,
+        overrideStance: BookStance? = null,
+        targetCollectionId: String = qaCollectionId,
+    ) {
         val clean = questionText.trim()
         if (clean.isEmpty() || qaLoading) return
         qaLoading = true
@@ -103,7 +107,7 @@ internal fun MyLibraryScreen(
         scope.launch {
             val res = CollectionQaEngine.ask(
                 library = library,
-                collectionId = qaCollectionId,
+                collectionId = targetCollectionId,
                 question = clean,
                 overrideStance = overrideStance,
                 remoteAsk = { payload ->
@@ -119,7 +123,7 @@ internal fun MyLibraryScreen(
             qaLoading = false
             res.fold(
                 onSuccess = { turn ->
-                    qaTurns = qaTurns + turn
+                    qaTurns = qaTurns + turn.copy(collectionId = turn.collectionId ?: targetCollectionId)
                     if (overrideStance == null && qaDraft.trim() == clean) {
                         qaDraft = ""
                     }
@@ -410,7 +414,11 @@ internal fun MyLibraryScreen(
                                     }
                                 },
                                 onSwitchStance = { nextStance ->
-                                    submitLibraryAsk(questionText = turn.question, overrideStance = nextStance)
+                                    submitLibraryAsk(
+                                        questionText = turn.question,
+                                        overrideStance = nextStance,
+                                        targetCollectionId = turn.collectionId ?: qaCollectionId,
+                                    )
                                 },
                                 switchEnabled = !qaLoading,
                                 onClose = { qaPanelOpen = false },

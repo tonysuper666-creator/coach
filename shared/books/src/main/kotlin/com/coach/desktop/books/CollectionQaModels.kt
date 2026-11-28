@@ -111,6 +111,7 @@ internal data class CollectionQaTurn(
     val fallbackMessage: String? = null,
     val droppedUnverifiedCount: Int = 0,
     val stanceAnswer: StanceAnswer? = null,
+    val collectionId: String? = null,
 )
 
 internal data class CollectionQaSessionState(

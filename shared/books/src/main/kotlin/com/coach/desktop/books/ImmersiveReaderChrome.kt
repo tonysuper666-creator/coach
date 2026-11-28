@@ -1618,7 +1618,7 @@ internal fun CollectionQaTurnView(
                     val resolvedBookId = cite.bookId.ifBlank { cite.docId.substringBefore(":p") }
                     onOpenCitation(
                         CollectionQaCitation(
-                            collectionId = CollectionQaVirtualCollections.READ_LIBRARY_ID,
+                            collectionId = turn.collectionId ?: CollectionQaVirtualCollections.READ_LIBRARY_ID,
                             bookId = resolvedBookId,
                             docLabel = cite.bookTitle.ifBlank { resolvedBookId },
                             shortLabel = cite.bookTitle.take(12).ifBlank { resolvedBookId.take(12) },

@@ -30,6 +30,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -274,5 +275,200 @@ class CollectionQaStanceClientTest {
             askedStances.size >= 2
         }
         assertEquals("knowledge", askedStances.last())
+    }
+
+    @Test
+    fun switchStanceOnOlderCardKeepsOriginalCollectionIdAfterSwitchingScopeChip() = runBlocking {
+        val root = folder.root.toPath()
+        val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = false)
+        val econ = library.importBook(
+            Files.writeString(
+                root.resolve("econ.txt"),
+                "Chapter 1\n\nSupply and demand determine market prices under competitive equilibrium.",
+            ),
+        )
+        val zhouyi = library.importBook(
+            Files.writeString(
+                root.resolve("zhouyi.txt"),
+                "乾卦\n\n九五飛龍在天利見大人象征阳刚盛极而有作为。",
+            ),
+        )
+        val booklistId = "bl-econ-only"
+        library.upsertCollection(
+            MaterialCollectionRecord(
+                id = booklistId,
+                kind = CollectionKind.BOOKLIST,
+                title = "经济学书单",
+            ),
+        )
+        library.attachMaterial(CollectionMaterialRecord(booklistId, econ.id, ordinal = 0))
+
+        Files.writeString(
+            root.resolve("library").resolve("book-stance-forced.json"),
+            """
+            {
+              "${econ.id}": { "defaultStance": "knowledge" },
+              "${zhouyi.id}": { "defaultStance": "esoteric" }
+            }
+            """.trimIndent(),
+        )
+
+        val requests = CopyOnWriteArrayList<JsonObject>()
+        val zhouyiQuote = "九五飛龍在天利見大人"
+        val zhouyiText = zhouyi.page(1)!!.text
+        val start = zhouyiText.indexOf(zhouyiQuote)
+        assertTrue(start >= 0)
+
+        runSkikoComposeUiTest(size = Size(1180f, 840f)) {
+            setContent {
+                CoachTheme(false) {
+                    MyLibraryScreen(
+                        library = library,
+                        onBack = {},
+                        onOpenBook = {},
+                        collections = library.collectionSummaries(),
+                        onAskCollection = { payload ->
+                            requests += payload
+                            CourseServerCallResult(
+                                body = buildJsonObject {
+                                    put("stance", payload.getValue("stance").jsonPrimitive.content)
+                                    put("boundary", JsonPrimitive(null as String?))
+                                    put("layers", buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("layer", "book")
+                                            put("label", BookStanceCopy.BOOK_DEFAULT)
+                                            put("bookId", zhouyi.id)
+                                            put("bookTitle", zhouyi.title)
+                                            put("sentences", buildJsonArray {
+                                                add(buildJsonObject {
+                                                    put("text", "乾卦九五爻写了飛龍在天利見大人。")
+                                                    put("citations", buildJsonArray {
+                                                        add(buildJsonObject {
+                                                            put("docId", "${zhouyi.id}:p1:0")
+                                                            put("pdfPage", 1)
+                                                            put("startUtf16", start)
+                                                            put("endUtf16", start + zhouyiQuote.length)
+                                                            put("quote", zhouyiQuote)
+                                                            put("bookId", zhouyi.id)
+                                                            put("bookTitle", zhouyi.title)
+                                                        })
+                                                    })
+                                                })
+                                            })
+                                        })
+                                    })
+                                    put("modelCalled", true)
+                                },
+                                error = null,
+                            )
+                        },
+                    )
+                }
+            }
+
+            // 1. Ask against「全部书」
+            onNodeWithTag("library-qa-input").performTextInput("飛龍在天与市场均衡有什么区别？")
+            onNodeWithTag("library-qa-send").performClick()
+            waitUntil(timeoutMillis = 5_000) {
+                requests.size == 1 &&
+                    onAllNodesWithTag("stance-switch-original").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(CollectionQaVirtualCollections.READ_LIBRARY_ID, requests[0].getValue("collectionId").jsonPrimitive.content)
+
+            // 2. Switch library selector to the smaller booklist
+            onNodeWithTag("library-qa-scope-$booklistId").performClick()
+            waitForIdle()
+
+            // 3. Click「换个角度」on the earlier card -> MUST still request original READ_LIBRARY_ID
+            onNodeWithTag("stance-switch-original").performClick()
+            waitUntil(timeoutMillis = 5_000) { requests.size == 2 }
+            assertEquals(
+                CollectionQaVirtualCollections.READ_LIBRARY_ID,
+                requests[1].getValue("collectionId").jsonPrimitive.content,
+            )
+            val sentBookIds = requests[1].getValue("bookStances").jsonArray.map {
+                it.jsonObject.getValue("bookId").jsonPrimitive.content
+            }.toSet()
+            assertTrue(zhouyi.id in sentBookIds, "re-ask from old card must still use original library books")
+        }
+    }
+
+    @Test
+    fun verifyStanceCollectionResponseKeepsValidSentenceAndDropsOnlyUnverifiedSentenceInSameParagraph() {
+        val page1Text = "市场价格由供求共同决定，均衡出现在两者相等处。"
+        val q1 = "市场价格由供求共同决定"
+        val start = page1Text.indexOf(q1)
+        val bookStances = listOf(
+            CollectionBookStancePayload(
+                bookId = "book-econ",
+                title = "经济学",
+                defaultStance = BookStance.KNOWLEDGE,
+            ),
+        )
+        val responseJson = buildJsonObject {
+            put("stance", "knowledge")
+            put("layers", buildJsonArray {
+                add(buildJsonObject {
+                    put("layer", "book")
+                    put("label", BookStanceCopy.BOOK_DEFAULT)
+                    put("bookId", "book-econ")
+                    put("bookTitle", "经济学")
+                    put("sentences", buildJsonArray {
+                        add(buildJsonObject {
+                            put("text", "市场价格由供求共同决定。")
+                            put("citations", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("docId", "book-econ:p1:0")
+                                    put("pdfPage", 1)
+                                    put("startUtf16", start)
+                                    put("endUtf16", start + q1.length)
+                                    put("quote", q1)
+                                    put("bookId", "book-econ")
+                                    put("bookTitle", "经济学")
+                                })
+                            })
+                        })
+                        add(buildJsonObject {
+                            put("text", "第99页还有额外推论。")
+                            put("citations", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("docId", "book-econ:p99:0")
+                                    put("pdfPage", 99)
+                                    put("startUtf16", 0)
+                                    put("endUtf16", 6)
+                                    put("quote", "不存在的原文")
+                                    put("bookId", "book-econ")
+                                    put("bookTitle", "经济学")
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+            put("gate", buildJsonObject {
+                put("droppedSentences", 0)
+                put("outOfRange", 0)
+            })
+        }
+
+        val turn = SentenceCitationGate.verifyStanceCollectionResponse(
+            collectionId = CollectionQaVirtualCollections.READ_LIBRARY_ID,
+            question = "市场价格怎么决定？",
+            responseJson = responseJson,
+            rawPagesByKey = mapOf(("book-econ" to 1) to page1Text),
+            bookStances = bookStances,
+            shortLabelByBookId = mapOf("book-econ" to "经济学"),
+            docLabelByBookId = mapOf("book-econ" to "经济学"),
+        )
+
+        assertNotNull(turn)
+        assertEquals(CollectionQaVirtualCollections.READ_LIBRARY_ID, turn.collectionId)
+        assertEquals(1, turn.sentences.size)
+        assertEquals("市场价格由供求共同决定。", turn.sentences[0].claim)
+        assertEquals(1, turn.droppedUnverifiedCount)
+        val bookLayer = turn.stanceAnswer!!.layers.filterIsInstance<StanceLayer.Book>().single()
+        assertEquals(1, bookLayer.sentences.size)
+        assertEquals("市场价格由供求共同决定。", bookLayer.sentences[0].text)
+        assertEquals(1, turn.stanceAnswer!!.droppedSentences)
     }
 }

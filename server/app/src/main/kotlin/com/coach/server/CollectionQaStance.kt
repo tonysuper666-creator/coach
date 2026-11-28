@@ -220,7 +220,7 @@ internal object CollectionQaStanceEngine {
         ROOT_FIELDS("Root JSON must contain only 'paragraphs' and 'boundary'."),
         PARAGRAPH_COUNT("Output at most 5 paragraphs."),
         PARAGRAPH_FIELDS("Check allowed keys on each paragraph."),
-        STANCE_LAYER("Respect each book's allowed layers (no guess outside life; no outside/guess for original)."),
+        STANCE_LAYER("Respect each book's allowed layers (no guess outside life; every guess MUST be immediately adjacent to a verified book paragraph of the same life-stance book — remove guess if no life book passage is cited in book; no outside/guess for original)."),
         ANCHORS("Never include anchors or sentences on outside/guess paragraphs."),
         PARAGRAPH_TEXT("Paragraph text must be non-empty, single-line, without 【】 or page numbers."),
         ANSWER_LOCATOR("Never put page numbers (like 第X页 or page X) in outside/guess text."),
@@ -589,7 +589,7 @@ internal object CollectionQaStanceEngine {
             appendLine()
             appendLine("PER-BOOK STANCE RULES:")
             appendLine("- knowledge (按专业角度答): Explain principles, derivations, boundaries. Allowed layers: \"book\" and \"outside\" (\"通行讲法\" or \"史学\"). NEVER \"guess\".")
-            appendLine("- life (按作者和原文答): Respond from the author's recorded words/experiences in \"book\". NEVER invent unrecorded facts. Allowed layers: \"book\", \"outside\", and \"guess\". Any \"guess\" paragraph MUST belong to a life-stance book, MUST use third person ONLY (e.g. \"按他书里的办法推想……\"), and MUST NEVER contain 我/我们/I/my/we/our even if asked.")
+            appendLine("- life (按作者和原文答): Respond from the author's recorded words/experiences in \"book\". NEVER invent unrecorded facts. Allowed layers: \"book\", \"outside\", and \"guess\". Any \"guess\" paragraph MUST belong to a life-stance book, MUST appear immediately adjacent to a verified \"book\" paragraph of that same life-stance book (NEVER emit \"guess\" if no life-stance book is cited in \"book\"), MUST use third person ONLY (e.g. \"按他书里的办法推想……\"), and MUST NEVER contain 我/我们/I/my/we/our even if asked.")
             appendLine("- classic (按思想和注疏答): Allowed layers: \"book\" and \"outside\" (\"注家读法\" or \"今人解读\"). NEVER \"guess\". Blocks tagged [原文] are main text; [注]/[按语] are in-book commentary. NEVER mix [原文] and [注]/[按语] anchors in ONE \"book\" sentence! Absent commentators (e.g., 朱熹 on plain Lunyu) belong ONLY in \"outside\" and NEVER in \"book\" sentences.")
             appendLine("- esoteric (按本书体系答): Reason strictly within the book's symbolic framework without predicting real-world outcomes. Allowed layers: \"book\" and \"outside\" (\"今人解读\" or \"史学\"). NEVER \"guess\".")
             appendLine("- original (只按原文答): Allowed layer: \"book\" ONLY! NEVER output \"outside\" or \"guess\" for an original-stance book.")
@@ -761,11 +761,11 @@ internal object CollectionQaStanceEngine {
                         continue
                     }
 
-                    val targetBookId = resolveClaimedBookId(rawParaBook) ?: lastBookId
+                    val targetBookId = resolveClaimedBookId(rawParaBook)
                     val targetBook = targetBookId?.let { bookById[it] }
                     if (layerKind == AnswerLayerKind.GUESS) {
                         if (!anyLifeBookInCollection) return reject(RejectReason.STANCE_LAYER)
-                        if (targetBook != null && targetBook.effectiveStance != BookStance.LIFE) {
+                        if (targetBookId != null && (targetBook == null || targetBook.effectiveStance != BookStance.LIFE)) {
                             return reject(RejectReason.STANCE_LAYER)
                         }
                         if (containsFirstPerson(text)) return reject(RejectReason.FIRST_PERSON)
@@ -776,17 +776,19 @@ internal object CollectionQaStanceEngine {
                             text = text,
                         )
                     } else {
+                        val outsideBookId = targetBookId ?: lastBookId
+                        val outsideBook = outsideBookId?.let { bookById[it] }
                         if (responseStanceWire == BookStance.ORIGINAL.wire || allOriginalCollection) {
                             return reject(RejectReason.STANCE_LAYER)
                         }
-                        if (targetBook != null && targetBook.effectiveStance == BookStance.ORIGINAL) {
+                        if (outsideBook != null && outsideBook.effectiveStance == BookStance.ORIGINAL) {
                             return reject(RejectReason.STANCE_LAYER)
                         }
                         val kind = (para["kind"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
                         layersOut += CheckedCollectionLayer.Outside(
                             label = BookStanceCopy.outsideLabel(kind),
-                            bookId = targetBook?.bookId,
-                            bookTitle = targetBook?.title,
+                            bookId = outsideBook?.bookId,
+                            bookTitle = outsideBook?.title,
                             text = text,
                         )
                     }
@@ -972,6 +974,21 @@ internal object CollectionQaStanceEngine {
                     }
                 }
             }
+        }
+
+        // Bind every Guess layer to an immediately adjacent verified LIFE Book layer in this answer.
+        for (i in layersOut.indices) {
+            val g = layersOut[i] as? CheckedCollectionLayer.Guess ?: continue
+            val prevBook = (layersOut.getOrNull(i - 1) as? CheckedCollectionLayer.Book)
+                ?.takeIf { bookById[it.bookId]?.effectiveStance == BookStance.LIFE && it.sentences.isNotEmpty() }
+            val nextBook = (layersOut.getOrNull(i + 1) as? CheckedCollectionLayer.Book)
+                ?.takeIf { bookById[it.bookId]?.effectiveStance == BookStance.LIFE && it.sentences.isNotEmpty() }
+            val bound = if (g.bookId != null) {
+                listOfNotNull(prevBook, nextBook).firstOrNull { it.bookId == g.bookId }
+            } else {
+                prevBook ?: nextBook
+            } ?: return reject(RejectReason.STANCE_LAYER)
+            layersOut[i] = g.copy(bookId = bound.bookId, bookTitle = bound.bookTitle)
         }
 
         val totalBookSentences = layersOut.filterIsInstance<CheckedCollectionLayer.Book>().sumOf { it.sentences.size }

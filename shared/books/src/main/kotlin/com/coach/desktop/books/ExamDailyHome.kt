@@ -207,11 +207,25 @@ internal object ExamDailyHome {
         val mastery = loadMastery(db, courseId)
         val wrongLessons = loadWrongLessons(db, courseId)
         return db.prepareStatement(
-            """SELECT topic_id, title, pack_payload_json FROM course_topics
-               WHERE collection_id=? AND exam_status='EXAMINABLE'
-               ORDER BY ord, topic_id""",
+            // Keep a chapter as a fallback until there is a finer exam point on its pages.
+            """WITH point_pages AS (
+                   SELECT s.book_id, s.start_page, s.end_page
+                   FROM course_topics p JOIN course_topic_sources s ON s.topic_id=p.topic_id
+                   WHERE p.collection_id=?1 AND p.week_label=?2 AND p.exam_status='EXAMINABLE'
+                     AND s.user_locked>=0
+               )
+               SELECT t.topic_id, t.title, t.pack_payload_json FROM course_topics t
+               WHERE t.collection_id=?1 AND t.exam_status='EXAMINABLE'
+                 AND NOT (t.week_label GLOB '第 [0-9]* 章' AND EXISTS (
+                     SELECT 1 FROM course_topic_sources chapter JOIN point_pages p
+                       ON p.book_id=chapter.book_id AND p.start_page<=chapter.end_page
+                          AND p.end_page>=chapter.start_page
+                     WHERE chapter.topic_id=t.topic_id AND chapter.user_locked>=0
+                 ))
+               ORDER BY t.ord, t.topic_id""",
         ).use { sql ->
             sql.setString(1, courseId)
+            sql.setString(2, CourseExamPoints.LABEL)
             sql.executeQuery().use { rows ->
                 buildList {
                     while (rows.next()) {

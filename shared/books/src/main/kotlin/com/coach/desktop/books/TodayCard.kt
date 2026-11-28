@@ -118,6 +118,16 @@ private fun ExamDayBlock(board: ExamDayBoard, busy: Boolean, onBudget: ((Int) ->
                 color = colors.fgSecondary,
             )
         }
+        today.courses.forEach { course ->
+            course.deferral?.let { note ->
+                Text(
+                    "${course.title} · $note",
+                    modifier = Modifier.testTag("home-exam-deferred"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fgSecondary,
+                )
+            }
+        }
         if (!expanded) return@Column
         today.courses.forEach { course ->
             Text(

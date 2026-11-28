@@ -422,4 +422,64 @@ class ExamCoverageTest {
             report.uncovered.map { it.name to it.reason },
         )
     }
+
+    @Test
+    fun decomposesStemOnlyAndIgnoresMultipleChoiceOptionsWhileKeepingEssaySubQuestions() {
+        val syntheticExam = """
+            SYNTHETIC UNIVERSITY
+            ECON99999 Synthetic Exam
+            Time Allowed: 60 Minutes
+
+            1. Which mechanism causes market unraveling when seller quality is unobservable?
+            A) Partial insurance
+            B) Risk pooling
+            C) Cost sharing
+            D) Moral hazard
+
+            2. Which choice best captures how buyers react to price changes? (a) Partial insurance (b) Risk pooling (c) Demand elasticity (d) None of the above
+
+            3. Under Demand Elasticity, which outcome occurs after a tax?
+            (a) Partial insurance
+            (b) Price rises and quantity falls
+            (c) Risk pooling
+            (d) Cost sharing
+
+            4. Consider the market setup.
+            (a) Explain Consumer Surplus under a price cap. [10 marks]
+            (b) Discuss Moral Hazard in insurance contracts.
+
+            5. Compare (a) Risk Aversion and (b) Price Ceiling in A. Smith and B. Jones.
+        """.trimIndent()
+
+        val questions = HeldOutDecomposer.questionsFromDocument(syntheticExam)
+        assertEquals(5, questions.size)
+
+        val textbook = """
+            Partial insurance: Coverage that leaves part of a loss uninsured.
+            Risk pooling: Spreading risk across insured individuals.
+            Cost sharing: Splitting bills between insurer and patient.
+            Moral hazard: Hidden action after a contract is signed.
+            Demand elasticity: Buyers respond to price changes.
+            Consumer surplus: Net gain to buyers from trade.
+            Risk aversion: Preference for a certain payoff over a risky lottery.
+            Price ceiling: Legal maximum price in a market.
+        """.trimIndent()
+        val identified = listOf(
+            "Partial insurance", "Risk pooling", "Cost sharing", "Moral hazard",
+            "Demand elasticity", "Consumer surplus", "Risk aversion", "Price ceiling",
+        )
+        val bank = identified.map { CoverageBankPoint(it, choices = 3, essay = true) }
+
+        val report = ExamCoverage.evaluate(questions, identified, bank, textbook)
+        assertEquals(5, report.heldOutPoints)
+        assertEquals(3, report.covered)
+        assertEquals(listOf("Demand elasticity", "Consumer surplus", "Risk aversion"), report.coveredPoints)
+        assertEquals(
+            listOf(
+                "未识别考点 #1" to ExamCoverage.POINT_MISSED,
+                "未识别考点 #2" to ExamCoverage.POINT_MISSED,
+            ),
+            report.uncovered.map { it.name to it.reason },
+        )
+    }
 }

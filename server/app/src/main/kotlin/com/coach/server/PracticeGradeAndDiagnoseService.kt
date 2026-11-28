@@ -1067,6 +1067,7 @@ class PracticeGradeAndDiagnoseService(
         }
         val local = CourseEssayFramework.judge(points, request.studentAnswer)
         val asked = local.filter { it.usage == CourseEssayFramework.Usage.USED }
+        val unmatched = local.filter { it.usage == CourseEssayFramework.Usage.MISSING }
         val models = mutableListOf<String>()
         var channel = ""
         var haikuVotes = emptyMap<String, CourseEssayFramework.Vote>()
@@ -1077,10 +1078,11 @@ class PracticeGradeAndDiagnoseService(
             task: String,
             keyPrefix: String,
             rows: List<CourseEssayFramework.Judgement>,
+            search: List<CourseEssayFramework.Judgement> = emptyList(),
             accept: (String) -> Boolean,
         ): Map<String, CourseEssayFramework.Vote> {
-            if (rows.isEmpty()) return emptyMap()
-            val prompt = CourseEssayFramework.blindUserPrompt(rows, request.studentAnswer)
+            if (rows.isEmpty() && search.isEmpty()) return emptyMap()
+            val prompt = CourseEssayFramework.blindUserPrompt(rows, request.studentAnswer, search)
             val key = "$keyPrefix-${sha256(prompt.toByteArray(Charsets.UTF_8)).take(16)}"
             val reply = modelCatching {
                 activeTransport.generateSection(
@@ -1095,21 +1097,23 @@ class PracticeGradeAndDiagnoseService(
             models += reply.model
             channel = reply.routeChannel.wireName
             if (!accept(reply.model)) return emptyMap()
-            return CourseEssayFramework.parseVotes(reply.text)
+            return CourseEssayFramework.parseVotes(reply.text, search, request.studentAnswer)
         }
 
-        if (asked.isNotEmpty()) {
+        if (asked.isNotEmpty() || unmatched.isNotEmpty()) {
             haikuVotes = ask(
                 PracticeGradeLimits.TASK_COURSE_ESSAY_NOTE,
                 "ce-note",
                 asked,
+                unmatched,
             ) { it.startsWith("claude-haiku") }
             gptVotes = ask(
                 PracticeGradeLimits.TASK_COURSE_ESSAY_CHECK,
                 "ce-check",
                 asked,
+                unmatched,
             ) { courseEssayCheckModel(it, friend = !recordOwnerLedger) }
-            val disagreed = asked.filter { row ->
+            val disagreed = local.filter { row ->
                 val haiku = haikuVotes[row.point.id]
                 val gpt = gptVotes[row.point.id]
                 haiku != null && gpt != null && haiku.correct != gpt.correct
@@ -1123,7 +1127,12 @@ class PracticeGradeAndDiagnoseService(
             }
         }
 
-        val items = local.map { row ->
+        val items = local.map { initial ->
+            val evidence = sequenceOf(haikuVotes, gptVotes).mapNotNull { it[initial.point.id]?.studentQuote }
+                .firstOrNull { it.isNotBlank() }
+            val row = if (initial.usage == CourseEssayFramework.Usage.MISSING && evidence != null) {
+                initial.copy(usage = CourseEssayFramework.Usage.USED, studentQuote = evidence)
+            } else initial
             val reconciled = CourseEssayFramework.reconcile(
                 row,
                 haikuVotes[row.point.id],

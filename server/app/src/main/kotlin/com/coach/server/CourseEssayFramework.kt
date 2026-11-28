@@ -14,10 +14,8 @@ import java.text.Normalizer
 /**
  * Exam-point essay ruler.
  *
- * Definitions and frameworks are read off the course pages. A local miss stays a miss:
- * a model cannot clear it. Whether a used point was used correctly is asked of Haiku
- * and, separately, of a GPT checker that does not see Haiku's verdict. One disagreement
- * gets one more blind ask. Still apart, the point is not marked correct.
+ * Each point quotes one complete source statement. A literal match supplies evidence directly.
+ * The blind graders can also locate paraphrases, which require a quote from the actual answer.
  */
 internal object CourseEssayFramework {
     enum class Kind { FRAMEWORK, DEFINITION }
@@ -51,14 +49,20 @@ internal object CourseEssayFramework {
         val studentQuote: String,
     )
 
-    data class Vote(val correct: Boolean, val gap: String)
+    data class Vote(val correct: Boolean, val gap: String, val studentQuote: String = "")
 
     data class Reconciliation(val correct: Boolean, val gap: String)
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val definitionLine = Regex("""^([^:：]{2,64})[:：]\s+(\S.{7,220})$""")
-    private val marker = Regex("""(?i)(?<![a-z0-9])(framework|model|theory)(?![a-z0-9])""")
-    private val token = Regex("""[a-z0-9][\w'-]*""")
+    private val term = """[\p{L}][\p{L}'’-]*(?:\s+[\p{L}][\p{L}'’-]*){0,7}?"""
+    private val glossary = Regex("""^($term)\s*[:：]\s*(.+)""")
+    private val prose = Regex(
+        """^(?:(?i:the|a|an)\s+)?($term)\s+(?:(?:clearly|always|also|usually)\s+)?(?i:is|are|refers? to|means?|describes?|measures?|represents?|""" +
+            """focus(?:es)? on|looks? at|shows?|suggests?|explains?|predicts?|limits?|requires?|determines?)\s+(.+)""",
+    )
+    private val nonBody = Regex("""(?i)^(?:[•●▪]|(?:figure|table|chapter)\s+[\dA-Z]\b|[\d.]+\s|(?:https?://|www\.))""")
+    private val whitespace = Regex("""\s+""")
+    private val token = Regex("""[\p{L}0-9][\p{L}0-9'’-]*""")
     private val bothAnd = Regex("""(?i)\bboth\s+(.{2,48}?)\s+and\s+(.{2,48}?)(?=[.]|$)""")
     private val number = Regex("""(?<![A-Za-z0-9])[+-]?\d+(?:\.\d+)?%?""")
     private val negation = Regex("""(?<![a-z])(?:not|never|without|no)(?![a-z])""")
@@ -78,30 +82,35 @@ internal object CourseEssayFramework {
         你在核对论述有没有把材料里的这一条用对。你看不到另一家的结论，也不要替学生重写。
         correct 为 true 表示用上了 statement 的含义，没有把定义说反。
         gap 用一句简体中文，不超过 40 字。用对了就写「和材料一致」。
-        只输出 JSON：{"items":[{"id":"...","correct":true,"gap":"..."}]}
+        points 逐项核对。另在 findEvidence 的每条原句中，按含义找学生实际使用这一概念的证据。
+        接受换词、翻译、计算和例子。只说不会用或与主题无关都不算。用反了仍算使用，但 correct 为 false。
+        evidence 用从 0 开始的原句序号，quote 必须逐字摘自 answer，足以证明判断。找不到证据就省略该项。
+        只输出 JSON：{"items":[{"id":"...","correct":true,"gap":"..."}],"evidence":[{"index":0,"quote":"...","correct":true,"gap":"..."}]}
     """
 
     fun extract(topicTitle: String, pages: List<Page>): List<Point> {
         val accepted = pages.filter { it.text.isNotBlank() && it.page > 0 && it.role.uppercase() !in droppedRoles }
         if (accepted.isEmpty()) return emptyList()
         val topicKey = normalize(topicTitle)
-        val relevant = if (topicKey.isBlank()) accepted else accepted.filter { normalize(it.text).contains(topicKey) }
-        val scoped = if (relevant.isNotEmpty()) relevant else accepted
+        val topicWords = words(topicKey)
         val candidates = mutableListOf<Candidate>()
-        for (page in scoped) {
-            for (line in page.text.lineSequence().map(String::trim).filter { it.isNotEmpty() && it.length <= 300 }) {
-                val match = definitionLine.matchEntire(line) ?: continue
-                val name = match.groupValues[1].trim()
-                if (!usableName(name)) continue
+        for (page in accepted) {
+            val topicPage = topicKey.isEmpty() || normalize(page.text).contains(topicKey)
+            val statements = sourceStatements(page.text)
+            val glossaryPage = statements.isNotEmpty() && statements.all { glossary.matches(it.replace(whitespace, " ")) }
+            for (source in statements) {
+                val afterColon = source.substringAfter(':', "").trim()
+                val quote = if (afterColon.firstOrNull()?.isUpperCase() == true &&
+                    prose.matches(afterColon.replace(whitespace, " "))) afterColon else source
+                val sentence = quote.replace(whitespace, " ")
+                val entry = glossary.matchEntire(sentence)
+                val match = entry ?: prose.matchEntire(sentence) ?: continue
+                val name = match.groupValues[1]
+                if (!usableName(name) || match.groupValues[2].length < 8) continue
+                val overlap = words(name).intersect(topicWords).size
+                if (overlap == 0 && !(glossaryPage && topicPage) && !name.containsHanTopic(topicKey)) continue
                 val kind = if (isFrameworkName(name)) Kind.FRAMEWORK else Kind.DEFINITION
-                candidates += Candidate(name, kind, line, page, fromDefinition = true)
-            }
-            for (sentence in sentences(page.text)) {
-                for (name in frameworkNames(sentence)) {
-                    val shown = originalSlice(page.text, name).ifBlank { name }
-                    if (!usableName(shown)) continue
-                    candidates += Candidate(shown, Kind.FRAMEWORK, sentence.trim(), page, fromDefinition = false)
-                }
+                candidates += Candidate(name, kind, quote, page, entry != null, overlap)
             }
         }
         val best = linkedMapOf<String, Candidate>()
@@ -111,11 +120,13 @@ internal object CourseEssayFramework {
             if (previous == null || better(candidate, previous)) best[key] = candidate
         }
         val ordered = best.values.sortedWith(
-            compareBy<Candidate> { it.kind.ordinal }.thenBy { it.page.authorityRank }.thenBy { it.page.page }.thenBy { normalize(it.name) },
+            compareByDescending<Candidate> { it.overlap }
+                .thenBy { it.kind.ordinal }.thenBy { it.page.authorityRank }
+                .thenBy { it.page.page }.thenBy { normalize(it.name) },
         )
-        val kept = (ordered.filter { it.kind == Kind.FRAMEWORK } + ordered.filter { it.kind == Kind.DEFINITION })
+        val kept = ordered
             .take(8)
-            .mapNotNull { candidate -> toPoint(candidate) }
+            .map { candidate -> toPoint(candidate) }
         var frameworkCount = 0
         var definitionCount = 0
         return kept.map { point ->
@@ -129,44 +140,35 @@ internal object CourseEssayFramework {
         }
     }
 
-    private fun toPoint(candidate: Candidate): Point? {
-        val quote = quoteFor(candidate.page.text, candidate.statement, candidate.name)
-        val anchor = originalSlice(candidate.page.text, candidate.name).ifBlank { quote.take(24) }
-        if (quote.isBlank() || anchor.isBlank()) return null
-        if (!candidate.page.text.contains(quote) || !candidate.page.text.contains(anchor)) return null
+    private fun toPoint(candidate: Candidate): Point {
+        val quote = candidate.statement
         return Point(
             id = "",
             kind = candidate.kind,
             name = candidate.name.trim(),
-            statement = candidate.statement.trim(),
+            statement = quote.replace(whitespace, " "),
             bookId = candidate.page.bookId,
             bookTitle = candidate.page.bookTitle,
             role = candidate.page.role,
             page = candidate.page.page,
             quote = quote,
-            quoteAnchor = anchor,
+            quoteAnchor = quote,
         )
     }
 
-    private fun quoteFor(page: String, statement: String, name: String): String {
-        if (statement.isNotBlank() && page.contains(statement)) return statement
-        val line = page.lineSequence().map(String::trim).firstOrNull { it.contains(name, ignoreCase = true) }
-        if (!line.isNullOrBlank() && page.contains(line)) return line
-        return originalSlice(page, name)
-    }
-
     fun judge(points: List<Point>, answer: String): List<Judgement> = points.map { point ->
-        val named = mentions(answer, point.name)
-        val phrased = !named && phraseUsed(point.statement, point.name, answer)
-        val usage = when {
-            !named && !phrased -> Usage.MISSING
-            named && contradicted(point.statement, answer, point.name) -> Usage.WRONG
-            else -> Usage.USED
-        }
-        val quote = when {
-            named -> originalSlice(answer, point.name)
-            phrased -> phraseSlice(point.statement, point.name, answer)
+        val alias = point.name.substringBeforeLast(' ', "")
+        val matchedName = when {
+            mentions(answer, point.name) -> point.name
+            point.kind == Kind.FRAMEWORK && words(alias).isNotEmpty() && mentions(answer, alias) -> alias
             else -> ""
+        }
+        val namedQuote = originalSlice(answer, matchedName)
+        val quote = namedQuote.ifEmpty { phraseSlice(point.statement, point.name, answer) }
+        val usage = when {
+            quote.isEmpty() -> Usage.MISSING
+            namedQuote.isNotEmpty() && contradicted(point.statement, answer, matchedName) -> Usage.WRONG
+            else -> Usage.USED
         }
         Judgement(point, usage, quote)
     }
@@ -190,7 +192,7 @@ internal object CourseEssayFramework {
         return Reconciliation(false, "两家核对不一致。先回第${page}页看原句。")
     }
 
-    fun blindUserPrompt(rows: List<Judgement>, answer: String): String = buildJsonObject {
+    fun blindUserPrompt(rows: List<Judgement>, answer: String, unmatched: List<Judgement>): String = buildJsonObject {
         put("points", buildJsonArray {
             for (row in rows) {
                 add(buildJsonObject {
@@ -201,18 +203,31 @@ internal object CourseEssayFramework {
             }
         })
         put("answer", answer)
+        put("findEvidence", buildJsonArray { unmatched.forEach { add(JsonPrimitive(it.point.statement)) } })
     }.toString()
 
-    fun parseVotes(raw: String): Map<String, Vote> {
+    fun parseVotes(raw: String, unmatched: List<Judgement>, answer: String): Map<String, Vote> {
         val obj = extractObject(raw) ?: return emptyMap()
-        val items = obj["items"] as? JsonArray ?: return emptyMap()
-        return items.mapNotNull { el ->
-            val row = el as? JsonObject ?: return@mapNotNull null
-            val id = (row["id"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
-            val correct = (row["correct"] as? JsonPrimitive)?.contentOrNull
-            if (id.isBlank() || correct == null) return@mapNotNull null
-            id to Vote(correct.equals("true", ignoreCase = true), (row["gap"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty())
-        }.toMap()
+        fun JsonObject.field(key: String) = (get(key) as? JsonPrimitive)?.contentOrNull.orEmpty().trim()
+        val ungrounded = unmatched.map { it.point.id }.toSet()
+        return buildMap {
+            for (entry in (obj["items"] as? JsonArray).orEmpty()) {
+                val row = entry as? JsonObject ?: continue
+                val id = row.field("id")
+                val correct = row.field("correct").toBooleanStrictOrNull() ?: continue
+                if (id.isNotBlank() && id !in ungrounded) put(id, Vote(correct, row.field("gap")))
+            }
+            for (entry in (obj["evidence"] as? JsonArray).orEmpty()) {
+                val row = entry as? JsonObject ?: continue
+                val index = row.field("index").toIntOrNull() ?: continue
+                val point = unmatched.getOrNull(index)?.point ?: continue
+                val quote = row.field("quote")
+                val correct = row.field("correct").toBooleanStrictOrNull() ?: continue
+                if (quote.any(Char::isLetterOrDigit) && answer.contains(quote)) {
+                    put(point.id, Vote(correct, row.field("gap"), quote))
+                }
+            }
+        }
     }
 
     fun normalize(text: String): String =
@@ -227,7 +242,7 @@ internal object CourseEssayFramework {
     private fun usableName(name: String): Boolean {
         val key = normalize(name)
         if (key.length !in 5..64 || key.none(Char::isLetter)) return false
-        if (key in genericNames) return false
+        if (key.substringBefore(' ') in genericNames || key.split(' ').any { it in setOf("is", "are", "was", "were") }) return false
         val first = key.substringBefore(' ')
         if (first in boundary || first in setOf("the", "a", "an", "this", "that")) return false
         return true
@@ -238,25 +253,40 @@ internal object CourseEssayFramework {
         return key.endsWith(" framework") || key.endsWith(" model") || key.endsWith(" theory")
     }
 
-    private fun frameworkNames(text: String): List<String> {
-        val norm = normalize(text)
-        return marker.findAll(norm).mapNotNull { hit ->
-            val before = token.findAll(norm.substring(0, hit.range.first)).map { it.value }.toList()
-            val collected = mutableListOf<String>()
-            for (word in before.asReversed()) {
-                if (word in internalWord) {
-                    collected += word
-                    continue
-                }
-                if (word in boundary) break
-                collected += word
-                if (collected.count { it !in internalWord } >= 4) break
+    private fun String.containsHanTopic(topic: String): Boolean =
+        any { it.code in 0x4E00..0x9FFF } && (topic.contains(this) || (topic.isNotBlank() && contains(topic)))
+
+    private fun words(value: String): Set<String> =
+        token.findAll(normalize(value)).map { it.value }.filter {
+            it.length >= 3 && it !in topicStopWords
+        }.toSet()
+
+    private val topicStopWords = stop + setOf("how", "what", "why", "does", "based", "can", "model", "framework", "theory")
+
+    /** Keep the original substring (including PDF line wraps) for the reader's page anchor. */
+    private fun sourceStatements(text: String): List<String> {
+        val blocks = mutableListOf<String>()
+        var start = 0
+        var offset = 0
+        for (line in text.split('\n')) {
+            val trimmed = line.trim()
+            val heading = trimmed.isNotEmpty() && trimmed.none { it in ".!?:。：" } &&
+                trimmed.split(whitespace).all { it.firstOrNull()?.isUpperCase() == true || it.lowercase() in stop }
+            if (trimmed.isEmpty() || nonBody.containsMatchIn(trimmed) || heading) {
+                blocks += text.substring(start, offset).trim()
+                start = (offset + line.length + 1).coerceAtMost(text.length)
             }
-            val content = collected.asReversed().dropWhile { it in internalWord || it in boundary }
-            if (content.isEmpty()) return@mapNotNull null
-            val name = (content + hit.value.lowercase()).joinToString(" ")
-            name.takeIf { it.length in 5..80 }
-        }.distinct().toList()
+            offset += line.length + 1
+        }
+        blocks += text.substring(start)
+        return blocks.flatMap { block ->
+            block.split(Regex("""(?<!\b[A-Z]\.)(?<=[.!?])\s+|(?<=。)\s*""")).map(String::trim)
+        }.filter { sentence ->
+            sentence.length in 15..600 && sentence.last() in ".。" &&
+                (sentence.first().isUpperCase() || glossary.matches(sentence.replace(whitespace, " "))) &&
+                sentence.none { it in "•▪?" } &&
+                !sentence.contains("http", ignoreCase = true)
+        }
     }
 
     private fun mentions(answer: String, name: String): Boolean {
@@ -274,19 +304,6 @@ internal object CourseEssayFramework {
         }
     }
 
-    private fun phraseUsed(statement: String, name: String, answer: String): Boolean {
-        val body = normalize(statement).replace(normalize(name), " ")
-        val raw = token.findAll(body).map { it.value }.toList()
-        val normAnswer = normalize(answer)
-        for (index in 0..raw.size - 4) {
-            val gram = raw.subList(index, index + 4)
-            if (gram.none { it.length >= 6 && it !in stop }) continue
-            val phrase = gram.joinToString(" ")
-            if (phrase.length >= 18 && normAnswer.contains(phrase)) return true
-        }
-        return false
-    }
-
     private fun phraseSlice(statement: String, name: String, answer: String): String {
         val body = normalize(statement).replace(normalize(name), " ")
         val raw = token.findAll(body).map { it.value }.toList()
@@ -296,9 +313,10 @@ internal object CourseEssayFramework {
             if (gram.none { it.length >= 6 && it !in stop }) continue
             val phrase = gram.joinToString(" ")
             if (phrase.length < 18) continue
-            val at = normAnswer.indexOf(phrase)
-            if (at < 0) continue
-            return answerSlice(answer, at, phrase.length)
+            if (normAnswer.contains(phrase)) {
+                val quote = originalSlice(answer, phrase)
+                if (quote.isNotEmpty()) return quote
+            }
         }
         return ""
     }
@@ -337,23 +355,10 @@ internal object CourseEssayFramework {
         return normAnswer.substring(from, to)
     }
 
-    private fun sentences(text: String): List<String> =
-        text.split(Regex("""(?<=[.。])\s+""")).map(String::trim).filter { it.length in 12..300 }
-
     private fun originalSlice(text: String, name: String): String {
-        val at = text.lowercase().indexOf(name.lowercase())
-        if (at < 0) return ""
-        return text.substring(at, (at + name.length).coerceAtMost(text.length))
-    }
-
-    private fun answerSlice(answer: String, normalizedAt: Int, normalizedLength: Int): String {
-        val norm = normalize(answer)
-        if (normalizedAt !in norm.indices) return ""
-        val end = (normalizedAt + normalizedLength).coerceAtMost(norm.length)
-        val wanted = norm.substring(normalizedAt, end)
-        val at = answer.lowercase().indexOf(wanted)
-        if (at < 0) return wanted
-        return answer.substring(at, (at + wanted.length).coerceAtMost(answer.length))
+        if (name.isEmpty()) return ""
+        val pattern = name.split(whitespace).joinToString("""\s+""") { Regex.escape(it) }
+        return Regex(pattern, RegexOption.IGNORE_CASE).find(text)?.value.orEmpty()
     }
 
     private fun cleanGap(gap: String, fallback: String): String {
@@ -377,5 +382,6 @@ internal object CourseEssayFramework {
         val statement: String,
         val page: Page,
         val fromDefinition: Boolean,
+        val overlap: Int,
     )
 }

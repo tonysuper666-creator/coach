@@ -219,6 +219,7 @@ internal fun WindowsTextbookGate(
             }
         }
     }
+    }
 }
 
 /** Windows mainline: first-run login gate, then local textbook shelf with zero-click resume. */

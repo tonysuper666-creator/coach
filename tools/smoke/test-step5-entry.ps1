@@ -973,6 +973,30 @@ $script:screen = $step5Chapter; $script:queue = $null; $script:clicks.Clear(); $
 . $switchKeyPoints
 Check 'step5-already-on-chapter-keypoint-proceeds-without-strip' ($keyView -and $script:clicks.Count -eq 0) "keyView=$keyView clicks=$($script:clicks.Count)"
 
+# 55. 步骤 4 原地同意按钮兼容 PR #791「允许这本书讲解」（含「还没允许讲解」提示锚点与加载态退场），
+#     并继续兼容旧版「允许并讲解 / 这段原文会发到哪里」。
+$inPlaceConsent = @(
+    (New-Line '这本书还没允许讲解。阅读照常；需要讲解时可以一键允许。' 1600 420 420 24),
+    (New-Line '允许这本书讲解' 1600 470 160 30)
+)
+Check 'step4-consent-up-on-in-place-allow-button' (Test-ConsentUp $inPlaceConsent) ''
+Check 'step4-started-on-in-place-allow-button' (Test-ExplainStarted $inPlaceConsent) ''
+Check 'step4-consent-not-gone-on-in-place-allow' (-not (Test-ConsentGone $inPlaceConsent)) ''
+$inPlaceHit = Find-ConsentAllow $inPlaceConsent
+Check 'step4-allow-finds-in-place-button-not-hint' ($inPlaceHit -and [Math]::Abs($inPlaceHit.Y - 485) -le 10) "y=$(if ($inPlaceHit) { $inPlaceHit.Y } else { 'null' })"
+
+$inPlaceGarbled = @(
+    (New-Line '这本书还没允许讲解。' 1600 420 240 24),
+    (New-Line '允许这本节讲鲜' 1600 470 160 30)
+)
+$garbledHit = Find-ConsentAllow $inPlaceGarbled
+Check 'step4-allow-garbled-in-place-picks-button-below-hint' ($garbledHit -and [Math]::Abs($garbledHit.Y - 485) -le 10) "y=$(if ($garbledHit) { $garbledHit.Y } else { 'null' })"
+
+$script:screen = $inPlaceConsent; $script:Last = $inPlaceConsent; $script:queue = $null; $script:clicks.Clear()
+$script:onClick = { $script:screen = $loadingFrame }
+$okInPlace = Click-Confirm 4 { param($l) Find-ConsentAllow $l } { param($l) Test-ConsentGone $l } -tries 3 -waitSec 1 -pauseMs 1
+Check 'step4-in-place-allow-clicks-until-loading' ($okInPlace -and $script:clicks.Count -eq 1) "ok=$okInPlace clicks=$($script:clicks.Count)"
+
 $fail = @($results | Where-Object { -not $_ }).Count
 "RESULT checks=$($results.Count) fail=$fail"
 exit ([int]($fail -gt 0))

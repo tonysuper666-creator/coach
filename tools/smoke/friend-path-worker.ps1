@@ -136,10 +136,105 @@ function Get-HomeImportLabel($lines) {
     if (Has $lines @('导入文件', '单读一本书', '为一门课备考', '上次停在', '读到第', '我的库', '云端书架')) { return '导入文件' }
 }
 
-function Find-TasteOption($lines, $submit) {
-    $hint = Find-Text $lines '选一个答案'
+function Find-FirstTasteTry($lines) {
+    $anchor = Has $lines @('想先试一道开胃题吗', '不再提示')
+    if ($anchor) {
+        $onRow = Find-OnRow $lines '来一道' $anchor 24
+        if ($onRow) { return $onRow }
+        $near = Find-Text $lines '来一道'
+        if ($near -and [Math]::Abs($near.Y - $anchor.Y) -le 48) { return $near }
+    }
+    return (Find-Exact $lines '来一道')
+}
+
+function Get-TasteCardBox($lines, [bool]$isCompact = $false) {
+    $r = Get-Rect
+    $winW = [int]($r.R - $r.L); $winH = [int]($r.B - $r.T)
+    if ($winW -le 0 -or $winH -le 0) { return $null }
+    $scale = 1.0
+    try { $dpi = [WD]::GetDpiForWindow($script:Win); if ($dpi -gt 0) { $scale = [Math]::Max(1.0, $dpi / 96.0) } } catch { }
+    $padEnd = [int][Math]::Round(16 * $scale)
+    $padBottom = [int][Math]::Round(56 * $scale)
+    $cardW = [Math]::Min($winW, [int][Math]::Round(460 * $scale))
+    $cardH = [Math]::Min([Math]::Max(1, $winH - $padBottom), [int][Math]::Round(460 * $scale))
+    $margin = [int][Math]::Round(12 * $scale)
+    $x2 = [Math]::Min($winW, $winW - $padEnd + $margin)
+    $x1 = [Math]::Max(0, $winW - $padEnd - $cardW - $margin)
+    $y2 = [Math]::Min($winH, $winH - $padBottom + $margin)
+    $y1 = [Math]::Max(0, $winH - $padBottom - $cardH - $margin)
+    if (-not $isCompact) {
+        if ($winW -lt [int](520 * $scale)) { return $null }
+        $compactHit = $false
+        foreach ($needle in @('想先试一道开胃题吗', '不再提示', '允许这本书讲解', '还没开启讲解许可', '选一个答案', '看讲解', '开始读这本书')) {
+            $m = Find-Text $lines $needle
+            if ($m -and $m.X -ge [Math]::Max($x1, [int]($winW * 0.52)) -and $m.X -le $x2 -and $m.Y -ge $y1 -and $m.Y -le $y2) {
+                $compactHit = $true; break
+            }
+        }
+        if (-not $compactHit) { return $null }
+    }
+    [pscustomobject]@{ X1 = $x1; X2 = $x2; Y1 = $y1; Y2 = $y2 }
+}
+
+function Select-TasteCardLines($lines, $cardBox) {
+    if (-not $cardBox) { return @($lines) }
+    return @($lines | Where-Object {
+        $b = Get-LineBox $_
+        $cx = [int](($b.X1 + $b.X2) / 2)
+        $b.X2 -ge $b.X1 -and $cx -ge $cardBox.X1 -and $cx -le $cardBox.X2 -and $b.Y -ge $cardBox.Y1 -and $b.Y -le $cardBox.Y2
+    })
+}
+
+function Find-FirstTasteAllow($lines) {
+    foreach ($s in '允许这本书讲解', '允许这本书') {
+        $m = Find-Exact $lines $s
+        if ($m) { return $m }
+        $m = Find-Text $lines $s
+        if ($m) { return $m }
+    }
+    $hint = Has $lines @('还没开启讲解许可', '开启讲解许可')
+    if (-not $hint) { return $null }
+    $best = $null
+    foreach ($l in $lines) {
+        $t = $l.Text -replace '\s', ''
+        if ($t -notmatch '允许' -or $t -match '不允许|还没允许|允许后|许可') { continue }
+        $b = Get-LineBox $l
+        $y = [int](($b.Y1 + $b.Y2) / 2)
+        if ($y -le $hint.Y) { continue }
+        if (-not $best -or $y -lt $best.Y) {
+            $best = [pscustomobject]@{ X = [int](($b.X1 + $b.X2) / 2); Y = $y; X1 = [int]$b.X1; X2 = [int]$b.X2; Y1 = [int]$b.Y1; Y2 = [int]$b.Y2 }
+        }
+    }
+    return $best
+}
+
+function Get-TasteCardScrollPoint($lines, $cardBox) {
+    if (-not $cardBox) { return (Scroll-Point 0.5 0.7) }
+    $sx = [int](($cardBox.X1 + $cardBox.X2) / 2)
+    $minY = $null; $maxY = $null
+    foreach ($l in $lines) {
+        $b = Get-LineBox $l
+        if ($b.X2 -lt $b.X1) { continue }
+        if ($null -eq $minY -or $b.Y1 -lt $minY) { $minY = $b.Y1 }
+        if ($null -eq $maxY -or $b.Y2 -gt $maxY) { $maxY = $b.Y2 }
+    }
+    $topY = if ($null -ne $minY) { [Math]::Max($cardBox.Y1 + 24, $minY) } else { $cardBox.Y1 + 24 }
+    $botY = if ($null -ne $maxY) { [Math]::Min($cardBox.Y2 - 24, [Math]::Max($maxY, $cardBox.Y2 - 48)) } else { $cardBox.Y2 - 24 }
+    $sy = if ($botY -lt $topY) { [int](($cardBox.Y1 + $cardBox.Y2) / 2) } else { [int](($topY + $botY) / 2) }
+    @($sx, $sy)
+}
+
+function Find-TasteOption($lines, $submit, $cardBox = $null) {
+    $scoped = if ($cardBox) {
+        @($lines | Where-Object {
+            $b = Get-LineBox $_
+            $cx = [int](($b.X1 + $b.X2) / 2)
+            $b.X2 -ge $b.X1 -and $cx -ge $cardBox.X1 -and $cx -le $cardBox.X2 -and $b.Y -ge $cardBox.Y1 -and $b.Y -le $cardBox.Y2
+        })
+    } else { $lines }
+    $hint = Find-Text $scoped '选一个答案'
     $lastRow = $null
-    foreach ($line in $lines) {
+    foreach ($line in $scoped) {
         $box = Get-LineBox $line
         if ($hint -and $box.Y1 -le $hint.Y2) { continue }
         if ($submit -and $box.Y2 -ge $submit.Y1) { continue }
@@ -159,10 +254,14 @@ function Find-TasteVerdict($lines) {
     }
 }
 
-function Test-TasteExplanation($lines, $verdict, $button) {
+function Test-TasteExplanation($lines, $verdict, $button, $cardBox = $null) {
     if (-not $verdict) { return $false }
     foreach ($line in $lines) {
         $box = Get-LineBox $line
+        if ($cardBox) {
+            $cx = [int](($box.X1 + $box.X2) / 2)
+            if ($box.X2 -lt $box.X1 -or $cx -lt $cardBox.X1 -or $cx -gt $cardBox.X2 -or $box.Y -lt $cardBox.Y1 -or $box.Y -gt $cardBox.Y2) { continue }
+        }
         if ($box.Y1 -le $verdict.Y2 -or ($button -and $box.Y2 -ge $button.Y1)) { continue }
         $rawText = ([string]$line.Text).Trim()
         $text = $rawText -replace '\s', ''
@@ -173,16 +272,38 @@ function Test-TasteExplanation($lines, $verdict, $button) {
 }
 
 function Complete-FirstTaste {
-    $point = Scroll-Point 0.5 0.7
     # 选书框关闭后首页可能仍在显示离线说明；说明正文里的「再试一次」不是重试按钮。
     $deadline = (Get-Date).AddSeconds(240)
     $tag = 'taste-after-picker'
+    $isCompact = $false
+    $cardBox = $null
     do {
         $lines = Shot 2 $tag
-        foreach ($action in '再放一次', '再试一次', '先翻开这本书') {
-            if (Find-Exact $lines $action) { Fail 2 "未进入可作答的首题，出现「$action」按钮，见 2-$tag.png" }
+        $tryStrip = Find-FirstTasteTry $lines
+        if ($tryStrip) {
+            $isCompact = $true
+            $cardBox = Get-TasteCardBox $lines $true
+            Click-At $tryStrip.X $tryStrip.Y
+            Start-Sleep -Milliseconds 700
+            $tag = 'taste-question'
+            continue
         }
-        if ((Find-Text $lines '选一个答案') -or (Find-Exact $lines '看讲解')) { break }
+        $cardBox = Get-TasteCardBox $lines $isCompact
+        if ($cardBox) { $isCompact = $true }
+        $cardLines = Select-TasteCardLines $lines $cardBox
+        $allowTaste = Find-FirstTasteAllow $cardLines
+        if ($allowTaste) {
+            Click-At $allowTaste.X $allowTaste.Y
+            Start-Sleep -Milliseconds 800
+            $tag = 'taste-question'
+            continue
+        }
+        if (-not (Has $cardLines @('还没开启讲解许可', '开启讲解许可'))) {
+            foreach ($action in '再放一次', '再试一次', '先翻开这本书') {
+                if (Find-Exact $cardLines $action) { Fail 2 "未进入可作答的首题，出现「$action」按钮，见 2-$tag.png" }
+            }
+        }
+        if ((Find-Text $cardLines '选一个答案') -or (Find-Exact $cardLines '看讲解')) { break }
         if ((Get-Date) -ge $deadline) {
             if (Find-Exact $lines '放进一本书') { Fail 2 "选书后 240 秒仍在空书架，见 2-$tag.png" }
             Fail 2 "选书后 240 秒未进入可作答的首题，见 2-$tag.png"
@@ -193,9 +314,13 @@ function Complete-FirstTaste {
     $option = $null
     foreach ($attempt in 1..16) {
         $lines = Shot 2 "taste-options$attempt"
-        $submit = Find-Exact $lines '看讲解'
-        $option = Find-TasteOption $lines $submit
+        $cardBox = Get-TasteCardBox $lines $isCompact
+        if ($cardBox) { $isCompact = $true }
+        $cardLines = Select-TasteCardLines $lines $cardBox
+        $submit = Find-Exact $cardLines '看讲解'
+        $option = Find-TasteOption $cardLines $submit $cardBox
         if ($option) { break }
+        $point = Get-TasteCardScrollPoint $cardLines $cardBox
         Scroll-At $point[0] $point[1] -3
         Start-Sleep -Milliseconds 500
     }
@@ -203,8 +328,13 @@ function Complete-FirstTaste {
     Click-At ([int](($option.X1 + $option.X2) / 2)) $option.Y
     foreach ($attempt in 1..16) {
         Start-Sleep -Milliseconds 500
-        $submit = Find-Exact (Shot 2 "taste-submit$attempt") '看讲解'
+        $lines = Shot 2 "taste-submit$attempt"
+        $cardBox = Get-TasteCardBox $lines $isCompact
+        if ($cardBox) { $isCompact = $true }
+        $cardLines = Select-TasteCardLines $lines $cardBox
+        $submit = Find-Exact $cardLines '看讲解'
         if ($submit) { break }
+        $point = Get-TasteCardScrollPoint $cardLines $cardBox
         Scroll-At $point[0] $point[1] -3
     }
     if (-not $submit) { Fail 2 '选答后找不到「看讲解」，见 2-taste-submit*.png' }
@@ -215,13 +345,17 @@ function Complete-FirstTaste {
     $sawExplanation = $false
     foreach ($attempt in 1..20) {
         $lines = Shot 2 "taste-explanation$attempt"
-        $verdict = Find-TasteVerdict $lines
-        $button = Find-Exact $lines '开始读这本书'
-        if (Test-TasteExplanation $lines $verdict $button) { $sawExplanation = $true }
+        $cardBox = Get-TasteCardBox $lines $isCompact
+        if ($cardBox) { $isCompact = $true }
+        $cardLines = Select-TasteCardLines $lines $cardBox
+        $verdict = Find-TasteVerdict $cardLines
+        $button = Find-Exact $cardLines '开始读这本书'
+        if (Test-TasteExplanation $cardLines $verdict $button $cardBox) { $sawExplanation = $true }
         if ($sawExplanation -and $button) {
             Click-At $button.X $button.Y
             return
         }
+        $point = Get-TasteCardScrollPoint $cardLines $cardBox
         if ($sawExplanation -or $verdict) { Scroll-At $point[0] $point[1] -2 }
         else { Scroll-At $point[0] $point[1] 4 }
         Start-Sleep -Milliseconds 500
@@ -443,16 +577,65 @@ function Hover([int]$x, [int]$y) {
 # 要顶栏上的按钮，先沿着顶边挪两下把它叫回来，认到「书架」或「目录」再把这一帧交出去。
 function Show-ReaderTop([int]$n, [string]$tag, [int]$Tries = 6) {
     $r = Get-Rect
-    $w = [int]($r.R - $r.L)
+    $w = [int]($r.R - $r.L); $h = [int]($r.B - $r.T)
     $x = [int]($w / 2)
+    $baseY = 36
     for ($k = 0; $k -lt $Tries; $k++) {
-        Hover $x (36 + 8 * $k)
+        Hover $x ($baseY + 8 * $k)
         Start-Sleep -Milliseconds 500
         $lines = Shot $n "$tag-top$k"
-        if (Find-Text $lines '书架') { return $lines }
-        if (Find-Text $lines '目录') { return $lines }
+        if (Find-Step2ReaderBack $lines $w $h) { return $lines }
+        $toc = Find-Text $lines '目录'
+        if ($toc -and $toc.X -le ($w / 2) -and $toc.Y -le 280 -and ((Find-OnRow $lines '伴读' $toc 22) -or (Find-OnRow $lines '收起' $toc 22))) {
+            return $lines
+        }
+        foreach ($needle in @('正在读取教材', '正在准备教材', '取消导入')) {
+            $b = Find-Text $lines $needle
+            if ($b -and $b.Y2 -ge $baseY -and $b.Y2 -lt 220) {
+                $baseY = [Math]::Max($baseY, [int]($b.Y2 + 16))
+                break
+            }
+        }
     }
     $null
+}
+function Find-Step2ReaderBack($lines, [int]$winW, [int]$winH = 0) {
+    if (-not $lines) { return $null }
+    $scale = 1.0
+    try { $dpi = [WD]::GetDpiForWindow($script:Win); if ($dpi -gt 0) { $scale = [Math]::Max(1.0, $dpi / 96.0) } } catch { }
+    $banner = $null
+    $bannerMaxY = [int][Math]::Round(180 * $scale)
+    foreach ($needle in @('正在读取教材', '正在准备教材', '取消导入')) {
+        $b = Find-Text $lines $needle
+        if ($b -and $b.Y -le $bannerMaxY) { $banner = $b; break }
+    }
+    $baseMaxY = [int][Math]::Round(150 * $scale)
+    $maxY = if ($banner) {
+        [Math]::Max($baseMaxY, [Math]::Min([int]($banner.Y2 + [Math]::Round(120 * $scale)), [int][Math]::Round(280 * $scale)))
+    } else {
+        $baseMaxY
+    }
+    if ($winH -gt 0) { $maxY = [Math]::Min($maxY, [int]($winH * 0.40)) }
+    $cands = @()
+    foreach ($l in $lines) {
+        $m = Find-Text @($l) '书架'
+        if (-not $m) { continue }
+        if ($m.X -gt ($winW / 3)) { continue }
+        if ($m.Y -gt $maxY) { continue }
+        if ($banner -and $m.Y -le $banner.Y1) { continue }
+        $compact = ($l.Text -replace '\s', '')
+        $isToolbarLabel = ($compact -match '^(?:[←<+\-·•]*)?书架$') -or ($compact -match '书架.*(?:目录|伴读|收起)')
+        if (-not $isToolbarLabel) { continue }
+        $cands += $m
+    }
+    if (-not $cands.Count) { return $null }
+    foreach ($c in ($cands | Sort-Object Y)) {
+        foreach ($peer in @('目录', '伴读', '收起')) {
+            $hit = Find-OnRow $lines $peer $c 22
+            if ($hit -and $hit.X -gt $c.X) { return $c }
+        }
+    }
+    return $null
 }
 # Locate controls inside the open question-mode dialog, ignoring the background toolbar button and hint copy.
 function Get-QuestionSettingsControls($lines) {
@@ -719,26 +902,27 @@ function Get-AskScrollDir([bool]$sawLoading, [int]$step) {
 # 一帧读成「允许百甫」、一帧读成「允许并讲鱈」。所以「框在不在」「截到的是不是那一下」
 # 都不能只认一个整词，也不能只拿一帧判死。
 function Test-ConsentUp($lines) {
-    foreach ($s in '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
+    foreach ($s in '允许这本书讲解', '还没允许讲解', '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
         if (Find-Text $lines $s) { return $true }
     }
     return $false
 }
-# 同意按钮的落点：先认整词，再认「允许并」（吃掉末两字的错字），最后退到「标题下面含「允许」、
-# 又不是「不允许」」的那一行（「允许百甫」这种第 3 个字也认错的只剩这条路）。
+# 同意按钮的落点：先认整词（含 PR #791 原地一键允许「允许这本书讲解」与旧版「允许并讲解」），
+# 再认「允许这本书」「允许并」（吃掉末字错字），最后退到「标题下面含「允许」、又不是「不允许 / 还没允许」」的那一行。
 function Find-ConsentAllow($lines) {
-    foreach ($s in '允许并讲解', '允许并') {
+    foreach ($s in '允许这本书讲解', '允许这本书', '允许并讲解', '允许并') {
         $m = Find-Text $lines $s
         if ($m) { return $m }
     }
     $title = Find-Text $lines '这段原文会发到哪里'
+    if (-not $title) { $title = Find-Text $lines '还没允许讲解' }
     # 退化到这一条时必须有标题做锚：没有标题就没法区分「框里的允许」和正文里的「允许」，
     # 宁可不点（外面 Click-Confirm 会重拍新帧再找）也不往正文上点。
     if (-not $title) { return $null }
     $best = $null
     foreach ($l in $lines) {
         $t = $l.Text -replace '\s', ''
-        if ($t -notmatch '允许' -or $t -match '不允许') { continue }
+        if ($t -notmatch '允许' -or $t -match '不允许|还没允许') { continue }
         $b = Get-LineBox $l
         $y = [int](($b.Y1 + $b.Y2) / 2)
         if ($y -le $title.Y) { continue }
@@ -754,7 +938,7 @@ function Find-ConsentAllow($lines) {
 function Test-ConsentGone($lines) {
     if (Find-Text $lines '思考') { return $true }
     if (Find-Text $lines '出处') { return $true }
-    foreach ($s in '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
+    foreach ($s in '允许这本书讲解', '还没允许讲解', '允许并讲解', '这段原文会发到哪里', '不允许', '允许并') {
         if (Find-Text $lines $s) { return $false }
     }
     return $true
@@ -1638,10 +1822,10 @@ try {
         Hover $midX $hoverY; Start-Sleep -Milliseconds 600
         $lines = Shot 2 $(if ($tries -eq 1) { 'imported' } else { "imported$tries" })
         # 只有云端书卡时，顶栏导入仍可能触发首次做题引导；以选书后的真实页面为准。
-        if (-not $firstOpen -and ((Find-Text $lines '选一个答案') -or
-            (Find-Text $lines '正在用开头几章') -or (Find-Exact $lines '看讲解') -or
-            (Find-Exact $lines '再放一次') -or (Find-Exact $lines '再试一次') -or
-            (Find-Exact $lines '先翻开这本书'))) {
+        if (-not $firstOpen -and ((Find-FirstTasteTry $lines) -or (Find-FirstTasteAllow $lines) -or
+            (Find-Text $lines '选一个答案') -or (Find-Text $lines '正在用开头几章') -or
+            (Find-Exact $lines '看讲解') -or (Find-Exact $lines '再放一次') -or
+            (Find-Exact $lines '再试一次') -or (Find-Exact $lines '先翻开这本书'))) {
             $firstOpen = $true
             Complete-FirstTaste
             $deadline = (Get-Date).AddSeconds(150)
@@ -1661,8 +1845,9 @@ try {
         foreach ($try in 1..3) {
             $frame = Shot 2 "before-back$try"
             if (Test-Step2Home $frame) { $homeFrame = $frame; break }
-            $back = Find-Text (Show-ReaderTop 2 "back$try" 3) '书架'
-            if (-not $back -or $back.X -gt $winW / 3 -or $back.Y -gt 150) { continue }
+            $topLines = Show-ReaderTop 2 "back$try" 3
+            $back = Find-Step2ReaderBack $topLines $winW $winH
+            if (-not $back) { Start-Sleep -Seconds 1; continue }
             Click-At ([int]$back.X) ([int]$back.Y); Start-Sleep -Milliseconds 1200
             $frame = Shot 2 "after-back$try"
             if (Test-Step2Home $frame) { $homeFrame = $frame; break }
@@ -1823,16 +2008,16 @@ try {
         Note "第 4 步第 $try 次点「讲讲」后伴读抽屉没打开，重定位再点"
     }
     # 同意框有时要十几秒才弹（后台先把这段原文送出去），点完状态没变也再宽限一次，别比原来等得还短。
-    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许并讲解', '这段原文会发到哪里', '不允许', '正在整理', '引文') 15) }
+    if (-not $started) { $started = [bool](Await-Text 4 'explain-late' @('允许这本书讲解', '还没允许讲解', '允许并讲解', '这段原文会发到哪里', '不允许', '正在整理', '引文') 15) }
     if (-not $started) { Fail 4 '点了三次「讲讲」伴读抽屉都没打开（见 4-confirm*.png）' }
     # 这一帧是不是同意框：按钮标签会被 OCR 认错字（11-21 05:58 L1 在这一帧读成「允许并讲鱈」，
     # 只认「允许并讲解」就整段跳过、后面空等 120 秒），所以标题和「不允许」也认。
     if (Test-ConsentUp (Shot 4 'consent')) {
         # 这本书第一次讲解要先同意；框没关就是没点上，按新一帧重定位再点（开发验收允许点）。
-        # 落点用 Find-ConsentAllow（整词 → 「允许并」→ 标题下面含「允许」的那一行），
+        # 落点用 Find-ConsentAllow（兼容「允许这本书讲解」与旧版「允许并讲解」），
         # 「关没关」用 Test-ConsentGone（标题和两个按钮都不在），两边都不靠单个整词。
         $allowed = Click-Confirm 4 { param($l) Find-ConsentAllow $l } { param($l) Test-ConsentGone $l } -tries 3 -waitSec 6 -pauseMs 800
-        if (-not $allowed) { Fail 4 '同意框里的「允许并讲解」点了三次框都没关（见 4-consent*.png）' }
+        if (-not $allowed) { Fail 4 '同意框里的「允许这本书讲解 / 允许并讲解」点了三次框都没关（见 4-consent*.png）' }
     }
     $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0
     $failWords = @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没顾上', '没讲成', '没有得到可核对', '出处无法核对', '没有可核对的讲解', '连接已更换', '还没配对', '额度', '选中追问格式不对', '保存页', '这一节太长', '请先导入自己的书')
@@ -2033,7 +2218,7 @@ try {
         while ((Get-Date) -lt $deadline -and -not $cite) {
             Start-Sleep -Milliseconds $(if ($upSteps -gt 0) { 400 } else { 2000 }); $i++
             $lines = Shot 4 "ask-wait$i"
-            $allow = Has $lines @('允许并讲解')
+            $allow = Has $lines @('允许这本书讲解', '允许并讲解')
             if ($allow) { Click-At $allow.X $allow.Y; continue }
             $serviceError = Get-PassageServiceError $lines
             if ($serviceError) { throw "服务回了拒绝：$serviceError" }

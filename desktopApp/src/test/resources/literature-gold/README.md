@@ -31,7 +31,13 @@ With the offset-crop pages added, `e4db45c6` recovered 5/16 body sentences on th
 
 On the six printed-notes pages, `6c027723` recovered 60/60 body sentences and admitted all 12 notes. The combined baseline was 219/219 and 12 leaks.
 
+On the six image-text pages, `81211ba9` recovered 60/60 body sentences and admitted all 12 notes. The combined baseline was 279/279 and 12 leaks.
+
 ## Private PDF acceptance
+
+To inspect optical footnote routing on specific pages of a local PDF, run
+`tools/dev/heavy --local ./gradlew :desktopApp:literatureGoldAudit --args='--layout 8,20,22,26 "local.pdf"'`.
+Each row reports the route, glyph counts, estimated crop coverage by raster images (per thousand), columns checked, raster availability and the number of additional words marked by the printed-footer check. The report contains no page text. The `image_text` route uses the existing text layer for reading order and anchors.
 
 On the machine holding the originals, annotate all sentences and non-body fragments on each selected page. Store one UTF-8 TSV per input file named `<SHA-256 of original PDF bytes>.tsv` in a local directory. Columns are role, one-based PDF page, zero-based UTF-16 start, exclusive UTF-16 end, and lowercase SHA-256 of the exact UTF-8 encoded substring of `literatureBook` page text. Omit a header. This uses the same page text and offsets as the application's guide anchors.
 

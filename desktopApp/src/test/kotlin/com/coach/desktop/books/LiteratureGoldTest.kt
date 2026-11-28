@@ -4,10 +4,42 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.text.Normalizer
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class LiteratureGoldTest {
     private data class Label(val page: Int, val role: String, val sentence: String)
+
+    @Test fun pageImagesWithOrdinaryTextUseThePrintedFooterCheckInEitherPaintOrder() {
+        val path = Path.of(checkNotNull(javaClass.getResource("/literature-gold/image-text.pdf")).toURI())
+        BookPdfLoader.read(path.toFile()) { pdf ->
+            // All six pages have identical native text. The illustration control supplies the reader offsets.
+            val controlText = LiteraturePdfLayout.extract(pdf, 4).map { it.text }
+            for (page in 1..pdf.numberOfPages) {
+                val traces = mutableListOf<LiteraturePdfLayout.FootnoteLayoutTrace>()
+                val regions = LiteraturePdfLayout.extract(pdf, page) { traces += it }
+                assertEquals(controlText, regions.map { it.text }, "Native text and offsets on page $page")
+                val trace = traces.single()
+                assertEquals(0, trace.hiddenGlyphs)
+                if (page <= 3) {
+                    assertEquals("image_text", trace.route)
+                    assertTrue(trace.checkedColumns > 0 && trace.addedNoteWords > 0, "Page $page: $trace")
+                    assertEquals("available", trace.render)
+                } else {
+                    assertEquals("text_only", trace.route)
+                    assertEquals(0, trace.checkedColumns)
+                    assertEquals("not_requested", trace.render)
+                }
+            }
+            // Changing the same page's display rotation must preserve the reading-coordinate spans.
+            fun spans() = LiteraturePdfLayout.extract(pdf, 1).map { it.text to it.footnoteRanges }
+            val original = spans()
+            for (turn in listOf(90, 180, 270)) {
+                pdf.getPage(0).rotation = turn
+                assertEquals(original, spans(), "Rotation $turn")
+            }
+        }
+    }
 
     @Test fun quoteCropCoversTheVisibleLineOnBothCroppedScans() {
         val path = Path.of(checkNotNull(javaClass.getResource("/literature-gold/offset-crop.pdf")).toURI())

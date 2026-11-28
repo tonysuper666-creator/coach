@@ -552,7 +552,57 @@ internal object LiteraturePdfLayout {
     private data class Word(val text: String, val x: Float, val right: Float, val y: Float, val height: Float, val pointSize: Float)
     private data class Row(val y: Float, val words: MutableList<Word> = mutableListOf())
     private data class DrawnRule(val displayY: Float, val minX: Float, val maxX: Float)
-    private data class PageGraphics(val rules: List<DrawnRule> = emptyList(), val textBehindScan: Boolean = false)
+    private data class PageGraphics(val rules: List<DrawnRule> = emptyList(), val textBehindScan: Boolean = false,
+                                   val images: PageImageCoverage? = null)
+    /** Union of visible image placements, sampled in unrotated CropBox coordinates.
+     * A tile boundary or a repeated image never counts the same area twice. */
+    private class PageImageCoverage(private val crop: BookPdfRectangle) {
+        private val grid = 32
+        private val covered = BooleanArray(grid * grid)
+        private var count = 0
+        val permille: Int get() = count * 1000 / covered.size
+        val pageSized: Boolean get() = count * 5 >= covered.size * 4
+
+        fun add(image: BookPdfImage, origin: BookPdfPoint, across: BookPdfPoint, up: BookPdfPoint,
+                visible: (Double, Double) -> Boolean) {
+            if (count == covered.size) return
+            val dx = (across.x - origin.x).toDouble()
+            val dy = (across.y - origin.y).toDouble()
+            val ex = (up.x - origin.x).toDouble()
+            val ey = (up.y - origin.y).toDouble()
+            val det = dx * ey - dy * ex
+            // A flat-colour pixel stretched over a page cannot resolve printed type.
+            if (!det.isFinite() || abs(det) < 0.001 || 4.0 * image.width * image.width < dx * dx + dy * dy ||
+                4.0 * image.height * image.height < ex * ex + ey * ey) return
+            for (row in 0 until grid) {
+                val y = crop.lowerLeftY + (row + 0.5) * crop.height / grid
+                for (col in 0 until grid) {
+                    val cell = row * grid + col
+                    if (covered[cell]) continue
+                    val x = crop.lowerLeftX + (col + 0.5) * crop.width / grid
+                    val u = ((x - origin.x) * ey - (y - origin.y) * ex) / det
+                    val v = (dx * (y - origin.y) - dy * (x - origin.x)) / det
+                    if (u in 0.0..1.0 && v in 0.0..1.0 && visible(x, y)) {
+                        covered[cell] = true
+                        count++
+                    }
+                }
+            }
+        }
+
+        fun covers(word: Word, direction: Int): Boolean {
+            val x = (word.x + word.right) / 2
+            val y = word.y - word.height / 2
+            val (u, v) = when (direction) {
+                90 -> y / crop.width to x / crop.height
+                180 -> 1 - x / crop.width to y / crop.height
+                270 -> 1 - y / crop.width to 1 - x / crop.height
+                else -> x / crop.width to 1 - y / crop.height
+            }
+            if (u !in 0f..1f || v !in 0f..1f) return false
+            return covered[(v * grid).toInt().coerceAtMost(grid - 1) * grid + (u * grid).toInt().coerceAtMost(grid - 1)]
+        }
+    }
     private data class RuleSub(val minX: Double, val minY: Double, val maxX: Double, val maxY: Double)
     private val folio = Regex("""(?i)^(?:p(?:age)?\.?\s*)?(\d{1,4}|[ivxlcdm]{1,6})$""")
     private val textRule = Regex("""^[_\-=–—―\s]{4,}$""")
@@ -922,7 +972,7 @@ internal object LiteraturePdfLayout {
         private val source = pdf.getPage(page - 1)
         val rotation = Math.floorMod(source.rotation, 360)
         private val turn = Math.floorMod(rotation - direction, 360)
-        val horizontal = direction % 180 == 0 && turn % 180 == 0
+        private val quarterTurn = turn == 90 || turn == 270
         val scale = minOf(4f, 3000f / maxOf(source.cropBox.width, source.cropBox.height))
         private val rendered = lazy {
             if (source.cropBox.width <= 0 || source.cropBox.height <= 0) null
@@ -935,9 +985,20 @@ internal object LiteraturePdfLayout {
             }
         }
         val bitmap: BookBitmap? get() = rendered.value
+        val renderState: String get() = when {
+            !rendered.isInitialized() -> "not_requested"
+            bitmap == null -> "unavailable"
+            else -> "available"
+        }
 
-        fun ink(image: BookBitmap, x: Int, y: Int): Boolean =
-            if (turn == 180) darkPixel(image, image.width - 1 - x, image.height - 1 - y) else darkPixel(image, x, y)
+        fun readingWidth(image: BookBitmap) = if (quarterTurn) image.height else image.width
+        fun readingHeight(image: BookBitmap) = if (quarterTurn) image.width else image.height
+        fun ink(image: BookBitmap, x: Int, y: Int): Boolean = when (turn) {
+            90 -> darkPixel(image, image.width - 1 - y, x)
+            180 -> darkPixel(image, image.width - 1 - x, image.height - 1 - y)
+            270 -> darkPixel(image, y, image.height - 1 - x)
+            else -> darkPixel(image, x, y)
+        }
 
         override fun close() {
             if (rendered.isInitialized()) bitmap?.let(::releaseBookBitmap)
@@ -951,8 +1012,8 @@ internal object LiteraturePdfLayout {
     private fun printedHeight(row: List<Word>, scan: ScanPage, image: BookBitmap): Float? {
         val heights = row.filter { it.text.length >= 3 }.sortedByDescending { it.right - it.x }.take(5).mapNotNull { w ->
             val x0 = (w.x * scan.scale).toInt().coerceAtLeast(0)
-            val x1 = (w.right * scan.scale).toInt().coerceAtMost(image.width - 1)
-            val y1 = (w.y * scan.scale).toInt().coerceAtMost(image.height - 1)
+            val x1 = (w.right * scan.scale).toInt().coerceAtMost(scan.readingWidth(image) - 1)
+            val y1 = (w.y * scan.scale).toInt().coerceAtMost(scan.readingHeight(image) - 1)
             val y0 = ((w.y - w.pointSize) * scan.scale).toInt().coerceAtLeast(0)
             if (x1 <= x0 || y1 <= y0) return@mapNotNull null
             val xs = x0..x1 step maxOf(1, (x1 - x0) / 36)
@@ -968,11 +1029,11 @@ internal object LiteraturePdfLayout {
                             top: Float, bottom: Float, em: Float): Boolean {
         val step = maxOf(1, scan.scale.toInt())
         val x0 = (left * scan.scale).toInt().coerceAtLeast(0)
-        val x1 = (right * scan.scale).toInt().coerceAtMost(image.width - 1)
+        val x1 = (right * scan.scale).toInt().coerceAtMost(scan.readingWidth(image) - 1)
         val clearance = maxOf(2, (em * scan.scale * 0.18f).toInt())
         val minRun = maxOf(em * 4, (right - left) * 0.12f) * scan.scale
         val y0 = (top * scan.scale).toInt().coerceAtLeast(clearance)
-        val y1 = (bottom * scan.scale).toInt().coerceAtMost(image.height - 1 - clearance)
+        val y1 = (bottom * scan.scale).toInt().coerceAtMost(scan.readingHeight(image) - 1 - clearance)
         for (y in y0..y1) {
             var run = 0
             for (x in x0..x1 step step) {
@@ -1044,10 +1105,10 @@ internal object LiteraturePdfLayout {
         // Some OCR layers put a superscript on the prose baseline and even read it
         // as a letter. Check that the mark is printed above a clear baseline strip.
         val xs = (mark.x * scan.scale).toInt().coerceAtLeast(0)..
-            (mark.right * scan.scale).toInt().coerceAtMost(image.width - 1)
+            (mark.right * scan.scale).toInt().coerceAtMost(scan.readingWidth(image) - 1)
         val baseline = (word.y * scan.scale).toInt()
         val top = ((word.y - em) * scan.scale).toInt()
-        if (top < 0 || baseline >= image.height) return false
+        if (top < 0 || baseline >= scan.readingHeight(image)) return false
         val lower = maxOf(top, baseline - maxOf(1, (em * 0.13f * scan.scale).toInt()))
         fun hasInk(y: Int) = xs.any { x -> scan.ink(image, x, y) }
         return (lower..baseline).none(::hasInk) && (top until lower).any(::hasInk)
@@ -1111,7 +1172,11 @@ internal object LiteraturePdfLayout {
         return tx in -tolX..(crop.width + tolX) && ty in -tolY..(crop.height + tolY)
     }
 
-    fun extract(pdf: BookPdfDocument, page: Int): List<GuideRegion> {
+    internal data class FootnoteLayoutTrace(val route: String, val glyphs: Int, val hiddenGlyphs: Int,
+                                            val imagePermille: Int, val checkedColumns: Int, val render: String,
+                                            val addedNoteWords: Int)
+
+    fun extract(pdf: BookPdfDocument, page: Int, trace: ((FootnoteLayoutTrace) -> Unit)? = null): List<GuideRegion> {
         val pdfPage = pdf.getPage(page - 1)
         val crop = pdfPage.cropBox
         val graphics = pageGraphics(pdfPage)
@@ -1178,7 +1243,11 @@ internal object LiteraturePdfLayout {
         stripper.endPage = page
         stripper.sortByPosition = true
         stripper.writeText(pdf, StringWriter())
-        if (words.isEmpty()) return emptyList()
+        val images = graphics.images
+        if (words.isEmpty()) {
+            trace?.invoke(FootnoteLayoutTrace("no_text", glyphs, hiddenGlyphs, images?.permille ?: 0, 0, "not_requested", 0))
+            return emptyList()
+        }
 
         val rows = mutableListOf<Row>()
         for (w in words.sortedBy { it.y }) {
@@ -1322,16 +1391,33 @@ internal object LiteraturePdfLayout {
             }
             else -> emptyList()
         }
-        val scan = if (scanLayer) ScanPage(pdf, page, textDirection) else null
+        // The printed-footer check also applies to page images carrying ordinary PDF
+        // text. Keep that text's original reading order, punctuation and offsets.
+        val imageText = images?.pageSized == true
+        val scan = if (scanLayer || imageText) ScanPage(pdf, page, textDirection) else null
         val noteWords = HashSet<Word>()
+        var checkedColumns = 0
+        var addedNoteWords = 0
         val punctuation = scan.use {
             for (slices in rawSlices.groupBy { it.side }.values) {
                 val members = slices.flatMapTo(HashSet()) { it.words }
                 val physical = rows.mapNotNull { row -> row.words.filter { it in members }.takeIf { it.isNotEmpty() } }
                 noteWords += columnNotes(physical, readingRules, scanLayer)
-                if (scan != null && scan.horizontal) noteWords += printedFooter(physical, scan, noteWords)
+                if (scan != null) {
+                    checkedColumns++
+                    val footer = printedFooter(physical, scan, noteWords)
+                    if (scanLayer || footer.all { word -> images?.covers(word, textDirection) == true }) {
+                        val before = noteWords.size
+                        noteWords += footer
+                        addedNoteWords += noteWords.size - before
+                    }
+                }
             }
-            if (scan == null) emptyMap() else scanPunctuation(scan, rows)
+            val marks = if (scanLayer && scan != null) scanPunctuation(scan, rows) else emptyMap()
+            trace?.invoke(FootnoteLayoutTrace(
+                if (scanLayer) "scan_layer" else if (imageText) "image_text" else "text_only",
+                glyphs, hiddenGlyphs, images?.permille ?: 0, checkedColumns, scan?.renderState ?: "not_requested", addedNoteWords))
+            marks
         }
         return rawSlices.mapNotNull { slice ->
             val stops = mutableSetOf<Int>()
@@ -1450,14 +1536,17 @@ internal object LiteraturePdfLayout {
      * A page with unreadable graphics can still be classified by its note markers.
      */
     private fun pageGraphics(pdfPage: BookPdfPage): PageGraphics {
-        if (Math.floorMod(pdfPage.rotation, 180) != 0) return PageGraphics()
+        val horizontalPage = Math.floorMod(pdfPage.rotation, 180) == 0
         val crop = pdfPage.cropBox
         if (crop.width <= 0f || crop.height <= 0f) return PageGraphics()
         return try {
             val found = mutableListOf<DrawnRule>()
+            val images = PageImageCoverage(crop)
             var sawText = false
             var textBehindScan = false
             object : BookPdfGraphicsEngine(pdfPage) {
+                private var path = BookPdfClipPath()
+                private var pendingClip: BookPdfFillRule? = null
                 private val subs = mutableListOf<RuleSub>()
                 private var minX = 0.0
                 private var minY = 0.0
@@ -1496,32 +1585,44 @@ internal object LiteraturePdfLayout {
                     for (sub in subs) {
                         val width = sub.maxX - sub.minX
                         val height = sub.maxY - sub.minY
-                        if (width >= 24.0 && height <= 3.0 && width >= height * 8.0) {
+                        if (horizontalPage && width >= 24.0 && height <= 3.0 && width >= height * 8.0) {
                             val center = ((sub.minY + sub.maxY) / 2.0).toFloat()
                             found += DrawnRule(crop.upperRightY - center, sub.minX.toFloat() - crop.lowerLeftX, sub.maxX.toFloat() - crop.lowerLeftX)
                         }
                     }
-                    subs.clear()
+                    discard()
                 }
                 private fun discard() {
+                    pendingClip?.let { applyBookClip(graphicsState, path, it) }
+                    pendingClip = null
+                    path.reset()
                     open = false
                     subs.clear()
                 }
                 override fun moveTo(x: Float, y: Float) {
+                    path.moveTo(x, y)
                     begin(x.toDouble(), y.toDouble())
                     current = newBookPdfPoint(x, y)
                     subpath = current
                 }
                 override fun lineTo(x: Float, y: Float) {
+                    path.lineTo(x, y)
                     point(x.toDouble(), y.toDouble())
                     current = newBookPdfPoint(x, y)
                 }
                 override fun curveTo(x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) {
+                    path.addCurve(x1, y1, x2, y2, x3, y3)
                     point(x1.toDouble(), y1.toDouble())
                     point(x2.toDouble(), y2.toDouble())
-                    lineTo(x3, y3)
+                    point(x3.toDouble(), y3.toDouble())
+                    current = newBookPdfPoint(x3, y3)
                 }
                 override fun appendRectangle(a: BookPdfPoint, b: BookPdfPoint, c: BookPdfPoint, d: BookPdfPoint) {
+                    path.moveTo(a.x.toFloat(), a.y.toFloat())
+                    path.lineTo(b.x.toFloat(), b.y.toFloat())
+                    path.lineTo(c.x.toFloat(), c.y.toFloat())
+                    path.lineTo(d.x.toFloat(), d.y.toFloat())
+                    path.closeContour()
                     closeSub()
                     val xs = listOf(a.x, b.x, c.x, d.x).map { it.toDouble() }
                     val ys = listOf(a.y, b.y, c.y, d.y).map { it.toDouble() }
@@ -1533,12 +1634,16 @@ internal object LiteraturePdfLayout {
                 override fun fillPath(windingRule: BookPdfFillRule) = commit()
                 override fun fillAndStrokePath(windingRule: BookPdfFillRule) = commit()
                 override fun endPath() = discard()
-                override fun closePath() { current = subpath }
+                override fun closePath() { path.closeContour(); current = subpath }
                 override fun getCurrentPoint(): BookPdfPoint = current
-                override fun clip(windingRule: BookPdfFillRule) {}
+                override fun clip(windingRule: BookPdfFillRule) { pendingClip = windingRule }
                 override fun shadingFill(shadingName: BookPdfName) {}
                 override fun showForm(form: BookPdfForm) {
                     val saved = subs.toList()
+                    val savedPath = path
+                    val savedClip = pendingClip
+                    val savedPoint = current
+                    val savedSubpath = subpath
                     val savedOpen = open
                     val savedMinX = minX
                     val savedMinY = minY
@@ -1546,9 +1651,15 @@ internal object LiteraturePdfLayout {
                     val savedMaxY = maxY
                     subs.clear()
                     open = false
+                    path = BookPdfClipPath()
+                    pendingClip = null
                     try {
                         super.showForm(form)
                     } finally {
+                        path = savedPath
+                        pendingClip = savedClip
+                        current = savedPoint
+                        subpath = savedSubpath
                         subs.clear()
                         subs.addAll(saved)
                         open = savedOpen
@@ -1566,13 +1677,18 @@ internal object LiteraturePdfLayout {
                     super.showText(string)
                 }
                 override fun drawImage(image: BookPdfImage) {
+                    val matrix = graphicsState.currentTransformationMatrix
+                    if (graphicsState.nonStrokeAlphaConstant > 0 && !image.isStencil) {
+                        val clip = graphicsState.currentClippingPath
+                        images.add(image, matrix.transformPoint(0f, 0f), matrix.transformPoint(1f, 0f),
+                            matrix.transformPoint(0f, 1f)) { x, y -> bookClipContains(clip, x, y) }
+                    }
                     // Some scan producers paint the facsimile over ordinary fill-mode
                     // OCR. A background painted before the text must not enable scan mode.
-                    if (!sawText || image !is BookPdfImageObject || image.isStencil ||
+                    if (!horizontalPage || !sawText || image !is BookPdfImageObject || image.isStencil ||
                         image.width < crop.width || image.height < crop.height ||
                         graphicsState.nonStrokeAlphaConstant < 1.0 || graphicsState.softMask != null ||
                         image.cosObject.containsKey("SMask") || image.cosObject.containsKey("Mask")) return
-                    val matrix = graphicsState.currentTransformationMatrix
                     if (abs(matrix.shearX) > 0.01f || abs(matrix.shearY) > 0.01f) return
                     val a = matrix.transformPoint(0f, 0f)
                     val b = matrix.transformPoint(1f, 1f)
@@ -1582,7 +1698,7 @@ internal object LiteraturePdfLayout {
                     }
                 }
             }.processPage(pdfPage)
-            PageGraphics(found, textBehindScan)
+            PageGraphics(found, textBehindScan, images)
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
             PageGraphics()

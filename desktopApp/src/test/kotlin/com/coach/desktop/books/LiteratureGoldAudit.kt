@@ -10,6 +10,19 @@ object LiteratureGoldAudit {
 
     @JvmStatic fun main(args: Array<String>) {
         require(args.size >= 2) { "Expected a label directory followed by one or more local PDFs" }
+        if (args[0] == "--layout") {
+            require(args.size == 3) { "Expected comma-separated PDF pages followed by one local PDF" }
+            val pages = args[1].split(',').map(String::toInt).distinct()
+            BookPdfLoader.read(Path.of(args[2]).toFile()) { pdf ->
+                require(pages.all { it in 1..pdf.numberOfPages }) { "Requested page outside the PDF" }
+                println("page\troute\tglyphs\thidden\timage_permille\tchecked_columns\trender\tadded_note_words")
+                for (page in pages) LiteraturePdfLayout.extract(pdf, page) { trace ->
+                    println(listOf(page, trace.route, trace.glyphs, trace.hiddenGlyphs, trace.imagePermille,
+                        trace.checkedColumns, trace.render, trace.addedNoteWords).joinToString("\t"))
+                }
+            }
+            return
+        }
         val root = Files.createTempDirectory("literature-audit")
         try {
             System.setProperty("user.home", root.toString())

@@ -439,6 +439,151 @@ internal object StanceClaimSupport {
         return checkChineseClaimAgainstEnglishEvidence(toSimplified(evidenceQuote), claimText)
     }
 
+    /** 英文归属框架词干（仅允许描述书中说法，绝不收动作、资产、行业、时间、结果类词）。 */
+    private val enHighRiskFramingStems: Set<String> = setOf(
+        "book", "text", "passage", "author", "section", "chapter", "original", "verse",
+        "line", "commentary", "phrase", "term", "word", "image", "symbol", "emblem",
+        "metaphor", "meaning", "mean", "sense", "say", "state", "describe", "explain",
+        "mention", "note", "define", "present", "refer", "treat", "write", "depict",
+        "call", "frame", "use", "represent", "symbolize", "indicate", "denote", "signify",
+        "express", "illustrate", "show", "read", "quote", "cite", "gloss", "literal",
+        "literary", "concept", "idea", "principle", "system",
+    )
+
+    /**
+     * 高危直接回答的 100% 白名单全覆盖核验（TON-1982 第二次退回范围裁定第 1 条）：
+     * 去掉归属框架词后，每个实词/实字都必须来自本句所引原句（不再按比例放行）：
+     * - 中文对中文：每个非停用汉字必须在所引原句（繁简归一）、原句字对应的 `classicalGlosses` 释义字、或框架词表内；
+     *   句中若夹带拉丁词（长度>=3 非停用词）或数字，也必须落在原句内。
+     * - 英文对英文：每个长度>=3 的非停用英文词，词干必须在所引原句或英文框架词表内；数字必须落在原句内。
+     * - 中文句对英文原句（如 Kybalion）：每个非停用汉字必须来自原句英文词在 `enToZhLexicon` 里的译名，
+     *   或属于框架/停用字；词表映射不到即丢句（fail-closed）。
+     * - 英文句对中文原句：每个长度>=3 的非停用英文词必须在英文框架词表内，或其 `enToZhLexicon` 译名出现在原句内。
+     */
+    internal fun isHighRiskFullyGrounded(
+        sentenceText: String,
+        citations: List<CheckedStanceCitation>,
+        zhAttributionFramingTerms: List<String>,
+    ): Boolean {
+        if (citations.isEmpty()) return false
+        val evidenceQuote = citations.joinToString(" ") { it.quote }.trim()
+        if (evidenceQuote.isEmpty()) return false
+
+        val sentenceHasCjk = hasCjk(sentenceText)
+        val evHasCjk = hasCjk(evidenceQuote)
+
+        val evLatinStems = extractLatinContentStems(evidenceQuote)
+        val evNums = extractCanonicalNumbers(evidenceQuote)
+        // 数字核验：句中出现的阿拉伯数字必须来自原句
+        for (m in digitTokenRegex.findAll(sentenceText)) {
+            val num = m.value.removeSuffix("%")
+            if (num !in evNums) return false
+        }
+
+        // 1. 中文对中文：按字 100% 白名单核验
+        if (sentenceHasCjk && evHasCjk) {
+            // 若中文句夹带非停用英文词，其词干也必须落在原句中（防止夹带 ETF/BTC 等未出现词）
+            for (m in latinTokenRegex.findAll(sentenceText)) {
+                val raw = m.value.lowercase(Locale.ROOT)
+                if (raw.length < 3 || raw in enStopwords) continue
+                val stems = englishStems(raw).filter { it !in enStopwords }
+                if (stems.none { it in evLatinStems }) return false
+            }
+
+            var stripped = toSimplified(sentenceText)
+            for (term in zhAttributionFramingTerms) {
+                stripped = stripped.replace(term, "")
+            }
+            val sentenceChars = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhStopChars }.toSet()
+            if (sentenceChars.isEmpty()) {
+                // 纯框架空壳（无任何来自原句的实字或英文词）不放行
+                val sentenceLatin = extractLatinContentStems(sentenceText)
+                return sentenceLatin.isNotEmpty() && sentenceLatin.all { it in evLatinStems }
+            }
+
+            val evSimp = toSimplified(evidenceQuote)
+            val allowedChars = HashSet<Char>()
+            for (ch in evSimp) {
+                if (ch in '\u4e00'..'\u9fff') {
+                    allowedChars += ch
+                    classicalGlosses[ch]?.forEach { gloss ->
+                        for (gCh in gloss) {
+                            if (gCh in '\u4e00'..'\u9fff') allowedChars += gCh
+                        }
+                    }
+                }
+            }
+            return sentenceChars.all { it in allowedChars }
+        }
+
+        // 2. 英文对英文：按词 100% 白名单核验（长度>=3 非停用词，词干须在原句或英文框架词表内）
+        if (!sentenceHasCjk && !evHasCjk) {
+            var matchedEvidenceWord = 0
+            for (m in latinTokenRegex.findAll(sentenceText)) {
+                val raw = m.value.lowercase(Locale.ROOT)
+                if (raw.length < 3 || raw in enStopwords) continue
+                val stems = englishStems(raw).filter { it !in enStopwords }
+                val inEvidence = stems.any { it in evLatinStems }
+                val inFraming = stems.any { it in enHighRiskFramingStems }
+                if (!inEvidence && !inFraming) return false
+                if (inEvidence) matchedEvidenceWord++
+            }
+            return matchedEvidenceWord >= 1
+        }
+
+        // 3. 中文句对英文原句（如 Kybalion）：每个非停用汉字必须来自原句英文词在 enToZhLexicon 的译名，映射不到即丢句
+        if (sentenceHasCjk && !evHasCjk) {
+            for (m in latinTokenRegex.findAll(sentenceText)) {
+                val raw = m.value.lowercase(Locale.ROOT)
+                if (raw.length < 3 || raw in enStopwords) continue
+                val stems = englishStems(raw).filter { it !in enStopwords }
+                if (stems.none { it in evLatinStems || it in enHighRiskFramingStems }) return false
+            }
+
+            val allowedLexiconChars = HashSet<Char>()
+            for (m in latinTokenRegex.findAll(evidenceQuote)) {
+                val raw = m.value.lowercase(Locale.ROOT)
+                if (raw.length < 3 || raw in enStopwords) continue
+                for (stem in englishStems(raw)) {
+                    if (stem in enStopwords) continue
+                    enToZhLexicon[stem]?.forEach { zhTerm ->
+                        for (ch in toSimplified(zhTerm)) {
+                            if (ch in '\u4e00'..'\u9fff') allowedLexiconChars += ch
+                        }
+                    }
+                }
+            }
+
+            var stripped = toSimplified(sentenceText)
+            for (term in zhAttributionFramingTerms) {
+                stripped = stripped.replace(term, "")
+            }
+            val sentenceChars = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhStopChars }.toSet()
+            if (sentenceChars.isEmpty()) {
+                val sentenceLatin = extractLatinContentStems(sentenceText)
+                return sentenceLatin.isNotEmpty() && sentenceLatin.any { it in evLatinStems }
+            }
+            if (allowedLexiconChars.isEmpty()) return false
+            return sentenceChars.all { it in allowedLexiconChars }
+        }
+
+        // 4. 英文句对中文原句：每个非停用英文词必须在框架词表内，或其译名落在原句中
+        val evSimp = toSimplified(evidenceQuote)
+        var matchedEvidenceWord = 0
+        for (m in latinTokenRegex.findAll(sentenceText)) {
+            val raw = m.value.lowercase(Locale.ROOT)
+            if (raw.length < 3 || raw in enStopwords) continue
+            val stems = englishStems(raw).filter { it !in enStopwords }
+            val inFraming = stems.any { it in enHighRiskFramingStems }
+            val inEvidence = stems.any { stem ->
+                enToZhLexicon[stem]?.any { zhTerm -> toSimplified(zhTerm) in evSimp } == true
+            }
+            if (!inEvidence && !inFraming) return false
+            if (inEvidence) matchedEvidenceWord++
+        }
+        return matchedEvidenceWord >= 1
+    }
+
     private fun checkChineseClaimAgainstEnglishEvidence(claimSimp: String, englishText: String): Boolean {
         val rawWords = latinTokenRegex.findAll(englishText)
             .map { it.value.lowercase(Locale.ROOT) }

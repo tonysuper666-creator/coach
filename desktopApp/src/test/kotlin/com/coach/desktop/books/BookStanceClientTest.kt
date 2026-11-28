@@ -553,4 +553,178 @@ class BookStanceClientTest {
         assertEquals("life", customReq.getValue("stance").jsonPrimitive.content)
         assertEquals(listOf("fiction"), customReq.getValue("guards").jsonArray.map { it.jsonPrimitive.content })
     }
+
+    /**
+     * TON-1982 客户端单测：
+     * - `boundary == "high_risk"` 时不渲染任何拦截卡、按钮或对话框组件，高危提示行直接在回答卡题头下第一行显示；
+     * - 玄学立场时同时显示高危提示行和体系提示行，切到知识立场后保留高危提示行、无体系提示行、无书外块；
+     * - 带 `esoteric` 标记的书，卡底「换个角度」中 `original` 显示为「只看书里怎么讲」，切过去后新卡题头为「只按原文答」。
+     */
+    @Test
+    fun highRiskAnswerRendersNoticeInsideCardWithoutInterceptOrDialogAndOriginalSwitchLabel() = runComposeUiTest {
+        val root = folder.root.toPath()
+        val library = TextbookLibrary(root.resolve("library"))
+        val page1 = "九二：見龍在田，利見大人。九五：飛龍在天，利見大人。"
+        val book = library.importBook(Files.writeString(root.resolve("zhouyi.txt"), page1))
+        ExplainConsent(library.directory).allow(book.id)
+
+        Files.writeString(
+            library.directory.resolve(ForcedFileBookStanceSource.FILE_NAME),
+            """
+            {
+              "${book.id}": {
+                "defaultStance": "esoteric",
+                "secondaryStance": "classic",
+                "guards": ["esoteric"]
+              }
+            }
+            """.trimIndent(),
+        )
+
+        val block = book.sourceBlocks().first { it.isBodyParagraph }
+        val q = "九五：飛龍在天，利見大人。"
+        val qStart = book.page(block.page)!!.text.indexOf(q)
+        assertTrue(qStart >= 0)
+
+        // 先验证客户端 parseStance 在 high_risk 下不会放行 outside，且正确解析 highRiskNotice
+        val strayOutsideResp = buildJsonObject {
+            put("stance", "knowledge")
+            put("boundary", BookStanceCopy.HIGH_RISK_BOUNDARY)
+            put("highRiskNotice", BookStanceCopy.HIGH_RISK_NOTICE)
+            put("systemNotice", JsonNull)
+            put("layers", buildJsonArray {
+                add(buildJsonObject {
+                    put("layer", "book")
+                    put("label", BookStanceCopy.BOOK_DEFAULT)
+                    put("sentences", buildJsonArray {
+                        add(buildJsonObject {
+                            put("text", "原文写九五为飞龙在天，利见大人。")
+                            put("citations", buildJsonArray {
+                                add(buildJsonObject {
+                                    put("docId", block.id)
+                                    put("pdfPage", block.page)
+                                    put("startUtf16", qStart)
+                                    put("endUtf16", qStart + q.length)
+                                    put("quote", q)
+                                })
+                            })
+                        })
+                    })
+                })
+                add(buildJsonObject {
+                    put("layer", "outside")
+                    put("label", BookStanceCopy.outsideLabel("今人解读"))
+                    put("text", "高危时客户端也不应渲染书外段。")
+                })
+            })
+            put("modelCalled", true)
+            put("gate", buildJsonObject { put("droppedSentences", 0); put("outOfRange", 0) })
+            put("text", "${BookStanceCopy.HIGH_RISK_NOTICE}\n本书：原文写九五为飞龙在天，利见大人。")
+            put("elapsedMs", 6)
+        }
+        val parsedHighRisk = assertIs<ExplainResult.Done>(ExplainWire.parse(strayOutsideResp, listOf(block)))
+        val parsedStance = assertNotNull(parsedHighRisk.explanation.stanceAnswer)
+        assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, parsedStance.boundary)
+        assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, parsedStance.highRiskNotice)
+        assertEquals(1, parsedStance.layers.size, "客户端解析 high_risk 时必须丢弃任何 outside/guess 层")
+        assertIs<StanceLayer.Book>(parsedStance.layers.single())
+
+        // 验证持久化编解码往返保留 high_risk 与 highRiskNotice
+        val encoded = StanceAnswerCodec.encodeCitationsColumn(parsedHighRisk.explanation)
+        val (_, decoded) = StanceAnswerCodec.decodeCitationsColumn(encoded)
+        assertEquals(parsedStance, decoded)
+
+        val http = server { path, body ->
+            if (path != "/v1/library/explain" || body == null) return@server null
+            val st = body["stance"]?.jsonPrimitive?.content ?: "esoteric"
+            buildJsonObject {
+                put("stance", st)
+                put("boundary", BookStanceCopy.HIGH_RISK_BOUNDARY)
+                put("highRiskNotice", BookStanceCopy.HIGH_RISK_NOTICE)
+                if (st == "esoteric") put("systemNotice", BookStanceCopy.ESOTERIC_SYSTEM_NOTICE) else put("systemNotice", JsonNull)
+                put("noBookNotice", JsonNull)
+                put("layers", buildJsonArray {
+                    add(buildJsonObject {
+                        put("layer", "book")
+                        put("label", BookStanceCopy.BOOK_DEFAULT)
+                        put("sentences", buildJsonArray {
+                            add(buildJsonObject {
+                                put("text", "原文写九五为飞龙在天，利见大人。")
+                                put("citations", buildJsonArray {
+                                    add(buildJsonObject {
+                                        put("docId", block.id)
+                                        put("pdfPage", block.page)
+                                        put("startUtf16", qStart)
+                                        put("endUtf16", qStart + q.length)
+                                        put("quote", q)
+                                    })
+                                })
+                            })
+                        })
+                    })
+                })
+                put("modelCalled", true)
+                put("gate", buildJsonObject { put("droppedSentences", 0); put("outOfRange", 0) })
+                put("text", "${BookStanceCopy.HIGH_RISK_NOTICE}\n本书：原文写九五为飞龙在天，利见大人。")
+                put("sources", JsonArray(emptyList()))
+                put("elapsedMs", 8)
+            }.toString()
+        }
+        try {
+            val exp = explainer(root, library, "http://127.0.0.1:${http.address.port}")
+            setContent {
+                CoachTheme(darkTheme = false) {
+                    BookExplainPanel(
+                        book = book,
+                        page = block.page,
+                        consent = ExplainConsent(library.directory),
+                        explainer = exp,
+                        selection = block,
+                        library = library,
+                    )
+                }
+            }
+            onNodeWithTag("explain-button").performClick()
+            waitUntil(timeoutMillis = 5_000) {
+                onAllNodesWithTag("stance-high-risk-notice").fetchSemanticsNodes().size == 1
+            }
+
+            // 1. 不渲染任何拦截卡、按钮或对话框组件
+            assertTrue(onAllNodesWithTag("stance-boundary-card").fetchSemanticsNodes().isEmpty(), "不能渲染拦截卡")
+            assertTrue(onAllNodesWithTag("stance-boundary-action").fetchSemanticsNodes().isEmpty(), "不能渲染拦截按钮")
+            val dialogNodes = onAllNodes(androidx.compose.ui.test.isDialog()).fetchSemanticsNodes()
+            assertTrue(dialogNodes.isEmpty(), "high_risk 绝不能弹出任何对话框组件")
+
+            // 2. 高危提示行与体系提示行都在回答卡内，且高危提示行在体系提示行上方
+            val highRiskNode = onNodeWithTag("stance-high-risk-notice").assertIsDisplayed().fetchSemanticsNode()
+            val systemNoticeNode = onNodeWithTag("stance-system-notice").assertIsDisplayed().fetchSemanticsNode()
+            val cardNode = onNodeWithTag("stance-answer-card").assertIsDisplayed().fetchSemanticsNode()
+            assertTrue(highRiskNode.boundsInRoot.top >= cardNode.boundsInRoot.top && highRiskNode.boundsInRoot.bottom <= cardNode.boundsInRoot.bottom)
+            assertTrue(highRiskNode.boundsInRoot.top < systemNoticeNode.boundsInRoot.top, "高危提示行必须在体系提示行之前")
+            onNodeWithText(BookStanceCopy.HIGH_RISK_NOTICE).assertIsDisplayed()
+            onNodeWithText(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE).assertIsDisplayed()
+
+            // 3. 卡底「换个角度」中 original 显示成「只看书里怎么讲」，knowledge 显示成「文献和思想史角度」
+            val origSwitchText = onNodeWithTag("stance-switch-original").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString("") { it.text }
+            assertEquals(BookStanceCopy.ORIGINAL_ON_ESOTERIC_SWITCH_LABEL, origSwitchText)
+            val knowSwitchText = onNodeWithTag("stance-switch-knowledge").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString("") { it.text }
+            assertEquals(BookStanceCopy.KNOWLEDGE_ON_ESOTERIC_LABEL, knowSwitchText)
+
+            // 4. 点「换个角度 → 只看书里怎么讲」：新卡题头是「只按原文答」，旧卡题头不变，仍无弹窗/拦截卡
+            onNodeWithTag("stance-switch-original").performClick()
+            waitUntil(timeoutMillis = 5_000) {
+                onAllNodesWithTag("stance-answer-header").fetchSemanticsNodes().size == 2
+            }
+            val headers = onAllNodesWithTag("stance-answer-header").fetchSemanticsNodes().map { node ->
+                node.config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString("") { it.text }
+            }
+            assertEquals(listOf(BookStance.ESOTERIC.headerLabel, BookStance.ORIGINAL.headerLabel), headers)
+            assertEquals(1, onAllNodesWithTag("stance-system-notice").fetchSemanticsNodes().size, "切到只按原文答后不应新增体系提示行")
+            assertTrue(onAllNodes(androidx.compose.ui.test.isDialog()).fetchSemanticsNodes().isEmpty())
+        } finally {
+            http.stop(0)
+        }
+    }
 }

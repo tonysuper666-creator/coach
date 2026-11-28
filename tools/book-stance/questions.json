@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "expectBoundarySemantics": "high_risk_direct_answer",
   "books": {
     "textbooks/openstax-economics-2e": {
       "title": "Principles of Economics, 2e",

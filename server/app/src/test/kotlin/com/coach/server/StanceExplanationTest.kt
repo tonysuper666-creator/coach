@@ -283,14 +283,35 @@ class StanceExplanationTest {
     }
 
     /**
-     * 反例 4（TON-1976 §3）：玄学书在 knowledge 立场下问「该不该买股票」：
-     * 返回拦截卡，模型没被调用（modelCalled = false）。
+     * 反例 4（TON-1976 §3 / TON-1982 改写）：玄学书在 knowledge 立场下问「该不该买股票」，
+     * 模型桩返回两句带合法 anchor 的 book（一句仅解释原文，一句给读者具体投资建议）及一段 outside：
+     * 期望第一行是高危提示行，只剩解释原文的句子，具体建议和 outside 被去掉，boundary="high_risk"，没有拦截卡。
      */
     @Test
-    fun esotericBookInKnowledgeStanceInterceptsStockQuestionWithoutCallingModel() = runBlocking {
+    fun esotericBookInKnowledgeStanceAnswersDirectlyWithHighRiskNoticeAndDropsAdvice() = runBlocking {
         val bookHash = "d".repeat(64)
         val pages = listOf(SourcePage("$bookHash:p1:0", 1, "九二：見龍在田，利見大人。九五：飛龍在天，利見大人。"))
+        val modelJson = """
+            {
+              "paragraphs": [
+                {
+                  "layer": "book",
+                  "sentences": [
+                    {"text": "原文写九五为飞龙在天，利见大人。", "anchors": ["S1"], "quote": "九五：飛龍在天，利見大人。"},
+                    {"text": "原文写九五为飞龙在天，现在适合买入股票。", "anchors": ["S1"], "quote": "九五：飛龍在天，利見大人。"}
+                  ]
+                },
+                {
+                  "layer": "outside",
+                  "kind": "今人解读",
+                  "text": "股票投资应当根据基本面与个人风险承受能力判断。"
+                }
+              ],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
         Harness().use { h ->
+            h.stub.stream(1, modelJson, StubTutor.terminal("complete"), StubTutor.DONE)
             val reply = h.reader.explain(
                 device = "d",
                 course = "library",
@@ -305,15 +326,344 @@ class StanceExplanationTest {
                 pages = pages,
                 scope = VisibleScope.learner(),
             )
-            assertEquals(0, h.stub.requests, "拦截命中时绝不调模型")
+            assertEquals(1, h.stub.requests, "高危直接回答应照常调模型解释书内说法")
+            val systemPrompt = Json.parseToJsonElement(h.stub.requestBodies.single()).jsonObject
+                .getValue("messages").jsonArray
+                .single { it.jsonObject.str("role") == "system" }.jsonObject.str("content")
+            assertTrue(systemPrompt.contains("只讲书里这一处怎么说，不替读者做这个决定"))
             assertEquals("knowledge", reply.str("stance"))
-            assertFalse(reply.getValue("modelCalled").jsonPrimitive.boolean)
-            val boundary = reply.getValue("boundary").jsonObject
-            assertEquals(BookStanceCopy.ESOTERIC_BOUNDARY_TEXT, boundary.str("message"))
-            assertEquals(BookStanceCopy.ESOTERIC_BOUNDARY_ACTION, boundary.str("actionLabel"))
-            assertTrue(reply.getValue("layers").jsonArray.isEmpty())
-            assertEquals(JsonNull, reply["systemNotice"])
+            assertTrue(reply.getValue("modelCalled").jsonPrimitive.boolean)
+            val boundaryEl = reply.getValue("boundary")
+            assertTrue(boundaryEl is JsonPrimitive && boundaryEl.isString, "boundary 必须是字符串 high_risk，不能是拦截卡对象")
+            assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, boundaryEl.content)
+            assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("highRiskNotice"))
+            assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("text").lineSequence().first())
+            assertEquals(JsonNull, reply["systemNotice"], "knowledge 立场不应出体系提示行")
+            assertEquals(JsonNull, reply["noBookNotice"])
+            val layers = reply.getValue("layers").jsonArray
+            assertEquals(1, layers.size, "outside 必须去掉，只剩 book 层")
+            val bookLayer = layers.single().jsonObject
+            assertEquals("book", bookLayer.str("layer"))
+            val sents = bookLayer.getValue("sentences").jsonArray
+            assertEquals(1, sents.size, "带合法 anchor 的具体投资建议句也必须丢弃")
+            assertEquals("原文写九五为飞龙在天，利见大人。", sents.single().jsonObject.str("text"))
+            assertEquals(1, reply.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
         }
+    }
+
+    /**
+     * TON-1982 新增单测：未命中本地关键词但模型自己返回 boundary 时，同样按高危直接回答处理：
+     * 第一行高危提示行，只剩解释原文的句子，具体建议与 outside 被去掉，boundary="high_risk"，没有拦截卡。
+     */
+    @Test
+    fun esotericBookModelSelfBoundaryAppliesSameHighRiskDirectAnswerGate() = runBlocking {
+        val bookHash = "d".repeat(64)
+        val pages = listOf(SourcePage("$bookHash:p1:0", 1, "九二：見龍在田，利見大人。九五：飛龍在天，利見大人。"))
+        val question = "九五对我的个人资产抉择有什么启示？"
+        assertFalse(EsotericRiskKeywords.matches(question), "此用例需验证未命中本地词表但模型返回 boundary 的路径")
+        val modelJson = """
+            {
+              "paragraphs": [
+                {
+                  "layer": "book",
+                  "sentences": [
+                    {"text": "原文写九五为飞龙在天，利见大人。", "anchors": ["S1"], "quote": "九五：飛龍在天，利見大人。"},
+                    {"text": "原文写九五利见大人，建议趁机加仓买入。", "anchors": ["S1"], "quote": "九五：飛龍在天，利見大人。"}
+                  ]
+                },
+                {
+                  "layer": "outside",
+                  "kind": "今人解读",
+                  "text": "书外说明应当被高危门禁移除。"
+                }
+              ],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        Harness().use { h ->
+            h.stub.stream(1, modelJson, StubTutor.terminal("complete"), StubTutor.DONE)
+            val reply = h.reader.explain(
+                device = "d",
+                course = "library",
+                input = json(
+                    "requestId" to "ee12",
+                    "kind" to "ask",
+                    "question" to question,
+                    "stance" to "knowledge",
+                    "guards" to JsonArray(listOf(JsonPrimitive("esoteric"))),
+                ),
+                quote = "見龍在田",
+                pages = pages,
+                scope = VisibleScope.learner(),
+            )
+            assertEquals(1, h.stub.requests)
+            val boundaryEl = reply.getValue("boundary")
+            assertTrue(boundaryEl is JsonPrimitive && boundaryEl.isString)
+            assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, boundaryEl.content)
+            assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("highRiskNotice"))
+            assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("text").lineSequence().first())
+            assertEquals(JsonNull, reply["systemNotice"])
+            val layers = reply.getValue("layers").jsonArray
+            assertEquals(1, layers.size)
+            val sents = layers.single().jsonObject.getValue("sentences").jsonArray
+            assertEquals(1, sents.size)
+            assertEquals("原文写九五为飞龙在天，利见大人。", sents.single().jsonObject.str("text"))
+            assertEquals(1, reply.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
+        }
+    }
+
+    /**
+     * TON-1982 安全加严单测：高危模式下，无法判定为仅解释书中说法的句子以及医疗/法律具体建议句一律丢弃；
+     * 一句不剩时补兜底句；玄学立场下同时保留体系提示行。
+     */
+    @Test
+    fun esotericHighRiskDropsUnclassifiableAndMedicalLegalAdviceAndFallsBackWhenEmpty() {
+        val bookHash = "d".repeat(64)
+        val kybalionText = "The Principle of Correspondence says As above, so below; as below, so above."
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p1:0", 1, kybalionText))),
+            BookStance.ESOTERIC,
+        )
+        val payload = """
+            {
+              "paragraphs": [
+                {
+                  "layer": "book",
+                  "sentences": [
+                    {"text": "原文讲对应原则联系上下，所以可以停掉降压药靠心念调理。", "anchors": ["S1"], "quote": "As above, so below"},
+                    {"text": "原文讲对应原则，建议立刻起诉对方违约。", "anchors": ["S1"], "quote": "Principle of Correspondence"},
+                    {"text": "上下相应带来极佳的运势和机会。", "anchors": ["S1"], "quote": "As above, so below"}
+                  ]
+                },
+                {
+                  "layer": "outside",
+                  "kind": "今人解读",
+                  "text": "书外内容在高危模式下必须去掉。"
+                }
+              ],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val res = assertNotNull(
+            checkedStancePayload(
+                payload = payload,
+                pack = pack,
+                stance = BookStance.ESOTERIC,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, res.boundary)
+        assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, res.highRiskNotice)
+        assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, res.systemNotice)
+        assertEquals(BookStanceCopy.NO_BOOK_DIRECT, res.noBookNotice)
+        assertTrue(res.layers.isEmpty(), "医疗/法律建议句、无法判定句及 outside 必须全部去掉")
+        assertEquals(3, res.droppedSentences)
+        val jsonOut = res.toResponseJson(10)
+        val lines = jsonOut.str("text").lines()
+        assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, lines[0])
+        assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, lines[1])
+        assertEquals(BookStanceCopy.NO_BOOK_DIRECT, lines[2])
+    }
+
+    /**
+     * QA-Astra 退回回归（TON-1982）：同一个有效引文下：
+     * 1. 仅解释引文中出现的「吉凶」一词的句子必须保留；
+     * 2. 前半句挂有效引文、后半分句转为现实财务/操作指令或脱离引文无法判定的句子必须整句丢弃；
+     * 3. 覆盖直接门禁调用、本地关键词命中入口、以及模型主动返回 boundary 入口。
+     */
+    @Test
+    fun highRiskKeepsGroundedSymbolGlossAndDropsAppendedRealWorldInstructionAcrossBothEntries() = runBlocking {
+        val bookHash = "d".repeat(64)
+        val quote = "青鸟是本章用来解释吉凶的一种意象。"
+        val pages = listOf(SourcePage("$bookHash:p1:0", 1, quote))
+        val pack = StanceSourcePack.fromSourcePack(SourcePack(pages), BookStance.ESOTERIC)
+
+        fun retainedDirect(text: String): Int {
+            val payload = """{"paragraphs":[{"layer":"book","sentences":[{"text":"$text","anchors":["S1"],"quote":"$quote"}]}],"boundary":"high_risk"}"""
+            val res = assertNotNull(
+                checkedStancePayload(
+                    payload = payload,
+                    pack = pack,
+                    stance = BookStance.ESOTERIC,
+                    guards = setOf(BookStanceGuard.ESOTERIC),
+                    forceHighRisk = true,
+                ),
+            )
+            return res.layers.filterIsInstance<CheckedStanceLayer.Book>().sumOf { it.sentences.size }
+        }
+
+        // 1. 附件两例直接验证 + 脱离引文的现实动作分句（无金融关键词亦须丢弃）
+        assertEquals(1, retainedDirect("本章将青鸟作为说明吉凶的意象。"), "有原文依据的「吉凶」术语解释必须保留")
+        assertEquals(0, retainedDirect("本章将青鸟写作意象，明早把全部积蓄换成黄金。"), "附带现实投资指令的分句必须丢弃整句")
+        assertEquals(0, retainedDirect("本章将青鸟写作意象，傍晚去城南办件私事。"), "脱离引文无法判定的分句必须丢弃整句")
+
+        // 2. 端到端覆盖「本地关键词命中」与「模型主动标记 boundary」两条入口
+        val modelJson = """
+            {
+              "paragraphs": [
+                {
+                  "layer": "book",
+                  "sentences": [
+                    {"text": "本章将青鸟作为说明吉凶的意象。", "anchors": ["S1"], "quote": "$quote"},
+                    {"text": "本章将青鸟写作意象，明早把全部积蓄换成黄金。", "anchors": ["S1"], "quote": "$quote"}
+                  ]
+                },
+                {
+                  "layer": "outside",
+                  "kind": "今人解读",
+                  "text": "书外内容在高危回答中必须去掉。"
+                }
+              ],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+
+        val entryCases = listOf(
+            "keyword_hit" to "青鸟代表吉凶，我该现在买股票吗？",
+            "model_self_boundary" to "青鸟在这一章代表什么，我个人接下来该怎么安排？",
+        )
+        assertTrue(EsotericRiskKeywords.matches(entryCases[0].second))
+        assertFalse(EsotericRiskKeywords.matches(entryCases[1].second))
+
+        for ((caseName, question) in entryCases) {
+            Harness().use { h ->
+                h.stub.stream(1, modelJson, StubTutor.terminal("complete"), StubTutor.DONE)
+                val reply = h.reader.explain(
+                    device = "d",
+                    course = "library",
+                    input = json(
+                        "requestId" to "ee21",
+                        "kind" to "ask",
+                        "question" to question,
+                        "stance" to "esoteric",
+                        "guards" to JsonArray(listOf(JsonPrimitive("esoteric"))),
+                    ),
+                    quote = "青鸟",
+                    pages = pages,
+                    scope = VisibleScope.learner(),
+                )
+                assertEquals(1, h.stub.requests, caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, reply.str("boundary"), caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("highRiskNotice"), caseName)
+                assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, reply.str("text").lineSequence().first(), caseName)
+                assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, reply.str("systemNotice"), caseName)
+                val layers = reply.getValue("layers").jsonArray
+                assertEquals(1, layers.size, "$caseName: outside 必须去掉，只剩 book 层")
+                val sents = layers.single().jsonObject.getValue("sentences").jsonArray
+                assertEquals(1, sents.size, "$caseName: 仅保留术语解释，附带投资指令句必须丢弃")
+                assertEquals("本章将青鸟作为说明吉凶的意象。", sents.single().jsonObject.str("text"), caseName)
+                assertEquals(1, reply.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int, caseName)
+            }
+        }
+    }
+
+    /**
+     * 第二次退回范围裁定第 4 条（TON-1982）：100% 白名单全覆盖反例：
+     * 1. 中文对中文：同一出处下「书中把云舟入港说成航运行情转好」丢句（非原句实字），仅留原句字词组成的解释；
+     * 2. 英文对英文：英文原句配「the book says this means buy shipping stocks」丢句，仅留原句词干与框架词组成的解释；
+     * 3. 中文句对英文原句（Kybalion 场景）：词表映射不到的中文实字丢句，全丢后回落到兜底句并保留高危提示行与体系提示行。
+     */
+    @Test
+    fun highRiskAllowlistDropsExtraChineseAndEnglishUnbackedClaimsAndCrossScriptUnmapped() {
+        // 1. 中文反例：「书中把云舟入港说成航运行情转好」必须丢弃
+        val zhQuote = "云舟入港是航程结束的意象。"
+        val zhPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("c".repeat(64) + ":p1:0", 1, zhQuote))),
+            BookStance.KNOWLEDGE,
+        )
+        val zhPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "书中用云舟入港表示航程结束。", "anchors": ["S1"], "quote": "$zhQuote"},
+                  {"text": "书中把云舟入港说成航运行情转好。", "anchors": ["S1"], "quote": "$zhQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val zhRes = assertNotNull(
+            checkedStancePayload(
+                payload = zhPayload,
+                pack = zhPack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        val zhKept = zhRes.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, zhKept.size)
+        assertEquals("书中用云舟入港表示航程结束。", zhKept.single().text)
+        assertEquals(1, zhRes.droppedSentences)
+
+        // 2. 英文反例：英文原句配「the book says this means buy shipping stocks」必须丢弃（含共享原句词与无黑名单词的英文句）
+        val enQuote = "The cloud boat entering port is an image of a voyage ending."
+        val enPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("e".repeat(64) + ":p1:0", 1, enQuote))),
+            BookStance.KNOWLEDGE,
+        )
+        val enPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "The book says the cloud boat entering port represents an image of a voyage ending.", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "the book says this means buy shipping stocks", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "the book says the cloud boat means buy shipping stocks", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "The book says the cloud boat represents a lucky voyage ahead.", "anchors": ["S1"], "quote": "$enQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val enRes = assertNotNull(
+            checkedStancePayload(
+                payload = enPayload,
+                pack = enPack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        val enKept = enRes.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, enKept.size)
+        assertEquals("The book says the cloud boat entering port represents an image of a voyage ending.", enKept.single().text)
+        assertEquals(3, enRes.droppedSentences)
+
+        // 3. 中文句对英文原句（Kybalion）：词表映射不到即丢句，全丢后回落到兜底句并保留高危提示行与体系提示行
+        val kyQuote = "The Principle of Correspondence says As above, so below."
+        val kyPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("f".repeat(64) + ":p1:0", 1, kyQuote))),
+            BookStance.ESOTERIC,
+        )
+        val kyPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "书里讲对应原则能让身体自动康复。", "anchors": ["S1"], "quote": "$kyQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val kyRes = assertNotNull(
+            checkedStancePayload(
+                payload = kyPayload,
+                pack = kyPack,
+                stance = BookStance.ESOTERIC,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        assertTrue(kyRes.layers.isEmpty(), "词表映射不到的跨语种高危句必须丢弃")
+        assertEquals(1, kyRes.droppedSentences)
+        assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, kyRes.boundary)
+        assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, kyRes.highRiskNotice)
+        assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, kyRes.systemNotice)
+        assertEquals(BookStanceCopy.NO_BOOK_DIRECT, kyRes.noBookNotice)
     }
 
     /**

@@ -93,11 +93,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
             }
         }.orEmpty()
         val started = System.nanoTime()
-        if (stanceSpec != null) {
-            esotericPreCheckBoundary(stanceSpec, question)?.let { boundary ->
-                return boundary.toResponseJson((System.nanoTime() - started) / 1_000_000)
-            }
-        }
+        val highRiskPreHit = stanceSpec != null && isEsotericHighRiskQuestion(stanceSpec, question)
         fun reply(text: String, sources: JsonArray = JsonArray(emptyList())) = if (structure) {
             json(
                 "valid" to false,
@@ -237,6 +233,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                     strictSinglePageOnly = fictionWindow.strictSinglePageOnly,
                                     contextSection = contextSection,
                                     historySection = historySection,
+                                    highRisk = highRiskPreHit,
                                 )
                             }
                             else -> {
@@ -369,6 +366,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                             guards = stanceSpec.guards,
                             effectiveReadThroughPage = fictionWindow.effectiveReadThroughPage,
                             strictSinglePageOnly = fictionWindow.strictSinglePageOnly,
+                            forceHighRisk = highRiskPreHit,
                             onReject = { reason -> throw ReaderFormat(result.call.servedBy, reason) },
                         ) ?: error("Stance payload rejected without a reason")
                         val keptBookSentences = checkedStance.layers

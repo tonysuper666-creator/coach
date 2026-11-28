@@ -146,41 +146,33 @@ internal sealed interface CheckedStanceLayer {
     }
 }
 
-internal data class CheckedStanceBoundary(
-    val kind: String = BookStanceCopy.ESOTERIC_BOUNDARY_KIND,
-    val message: String = BookStanceCopy.ESOTERIC_BOUNDARY_TEXT,
-    val actionLabel: String = BookStanceCopy.ESOTERIC_BOUNDARY_ACTION,
-)
-
 internal data class CheckedStanceResult(
     val stance: BookStance,
     val layers: List<CheckedStanceLayer>,
+    val highRiskNotice: String?,
     val systemNotice: String?,
     val noBookNotice: String?,
-    val boundary: CheckedStanceBoundary?,
+    val boundary: String?,
     val modelCalled: Boolean,
     val droppedSentences: Int,
     val outOfRange: Int,
 ) {
     fun toResponseJson(elapsedMs: Long): JsonObject {
         val summaryText = buildString {
-            if (boundary != null) {
-                append(boundary.message)
-            } else {
-                if (!systemNotice.isNullOrBlank()) appendLine(systemNotice)
-                if (!noBookNotice.isNullOrBlank()) appendLine(noBookNotice)
-                for (layer in layers) {
-                    when (layer) {
-                        is CheckedStanceLayer.Book -> {
-                            append(layer.label).append("：")
-                            appendLine(layer.sentences.joinToString("") { it.text })
-                        }
-                        is CheckedStanceLayer.Outside -> {
-                            append(layer.label).append("：").appendLine(layer.text)
-                        }
-                        is CheckedStanceLayer.Guess -> {
-                            append(layer.label).append("：").appendLine(layer.text)
-                        }
+            if (!highRiskNotice.isNullOrBlank()) appendLine(highRiskNotice)
+            if (!systemNotice.isNullOrBlank()) appendLine(systemNotice)
+            if (!noBookNotice.isNullOrBlank()) appendLine(noBookNotice)
+            for (layer in layers) {
+                when (layer) {
+                    is CheckedStanceLayer.Book -> {
+                        append(layer.label).append("：")
+                        appendLine(layer.sentences.joinToString("") { it.text })
+                    }
+                    is CheckedStanceLayer.Outside -> {
+                        append(layer.label).append("：").appendLine(layer.text)
+                    }
+                    is CheckedStanceLayer.Guess -> {
+                        append(layer.label).append("：").appendLine(layer.text)
                     }
                 }
             }
@@ -224,17 +216,10 @@ internal data class CheckedStanceResult(
                     })
                 }
             })
+            if (highRiskNotice != null) put("highRiskNotice", highRiskNotice) else put("highRiskNotice", JsonNull)
             if (systemNotice != null) put("systemNotice", systemNotice) else put("systemNotice", JsonNull)
             if (noBookNotice != null) put("noBookNotice", noBookNotice) else put("noBookNotice", JsonNull)
-            if (boundary != null) {
-                put("boundary", buildJsonObject {
-                    put("kind", boundary.kind)
-                    put("message", boundary.message)
-                    put("actionLabel", boundary.actionLabel)
-                })
-            } else {
-                put("boundary", JsonNull)
-            }
+            if (boundary != null) put("boundary", boundary) else put("boundary", JsonNull)
             put("modelCalled", modelCalled)
             put("gate", buildJsonObject {
                 put("droppedSentences", droppedSentences)
@@ -339,20 +324,149 @@ internal fun filterPagesForFictionGuard(
     }
 }
 
-internal fun esotericPreCheckBoundary(spec: StanceRequestSpec, question: String?): CheckedStanceResult? {
-    if (BookStanceGuard.ESOTERIC !in spec.guards) return null
-    if (question.isNullOrBlank()) return null
-    if (!EsotericRiskKeywords.matches(question)) return null
-    return CheckedStanceResult(
-        stance = spec.stance,
-        layers = emptyList(),
-        systemNotice = null,
-        noBookNotice = null,
-        boundary = CheckedStanceBoundary(),
-        modelCalled = false,
-        droppedSentences = 0,
-        outOfRange = 0,
+internal fun isEsotericHighRiskQuestion(spec: StanceRequestSpec, question: String?): Boolean =
+    BookStanceGuard.ESOTERIC in spec.guards &&
+        !question.isNullOrBlank() &&
+        EsotericRiskKeywords.matches(question)
+
+/**
+ * 高危直接回答的只放行不拦截门禁（TON-1976 §3.7 / TON-1982 第二次退回范围裁定）：
+ * - 整句必须带明确归属框架（如「原文写」「书中用」「本段指出」）；
+ * - 去掉归属框架词后，每个实词/实字都必须来自本句所引原句（中文按字对照原句与 `classicalGlosses`、
+ *   英文按词干对照原句与英文框架词表、中对英按 `enToZhLexicon` 映射，映射不到即丢句）；
+ * - 现有黑名单、建议词与句式规则作为额外一道丢句条件，只加严不放宽。
+ */
+internal object EsotericHighRiskSentenceFilter {
+    private val extraDomainZh: List<String> = listOf(
+        // 投资、财务与资产操作
+        "股市", "买进", "抛售", "入场", "进场", "投资", "理财", "资产配置",
+        "赚钱", "亏损", "盈利", "收益", "行情", "大盘", "牛市", "熊市",
+        "积蓄", "存款", "身家", "本金", "资金", "现金", "黄金", "白银", "房产", "楼市", "债市", "币圈",
+        "换成", "兑换", "买入", "卖出", "购入", "梭哈", "全仓", "半仓", "重仓", "轻仓",
+        "套现", "变现", "转账", "汇款", "借钱", "贷款", "抵押", "押注", "下注", "下单", "开户", "平仓", "补仓",
+        "银行", "账户", "钱包", "割肉", "追高", "解套",
+        // 医疗与用药
+        "药物", "疗法", "治疗", "痊愈", "治愈", "降血压", "调理血压", "血压",
+        "不吃药", "替代药物", "心念调", "靠心念", "停服", "停掉", "停用", "自行停药",
+        "看医生", "去医院", "别吃药", "不用吃药", "放弃治疗", "减量", "加量",
+        // 法律与纠纷
+        "签约", "打官司", "维权", "举证", "上诉", "法律", "赔偿", "撤诉", "解约",
+        "签协议", "签字", "报警", "立案", "公证", "和解",
     )
+
+    private val extraDomainEnRegex = Regex(
+        """(?i)\b(?:stock|stocks|fund|funds|etf|crypto|bitcoin|invest|investment|portfolio|trade|trading|buy|sell|gold|silver|savings|cash|exchange|convert|withdraw|deposit|mortgage|loan|bank|account|medication|medicine|drug|drugs|prescription|dosage|blood pressure|hypertension|therapy|cure|heal|doctor|surgery|lawsuit|sue|litigation|contract|lawyer|attorney|court|legal)\b""",
+    )
+
+    /** 仅当引文本身也出现该词时才允许保留的术语（未在引文出现则视为脱离原文的占断/预测，直接丢弃）。 */
+    private val quoteGroundedOnlyTermsZh: List<String> = listOf(
+        "吉凶", "凶吉", "运势", "祸福", "吉兆", "凶兆",
+    )
+
+    private val adviceZhKeywords: List<String> = listOf(
+        "建议", "推荐", "不妨", "最好", "务必", "切勿", "切忌",
+        "放心", "果断", "趁机", "逢低", "逢高", "择机",
+        "赶紧", "赶快", "立刻", "马上", "立即", "抓紧", "趁早", "早点", "出手",
+        "明早", "明天", "明日", "今晚", "今天", "今日", "下周", "下月", "下个月", "尽快",
+        "应当", "应该", "必须", "适合", "值得", "不宜", "宜于",
+        "不要", "不必", "无需", "不用", "别再", "去买", "去卖", "去投", "去借", "去贷", "去签", "去告", "去停",
+        "改吃", "改用", "停吃", "别买", "别卖", "别停", "动用", "拿出", "押上",
+        "你", "您", "咱们", "读者",
+        "现实中", "在现实", "具体决定", "做出决定", "做决定",
+        "替你", "为你", "帮你", "操作",
+        "会涨", "会跌", "会好转", "会痊愈", "能治好", "可替代",
+    )
+
+    private val adviceZhPatterns: List<Regex> = listOf(
+        Regex("""(?:现在|此时|当下|据此|由此|因此|所以|故而|照此|按此|于是|然后|接着)[^，。！？\n]{0,8}(?:可以|能|宜|买|卖|投|换|转|取|存|停|吃|起诉|签|决定|行动|持有|观望)"""),
+        Regex("""(?:可以|能够|能)[^，。！？\n]{0,4}(?:买|卖|投|换|转|取|停|不吃|起诉|签约|治|调理|治愈|代替)"""),
+        Regex("""宜(?:买|卖|投|换|入|进|持|停|诉|签)"""),
+        Regex("""把[^，。！？\n]{1,10}(?:换成|转成|转为|投入|存入|取出|拿去|押在|买成|卖掉)"""),
+    )
+
+    private val adviceEnRegex = Regex(
+        """(?i)\b(?:should|ought|recommend|advise|suggest|must|you|your|yours|yourself|don't|do not|go ahead|decision|decide|tomorrow|tonight|immediately|right now|better to|time to)\b""",
+    )
+
+    private val zhBookAttributionSubjects: List<String> = listOf(
+        "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞",
+        "象传", "象曰", "彖传", "彖曰", "文言传", "文言", "易传", "作者",
+        "本段", "该段", "这段", "这一段", "本节", "这一节", "该节",
+        "本章", "这一章", "该章", "本处", "这一处", "此处", "该处",
+        "这句", "这一句", "文本", "典籍", "传文", "注疏", "注文",
+        "格言", "体系里", "体系中",
+    )
+
+    private val zhBookAttributionPredicates: List<String> = listOf(
+        "说", "讲", "写", "提", "指", "称", "谓", "述", "记", "载",
+        "释", "解", "明", "示", "表", "喻", "象", "论", "言", "曰",
+        "列", "视", "定", "概", "为", "是", "将", "把", "以", "用",
+        "表示", "代表", "象征", "比喻", "强调", "认为", "描述", "表达",
+        "对应", "揭示", "展开", "围绕", "概括", "阐述", "归结",
+    )
+
+    /**
+     * 中文归属框架词表（按最长优先扣除）：
+     * 仅包含文本/出处归属与释义框架词（补入「用、表示、代表、象征、比喻、意象、含义、意思」），
+     * 绝不收录动作、资产、行业、时间、结果类的字词。
+     */
+    private val zhAttributionFramingTerms: List<String> = listOf(
+        "这一段", "这一节", "这一章", "这一处", "这一句", "这一爻", "这一卦",
+        "文言传", "体系里", "体系中", "说的是", "写的是", "指的是", "讲的是", "意思是",
+        "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞",
+        "象传", "象曰", "彖传", "彖曰", "文言", "易传", "作者",
+        "本段", "该段", "这段", "本节", "该节", "本章", "该章", "本处", "此处", "该处",
+        "这句", "此爻", "一爻", "此卦", "文本", "典籍", "传文", "注疏", "注文", "格言", "体系",
+        "解释为", "解释", "说明", "提到", "指出", "认为", "描述", "表述", "阐述", "记载", "记述",
+        "强调", "表达", "概括", "作为", "写作", "说成", "写成", "讲成", "意指",
+        "表示", "代表", "象征", "比喻", "意象", "含义", "意思",
+        "所选", "时写", "时说", "时讲", "还说", "还写", "又说", "又写", "并说", "并写", "并解",
+        "用",
+    ).sortedByDescending { it.length }
+
+    private val enBookAttributionSubjectRegex = Regex(
+        """(?i)\b(?:the book|the text|the passage|the author|this section|this chapter|the original|this verse|this line|the commentary)\b""",
+    )
+    private val enBookAttributionPredicateRegex = Regex(
+        """(?i)\b(?:says|states|describes|explains|mentions|notes|defines|presents|refers|treats|writes|depicts|calls|frames|uses|represents|means|symbolizes|indicates|denotes)\b""",
+    )
+
+    private fun containsForbiddenHighRiskContent(textSimp: String, evidenceSimp: String): Boolean {
+        if (EsotericRiskKeywords.matches(textSimp)) return true
+        if (extraDomainZh.any { it in textSimp && it !in evidenceSimp }) return true
+        if (extraDomainEnRegex.containsMatchIn(textSimp)) return true
+        if (quoteGroundedOnlyTermsZh.any { it in textSimp && it !in evidenceSimp }) return true
+        if (adviceZhKeywords.any { it in textSimp }) return true
+        if (adviceZhPatterns.any { it.containsMatchIn(textSimp) }) return true
+        if (adviceEnRegex.containsMatchIn(textSimp)) return true
+        return false
+    }
+
+    fun isPureBookExplanation(
+        rawSentence: String,
+        citations: List<CheckedStanceCitation>,
+    ): Boolean {
+        val text = rawSentence.trim()
+        if (text.isEmpty() || citations.isEmpty()) return false
+        val evidenceQuote = citations.joinToString(" ") { it.quote }.trim()
+        if (evidenceQuote.isEmpty()) return false
+
+        val textSimp = StanceClaimSupport.toSimplified(text)
+        val evidenceSimp = StanceClaimSupport.toSimplified(evidenceQuote)
+
+        // 1. 整句必须明确归属于书中说法（无法判定归属则丢弃）
+        val hasZhAttribution = zhBookAttributionSubjects.any { it in textSimp } &&
+            zhBookAttributionPredicates.any { it in textSimp }
+        val hasEnAttribution = enBookAttributionSubjectRegex.containsMatchIn(text) &&
+            enBookAttributionPredicateRegex.containsMatchIn(text)
+        if (!hasZhAttribution && !hasEnAttribution) return false
+
+        // 2. 现有黑名单、建议词与句式规则作为额外一道丢句条件（只加严不放宽）
+        if (containsForbiddenHighRiskContent(textSimp, evidenceSimp)) return false
+
+        // 3. 100% 白名单全覆盖核验：去掉归属框架词后，每个实词/实字都必须来自所引原句（或固定释义/词表）
+        return StanceClaimSupport.isHighRiskFullyGrounded(text, citations, zhAttributionFramingTerms)
+    }
 }
 
 internal fun buildStanceSystemPrompt(
@@ -365,6 +479,7 @@ internal fun buildStanceSystemPrompt(
     strictSinglePageOnly: Boolean,
     contextSection: String,
     historySection: String,
+    highRisk: Boolean = false,
 ): String {
     val taskLine = when {
         lesson -> "Explain this passage/section using the supplied source blocks in order."
@@ -430,10 +545,26 @@ internal fun buildStanceSystemPrompt(
     } else ""
 
     val esotericGuardRule = if (BookStanceGuard.ESOTERIC in spec.guards) {
-        """
-            STRICT ESOTERIC RISK GUARD (overrides stance):
-            If the reader asks for a concrete real-world medical, legal, or investment decision (stopping medicine, buying stocks/funds/crypto, suing, signing contracts), output EXACTLY {"paragraphs":[],"boundary":"${BookStanceCopy.ESOTERIC_BOUNDARY_KIND}"} and NO paragraphs.
-        """.trimIndent()
+        if (highRisk) {
+            """
+                STRICT ESOTERIC HIGH-RISK DIRECT ANSWER RULE (overrides stance):
+                只讲书里这一处怎么说，不替读者做这个决定。
+                This question asks about a concrete medical, legal, or investment decision on an esoteric-guarded book.
+                - Answer directly by ONLY explaining what the supplied text/passage itself says in "book" paragraphs (NO "outside" and NO "guess" paragraphs).
+                - Set "boundary": "${BookStanceCopy.HIGH_RISK_BOUNDARY}".
+                - Start every "book" sentence with explicit book attribution (such as 原文写 / 书里讲 / 爻辞为 / 象传解释 / 本段指出 / 本书认为) and stay strictly close to the exact wording of the cited original sentence(s) — only restate or gloss what the cited original sentence itself says, without adding outside concepts or interpretations.
+                - NEVER give the reader any concrete medical, legal, or investment recommendation, action directive, or real-world decision advice (NEVER say whether to buy/sell stocks/funds/crypto, take/stop/change medicine, sue, sign contracts, or use mind/hexagrams to treat illness or invest) — NOT EVEN if citing a real quote.
+                - If the supplied blocks do not directly discuss anything relevant to explain from the book, output {"paragraphs":[],"boundary":"${BookStanceCopy.HIGH_RISK_BOUNDARY}"}.
+            """.trimIndent()
+        } else {
+            """
+                STRICT ESOTERIC HIGH-RISK GUARD (overrides stance):
+                If the reader asks for a concrete real-world medical, legal, or investment decision (stopping/changing medicine, curing illness without medicine, buying/selling stocks/funds/crypto, suing, signing contracts):
+                - 只讲书里这一处怎么说，不替读者做这个决定。
+                - Output ONLY "book" paragraphs explaining what the supplied text itself says (NO "outside" or "guess" paragraphs), set "boundary": "${BookStanceCopy.HIGH_RISK_BOUNDARY}", start every "book" sentence with explicit book attribution (原文写 / 书里讲 / 本段指出), and NEVER give any concrete medical, legal, or investment recommendation.
+                - If the question is NOT a concrete medical, legal, or investment decision, set "boundary": null.
+            """.trimIndent()
+        }
     } else {
         """
             BOUNDARY FIELD RULE:
@@ -441,9 +572,10 @@ internal fun buildStanceSystemPrompt(
         """.trimIndent()
     }
 
-    val allowedLayersDesc = when (spec.stance) {
-        BookStance.LIFE -> """"book", "outside", "guess""""
-        BookStance.ORIGINAL -> """"book" ONLY"""
+    val allowedLayersDesc = when {
+        highRisk -> """"book" ONLY (high-risk mode: NEVER output "outside" or "guess")"""
+        spec.stance == BookStance.LIFE -> """"book", "outside", "guess""""
+        spec.stance == BookStance.ORIGINAL -> """"book" ONLY"""
         else -> """"book", "outside""""
     }
 
@@ -963,6 +1095,7 @@ internal fun checkedStancePayload(
     guards: Set<BookStanceGuard> = emptySet(),
     effectiveReadThroughPage: Int? = null,
     strictSinglePageOnly: Boolean = false,
+    forceHighRisk: Boolean = false,
     onReject: (ReaderFormatReason) -> Unit = {},
     onDropLog: (String) -> Unit = STANCE_DROP_LOG::info,
 ): CheckedStanceResult? {
@@ -983,31 +1116,20 @@ internal fun checkedStancePayload(
         return reject(ReaderFormatReason.ROOT_FIELDS)
     }
 
-    // 规则 7：模型自己返回 boundary 时，对玄学书只显示固定拦截卡，不显示模型段落。
+    // 规则 7（TON-1982）：带 esoteric 标记的书，本地关键词命中或模型自己返回非空 boundary 时，
+    // 按高危直接回答处理：不返回拦截卡，照常校验 book 句并逐句丢弃具体建议/无法判定句，去掉 outside 与 guess 段，返回 boundary="high_risk"。
     // 对非玄学书，若模型在非空 paragraphs 外顺手填了非空 boundary 提示，忽略该 boundary 字段以保留合法回答；仅当无任何段落时拒绝重试。
     val rawBoundary = root["boundary"]
     val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
-    if (rawBoundary != null && rawBoundary !is JsonNull) {
-        val boundaryTruthy = when (rawBoundary) {
-            is JsonPrimitive -> if (rawBoundary.isString) rawBoundary.content.isNotBlank() else rawBoundary.content != "false"
-            is JsonObject -> true
-            else -> false
-        }
-        if (boundaryTruthy) {
-            if (BookStanceGuard.ESOTERIC in guards) {
-                return CheckedStanceResult(
-                    stance = stance,
-                    layers = emptyList(),
-                    systemNotice = null,
-                    noBookNotice = null,
-                    boundary = CheckedStanceBoundary(),
-                    modelCalled = true,
-                    droppedSentences = 0,
-                    outOfRange = 0,
-                )
-            }
-            if (paragraphs.isEmpty()) return reject(ReaderFormatReason.ROOT_FIELDS)
-        }
+    val boundaryTruthy = when (rawBoundary) {
+        null, is JsonNull -> false
+        is JsonPrimitive -> if (rawBoundary.isString) rawBoundary.content.isNotBlank() else rawBoundary.content != "false"
+        is JsonObject -> true
+        else -> false
+    }
+    val isHighRisk = BookStanceGuard.ESOTERIC in guards && (forceHighRisk || boundaryTruthy)
+    if (boundaryTruthy && BookStanceGuard.ESOTERIC !in guards && paragraphs.isEmpty()) {
+        return reject(ReaderFormatReason.ROOT_FIELDS)
     }
 
     // 规则 8：段落上限 1–5 段（允许 0 段表示书里没有）
@@ -1023,6 +1145,11 @@ internal fun checkedStancePayload(
             ?: return reject(ReaderFormatReason.STANCE_LAYER)
         val layerKind = AnswerLayerKind.fromWire(layerStr)
             ?: return reject(ReaderFormatReason.STANCE_LAYER)
+
+        // 规则 7：高危直接回答一律去掉 outside 和 guess 段
+        if (isHighRisk && layerKind != AnswerLayerKind.BOOK) {
+            continue
+        }
 
         // 规则 3：层要合当前立场
         if (layerKind == AnswerLayerKind.GUESS && stance != BookStance.LIFE) {
@@ -1233,6 +1360,13 @@ internal fun checkedStancePayload(
                         continue
                     }
 
+                    // 规则 7（TON-1982）：高危直接回答逐句与逐分句核对引文，丢弃具体建议、现实操作或无法判定句（即使出处有效）
+                    if (isHighRisk && !EsotericHighRiskSentenceFilter.isPureBookExplanation(text, citations)) {
+                        logDrop("HIGH_RISK_ADVICE", anchorIds)
+                        droppedSentences++
+                        continue
+                    }
+
                     // 层标签全部由程序按立场与出处块决定，不由模型决定（§2）
                     val label = when (stance) {
                         BookStance.KNOWLEDGE, BookStance.ESOTERIC, BookStance.ORIGINAL -> BookStanceCopy.BOOK_DEFAULT
@@ -1263,15 +1397,18 @@ internal fun checkedStancePayload(
     }
 
     val totalBookSentences = layersOut.filterIsInstance<CheckedStanceLayer.Book>().sumOf { it.sentences.size }
+    val boundary = if (isHighRisk) BookStanceCopy.HIGH_RISK_BOUNDARY else null
+    val highRiskNotice = if (isHighRisk) BookStanceCopy.HIGH_RISK_NOTICE else null
     val systemNotice = if (stance == BookStance.ESOTERIC) BookStanceCopy.ESOTERIC_SYSTEM_NOTICE else null
     val noBookNotice = if (totalBookSentences == 0) BookStanceCopy.noBookFallback(guards) else null
 
     return CheckedStanceResult(
         stance = stance,
         layers = layersOut,
+        highRiskNotice = highRiskNotice,
         systemNotice = systemNotice,
         noBookNotice = noBookNotice,
-        boundary = null,
+        boundary = boundary,
         modelCalled = true,
         droppedSentences = droppedSentences,
         outOfRange = outOfRange,

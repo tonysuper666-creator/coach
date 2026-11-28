@@ -17,7 +17,7 @@ enum class BookStance(val wire: String, val headerLabel: String) {
     ;
 
     /**
-     * 换立场按钮和题头文案：
+     * 题头和通用立场显示文案：
      * 知识立场在古籍书上显示为「历史学角度」，在玄学书上显示为「文献和思想史角度」，规则仍按知识类。
      */
     fun labelForBook(defaultStance: BookStance? = null, guards: Set<BookStanceGuard> = emptySet()): String {
@@ -27,6 +27,18 @@ enum class BookStance(val wire: String, val headerLabel: String) {
             defaultStance == CLASSIC -> BookStanceCopy.KNOWLEDGE_ON_CLASSIC_LABEL
             else -> headerLabel
         }
+    }
+
+    /**
+     * 卡底「换个角度」按钮文案（TON-1982）：
+     * 带 `esoteric` 标记的书上，`original` 立场在「换个角度」里显示成「只看书里怎么讲」，
+     * 切换后的新卡题头仍按 [labelForBook] 显示为「只按原文答」。
+     */
+    fun switchLabelForBook(defaultStance: BookStance? = null, guards: Set<BookStanceGuard> = emptySet()): String {
+        if (this == ORIGINAL && BookStanceGuard.ESOTERIC in guards) {
+            return BookStanceCopy.ORIGINAL_ON_ESOTERIC_SWITCH_LABEL
+        }
+        return labelForBook(defaultStance, guards)
     }
 
     companion object {
@@ -67,6 +79,7 @@ enum class BookStanceGuard(val wire: String) {
 object BookStanceCopy {
     const val KNOWLEDGE_ON_CLASSIC_LABEL = "历史学角度"
     const val KNOWLEDGE_ON_ESOTERIC_LABEL = "文献和思想史角度"
+    const val ORIGINAL_ON_ESOTERIC_SWITCH_LABEL = "只看书里怎么讲"
 
     const val BOOK_DEFAULT = "本书"
     const val BOOK_LIFE = "据原文转述"
@@ -79,10 +92,8 @@ object BookStanceCopy {
     val OUTSIDE_KINDS: Set<String> = setOf("通行讲法", "注家读法", "今人解读", "史学")
 
     const val ESOTERIC_SYSTEM_NOTICE = "按本书体系看，不是对现实的断言"
-    const val ESOTERIC_BOUNDARY_KIND = "esoteric_risk"
-    const val ESOTERIC_BOUNDARY_TEXT =
-        "这本书讲的是它自己的一套体系，医疗、法律、投资上的具体决定不从书里推。可以接着看这一处在书里怎么讲。"
-    const val ESOTERIC_BOUNDARY_ACTION = "只看书里怎么讲"
+    const val HIGH_RISK_BOUNDARY = "high_risk"
+    const val HIGH_RISK_NOTICE = "看病、法律、投资这类具体决定不从书里推，下面只讲书里怎么说。"
 
     const val NO_BOOK_DIRECT = "这本书里没有直接讲到这一点。"
     const val NO_BOOK_FICTION = "读到这里，书里还没讲到这一点。"
@@ -107,8 +118,8 @@ object BookStanceCopy {
 }
 
 /**
- * 玄学书高危决定本地拦截词表（医疗、法律、投资的具体决定），中英文各一份。
- * 单本书与库里提问共用；命中后直接返回拦截卡，不调模型。
+ * 玄学书高危决定本地关键词表（医疗、法律、投资的具体决定），中英文各一份。
+ * 单本书与库里提问共用；命中后按高危直接回答（只讲书里怎么说，不出书外与推想，不替读者做决定）。
  */
 object EsotericRiskKeywords {
     val zhKeywords: List<String> = listOf(

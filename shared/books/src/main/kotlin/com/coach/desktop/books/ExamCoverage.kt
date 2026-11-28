@@ -77,7 +77,7 @@ internal object ExamCoverage {
         "case", "cases", "example", "examples", "analysis", "analyses",
         "approach", "approaches", "method", "methods", "framework", "frameworks",
         "research", "review", "test", "tests", "report", "reports",
-        "measure", "measures", "data", "evidence",
+        "measure", "measures", "data", "evidence", "care",
         "topic", "topics", "concept", "concepts", "issue", "issues",
         "problem", "problems", "question", "questions",
     )
@@ -407,6 +407,9 @@ internal object HeldOutDecomposer {
     private val inlineDefinition = Regex(
         """(?:^|[.;]\s+)(?:The\s+|An?\s+)?([A-Za-z][A-Za-z0-9 -]{2,48})\s+(?:is\s+defined\s+as|refers\s+to|is\s+called|is\s+known\s+as)\b""",
     )
+    private val textbookAliasPattern = Regex(
+        """(?is)\b(?:model(?:ed|s)?|treat(?:ed|s)?|view(?:ed|s)?|describe(?:d|s)?|classif(?:y|ied|ies))\s+(?:the\s+)?([a-z][a-z\s-]{3,35})\s+as\s+(?:a|an)\s+([a-z][a-z\s-]{3,48}?)(?=[.,;:!?()\n]|$)""",
+    )
     private val capitalRun = Regex("""\b[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*(?:\s+[A-Z][A-Za-z0-9]+(?:-[A-Z][A-Za-z0-9]+)*){1,5}\b""")
     private val lineOptionMarker = Regex(
         """^\s*(?:(\()([A-Fa-f])\)|(\[)([A-Fa-f])\]|([A-Fa-f])([.)、:：]))\s+(\S.*)$""",
@@ -474,6 +477,7 @@ internal object HeldOutDecomposer {
         val prefilter: String,
         val exactRegex: Regex,
         val contentMatchers: List<Pair<String, Regex>>,
+        val isAlias: Boolean = false,
     )
 
     fun questionsFromDocument(text: String): List<String> {
@@ -787,7 +791,11 @@ internal object HeldOutDecomposer {
         identified: List<String>,
         textbook: String,
     ): List<DecomposedQuestion> {
-        val matchers = buildTermMatchers(identified, extractTextbookTerms(textbook))
+        val matchers = buildTermMatchers(
+            identified = identified,
+            textbookTerms = extractTextbookTerms(textbook),
+            aliases = extractTextbookAliases(textbook, identified),
+        )
         val results = mutableListOf<DecomposedQuestion>()
         val seen = mutableSetOf<String>()
         var unmatchedIndex = 0
@@ -957,14 +965,46 @@ internal object HeldOutDecomposer {
         return terms.values.toList()
     }
 
-    private fun buildTermMatchers(identified: List<String>, textbookTerms: List<String>): List<TermMatcher> {
+    private fun extractTextbookAliases(textbook: String, identified: List<String>): List<Pair<String, String>> {
+        if (textbook.isBlank() || identified.isEmpty()) return emptyList()
+        val identifiedKeys = identified.mapNotNull { title ->
+            if (ExamCoverage.isGenericPoint(title)) return@mapNotNull null
+            val norm = CourseExamPoints.normalize(title).replace('-', ' ')
+            if (norm.length < 4) null else Triple(title.trim(), norm, CourseExamPoints.termPattern(norm))
+        }.sortedByDescending { it.second.length }
+        if (identifiedKeys.isEmpty()) return emptyList()
+
+        val aliases = linkedMapOf<String, String>()
+        for (m in textbookAliasPattern.findAll(textbook)) {
+            val subjRaw = CourseExamPoints.normalize(m.groupValues[1]).replace('-', ' ')
+            val subjWords = subjRaw.split(' ').filter { it.isNotEmpty() }.dropWhile { it in glueWords }
+            if (subjWords.size !in 2..5) continue
+            val subj = subjWords.joinToString(" ")
+            val subjContent = subjWords.filter { it !in glueWords && it !in skip }
+            if (subjContent.size < 2 || ExamCoverage.isGenericPoint(subj)) continue
+            val predNorm = CourseExamPoints.normalize(m.groupValues[2]).replace('-', ' ')
+            val target = identifiedKeys.firstOrNull { (_, _, pattern) -> pattern.containsMatchIn(predNorm) } ?: continue
+            aliases.putIfAbsent(subj, target.first)
+        }
+        return aliases.entries.map { it.key to it.value }
+    }
+
+    private fun buildTermMatchers(
+        identified: List<String>,
+        textbookTerms: List<String>,
+        aliases: List<Pair<String, String>> = emptyList(),
+    ): List<TermMatcher> {
         val matchers = mutableListOf<TermMatcher>()
         val seen = mutableSetOf<String>()
-        fun register(rawTitle: String, fromIdentified: Boolean) {
-            val trimmed = rawTitle.trim()
+        fun register(phrase: String, canonicalTitle: String, fromIdentified: Boolean, isAlias: Boolean) {
+            val trimmed = phrase.trim()
             if (trimmed.length < 2) return
             val strippedParen = trimmed.replace(Regex("""\s*\([^)]{1,16}\)\s*$"""), "").trim()
-            val variants = if (strippedParen.length >= 2 && strippedParen != trimmed) listOf(trimmed, strippedParen) else listOf(trimmed)
+            val variants = if (!isAlias && strippedParen.length >= 2 && strippedParen != trimmed) {
+                listOf(trimmed, strippedParen)
+            } else {
+                listOf(trimmed)
+            }
             for (variant in variants) {
                 val norm = CourseExamPoints.normalize(variant).replace('-', ' ')
                 if (norm.length < 2 || norm in skip || norm in boilerplate || ExamCoverage.isGenericPoint(variant) || !seen.add(norm)) continue
@@ -975,23 +1015,18 @@ internal object HeldOutDecomposer {
                 if (tokens.all { it in skip || it in glueWords }) continue
 
                 val exactRegex = buildPhraseRegex(tokens, norm)
-                val lastToken = tokens.last()
-                val prefilter = if (lastToken.all { it in 'a'..'z' } && lastToken.length >= 5 && lastToken.endsWith("y") && lastToken[lastToken.length - 2] !in "aeiou") {
-                    lastToken.dropLast(1)
-                } else {
-                    lastToken
-                }
+                val prefilter = tokenPrefilter(tokens.last())
                 val contentTokens = tokens.filter { token ->
                     (token.length >= 4 || token.any { c -> c !in 'a'..'z' && c !in '0'..'9' }) &&
                         token !in skip && token !in glueWords
                 }
-                val contentMatchers = if (contentTokens.size >= 2 && contentTokens.any { !ExamCoverage.isGenericSingleWord(it) }) {
+                val contentMatchers = if (!isAlias && contentTokens.size >= 2 && contentTokens.any { !ExamCoverage.isGenericSingleWord(it) }) {
                     contentTokens.map { token -> tokenPrefilter(token) to buildPhraseRegex(listOf(token), token) }
                 } else {
                     emptyList()
                 }
                 matchers += TermMatcher(
-                    title = rawTitle.trim(),
+                    title = canonicalTitle.trim(),
                     fromIdentified = fromIdentified,
                     wordCount = tokens.size,
                     length = norm.length,
@@ -999,38 +1034,53 @@ internal object HeldOutDecomposer {
                     prefilter = prefilter,
                     exactRegex = exactRegex,
                     contentMatchers = contentMatchers,
+                    isAlias = isAlias,
                 )
             }
         }
-        identified.forEach { register(it, fromIdentified = true) }
-        textbookTerms.forEach { register(it, fromIdentified = false) }
+        identified.forEach { register(it, it, fromIdentified = true, isAlias = false) }
+        textbookTerms.forEach { register(it, it, fromIdentified = false, isAlias = false) }
+        aliases.forEach { (phrase, target) -> register(phrase, target, fromIdentified = true, isAlias = true) }
         return matchers
     }
 
-    private fun tokenPrefilter(token: String): String =
-        if (token.all { it in 'a'..'z' } && token.length >= 5 && token.endsWith("y") && token[token.length - 2] !in "aeiou") {
-            token.dropLast(1)
-        } else {
-            token
+    private fun tokenStemAndRegex(token: String): Pair<String, String> {
+        if (!token.all { it in 'a'..'z' } || token.length < 4) {
+            return token to Regex.escape(token)
         }
+        return when {
+            token.length >= 5 && token.endsWith("ies") && token[token.length - 4] !in "aeiou" -> {
+                val base = token.dropLast(3)
+                base to (Regex.escape(base) + "(?:y|ies)")
+            }
+            token.length >= 5 && token.endsWith("y") && token[token.length - 2] !in "aeiou" -> {
+                val base = token.dropLast(1)
+                base to (Regex.escape(base) + "(?:y|ies)")
+            }
+            token.length >= 5 && (
+                token.endsWith("sses") || token.endsWith("xes") || token.endsWith("zes") ||
+                    token.endsWith("ches") || token.endsWith("shes")
+                ) -> {
+                val base = token.dropLast(2)
+                base to (Regex.escape(base) + "(?:es)?")
+            }
+            token.length >= 5 && token.endsWith("s") &&
+                !token.endsWith("ss") && !token.endsWith("us") && !token.endsWith("is") -> {
+                val base = token.dropLast(1)
+                base to (Regex.escape(base) + "s?")
+            }
+            token.endsWith("s") || token.endsWith("x") || token.endsWith("z") ||
+                token.endsWith("ch") || token.endsWith("sh") ->
+                token to (Regex.escape(token) + "(?:es)?")
+            else ->
+                token to (Regex.escape(token) + "s?")
+        }
+    }
+
+    private fun tokenPrefilter(token: String): String = tokenStemAndRegex(token).first
 
     private fun buildPhraseRegex(tokens: List<String>, norm: String): Regex {
-        val last = tokens.last()
-        val lastPattern = when {
-            last.all { it in 'a'..'z' } && last.length >= 5 && last.endsWith("y") && last[last.length - 2] !in "aeiou" ->
-                Regex.escape(last.dropLast(1)) + "(?:y|ies)"
-            last.all { it in 'a'..'z' } && last.length >= 4 &&
-                (last.endsWith("s") || last.endsWith("x") || last.endsWith("z") || last.endsWith("ch") || last.endsWith("sh")) ->
-                Regex.escape(last) + "(?:es)?"
-            last.all { it in 'a'..'z' } && last.length >= 4 ->
-                Regex.escape(last) + "s?"
-            else -> Regex.escape(last)
-        }
-        val bodyPattern = if (tokens.size == 1) {
-            lastPattern
-        } else {
-            tokens.dropLast(1).joinToString("""\s+""") { Regex.escape(it) } + """\s+""" + lastPattern
-        }
+        val bodyPattern = tokens.joinToString("""\s+""") { tokenStemAndRegex(it).second }
         val start = if (norm.first() in 'a'..'z') "(?<![a-z0-9])" else ""
         val end = if (norm.last() in 'a'..'z') "(?![a-z0-9])" else ""
         return Regex(start + bodyPattern + end)
@@ -1046,11 +1096,12 @@ internal object HeldOutDecomposer {
                 matcher.acronym != null -> {
                     val found = matcher.acronym in body &&
                         Regex("""(?<![A-Za-z0-9])${Regex.escape(matcher.acronym)}(?![A-Za-z0-9])""").containsMatchIn(body)
-                    if (found) 2 else 0
+                    if (found) 3 else 0
                 }
-                matcher.prefilter in bodySearch && matcher.exactRegex.containsMatchIn(bodySearch) -> 2
+                matcher.prefilter in bodySearch && matcher.exactRegex.containsMatchIn(bodySearch) ->
+                    if (matcher.isAlias) 1 else 3
                 matcher.contentMatchers.isNotEmpty() &&
-                    matcher.contentMatchers.all { (pre, regex) -> pre in bodySearch && regex.containsMatchIn(bodySearch) } -> 1
+                    matcher.contentMatchers.all { (pre, regex) -> pre in bodySearch && regex.containsMatchIn(bodySearch) } -> 2
                 else -> 0
             }
             if (tier == 0) continue

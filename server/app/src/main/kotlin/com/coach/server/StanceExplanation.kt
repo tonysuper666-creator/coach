@@ -330,14 +330,13 @@ internal fun isEsotericHighRiskQuestion(spec: StanceRequestSpec, question: Strin
         EsotericRiskKeywords.matches(question)
 
 /**
- * 高危直接回答的逐句与逐分句过滤（TON-1976 §3.7 / TON-1982）：
- * - 对照整句和引文：保留有原文依据的术语/文本解释（如引文本身含「吉凶」时，仅解释该词的句子予以保留）；
- * - 逐分句核验：只要任一分句转为现实操作、给出具体医疗/法律/投资或个人财务指令，或无法判定为有引文依据的书中说法，
- *   立即丢弃整句（fail-closed），即使整句带有合法 anchor。
+ * 高危直接回答的只放行不拦截门禁（TON-1976 §3.7 / TON-1982 第二次退回范围裁定）：
+ * - 整句必须带明确归属框架（如「原文写」「书中用」「本段指出」）；
+ * - 去掉归属框架词后，每个实词/实字都必须来自本句所引原句（中文按字对照原句与 `classicalGlosses`、
+ *   英文按词干对照原句与英文框架词表、中对英按 `enToZhLexicon` 映射，映射不到即丢句）；
+ * - 现有黑名单、建议词与句式规则作为额外一道丢句条件，只加严不放宽。
  */
 internal object EsotericHighRiskSentenceFilter {
-    private val clauseSplitRegex = Regex("""(?:[，,；;：:]+|——+)""")
-
     private val extraDomainZh: List<String> = listOf(
         // 投资、财务与资产操作
         "股市", "买进", "抛售", "入场", "进场", "投资", "理财", "资产配置",
@@ -401,55 +400,36 @@ internal object EsotericHighRiskSentenceFilter {
     private val zhBookAttributionPredicates: List<String> = listOf(
         "说", "讲", "写", "提", "指", "称", "谓", "述", "记", "载",
         "释", "解", "明", "示", "表", "喻", "象", "论", "言", "曰",
-        "列", "视", "定", "概", "为", "是", "将", "把", "以",
-        "强调", "认为", "描述", "表达", "对应", "揭示", "展开", "围绕", "概括", "阐述", "归结",
+        "列", "视", "定", "概", "为", "是", "将", "把", "以", "用",
+        "表示", "代表", "象征", "比喻", "强调", "认为", "描述", "表达",
+        "对应", "揭示", "展开", "围绕", "概括", "阐述", "归结",
     )
 
-    /** 仅用于引入或标注原文归属的元话语词汇（最长优先，供纯归属分句与中文实词覆盖率判定扣除）。 */
+    /**
+     * 中文归属框架词表（按最长优先扣除）：
+     * 仅包含文本/出处归属与释义框架词（补入「用、表示、代表、象征、比喻、意象、含义、意思」），
+     * 绝不收录动作、资产、行业、时间、结果类的字词。
+     */
     private val zhAttributionFramingTerms: List<String> = listOf(
         "这一段", "这一节", "这一章", "这一处", "这一句", "这一爻", "这一卦",
-        "文言传", "体系里", "体系中", "说的是", "写的是", "指的是", "讲的是",
+        "文言传", "体系里", "体系中", "说的是", "写的是", "指的是", "讲的是", "意思是",
         "原文", "书里", "书中", "本书", "该书", "此书", "经文", "爻辞", "卦辞",
         "象传", "象曰", "彖传", "彖曰", "文言", "易传", "作者",
         "本段", "该段", "这段", "本节", "该节", "本章", "该章", "本处", "此处", "该处",
         "这句", "此爻", "一爻", "此卦", "文本", "典籍", "传文", "注疏", "注文", "格言", "体系",
-        "初九", "九二", "九三", "九四", "九五", "上九", "初六", "六二", "六三", "六四", "六五", "上六",
-        "解释", "说明", "提到", "指出", "认为", "描述", "表述", "阐述", "记载", "记述",
-        "强调", "表达", "概括", "作为", "写作", "意思", "含义", "所选", "提醒", "借",
-        "时写", "时说", "时讲", "还说", "还写", "又说", "又写", "并解",
+        "解释为", "解释", "说明", "提到", "指出", "认为", "描述", "表述", "阐述", "记载", "记述",
+        "强调", "表达", "概括", "作为", "写作", "说成", "写成", "讲成", "意指",
+        "表示", "代表", "象征", "比喻", "意象", "含义", "意思",
+        "所选", "时写", "时说", "时讲", "还说", "还写", "又说", "又写", "并说", "并写", "并解",
+        "用",
     ).sortedByDescending { it.length }
-
-    private val zhFramingResidualStopChars: Set<Char> = (
-        "的了在是有和与这那一个中里上下之其为以而于也者则故此被把将对从向到" +
-            "说讲写指称原文书句段作者注认表示出来去着过得地并及或但且因所即乃亦无不非未" +
-            "一二三四五六七八九十两时"
-        ).toSet()
 
     private val enBookAttributionSubjectRegex = Regex(
         """(?i)\b(?:the book|the text|the passage|the author|this section|this chapter|the original|this verse|this line|the commentary)\b""",
     )
     private val enBookAttributionPredicateRegex = Regex(
-        """(?i)\b(?:says|states|describes|explains|mentions|notes|defines|presents|refers|treats|writes|depicts|calls|frames)\b""",
+        """(?i)\b(?:says|states|describes|explains|mentions|notes|defines|presents|refers|treats|writes|depicts|calls|frames|uses|represents|means|symbolizes|indicates|denotes)\b""",
     )
-
-    private val enPureAttributionClauseRegex = Regex(
-        """(?i)^(?:the\s+(?:book|text|passage|author|original|commentary)|this\s+(?:section|chapter|verse|line))\s+(?:says|states|notes|writes|explains|mentions|adds)(?:\s+that)?$""",
-    )
-
-    private fun isPureAttributionFramingClause(clauseSimp: String): Boolean {
-        val clean = clauseSimp.trim().trimEnd('。', '！', '？', '.', '!', '?')
-        if (clean.isEmpty()) return true
-        if (enPureAttributionClauseRegex.matches(clean)) return true
-        val hasSubject = zhBookAttributionSubjects.any { it in clean } ||
-            "一爻" in clean || "此爻" in clean || "这一爻" in clean
-        if (!hasSubject) return false
-        var stripped = clean
-        for (term in zhAttributionFramingTerms) {
-            stripped = stripped.replace(term, "")
-        }
-        val residual = stripped.filter { it in '\u4e00'..'\u9fff' && it !in zhFramingResidualStopChars }
-        return residual.isEmpty() && !Regex("[A-Za-z0-9]").containsMatchIn(stripped)
-    }
 
     private fun containsForbiddenHighRiskContent(textSimp: String, evidenceSimp: String): Boolean {
         if (EsotericRiskKeywords.matches(textSimp)) return true
@@ -481,27 +461,11 @@ internal object EsotericHighRiskSentenceFilter {
             enBookAttributionPredicateRegex.containsMatchIn(text)
         if (!hasZhAttribution && !hasEnAttribution) return false
 
-        // 2. 整句禁止出现脱离原文的医疗/法律/投资、个人财务指令、时间/动作劝导或未在引文中出现的占断词
+        // 2. 现有黑名单、建议词与句式规则作为额外一道丢句条件（只加严不放宽）
         if (containsForbiddenHighRiskContent(textSimp, evidenceSimp)) return false
 
-        // 3. 逐分句核验：除纯引入归属分句外，每一条实质分句都必须独立受本句引文支撑，
-        //    任一分句转为现实操作或脱离引文（无法判定）时丢弃整句。
-        val clauses = clauseSplitRegex.split(text)
-            .map { it.trim().trimEnd('。', '！', '？', '.', '!', '?').trim() }
-            .filter { it.isNotEmpty() }
-        if (clauses.isEmpty()) return false
-
-        var substantiveCount = 0
-        for (clause in clauses) {
-            val clauseSimp = StanceClaimSupport.toSimplified(clause)
-            if (containsForbiddenHighRiskContent(clauseSimp, evidenceSimp)) return false
-            if (isPureAttributionFramingClause(clauseSimp)) continue
-            substantiveCount++
-            if (!StanceClaimSupport.isHighRiskClauseGrounded(clause, citations, zhAttributionFramingTerms)) {
-                return false
-            }
-        }
-        return substantiveCount > 0
+        // 3. 100% 白名单全覆盖核验：去掉归属框架词后，每个实词/实字都必须来自所引原句（或固定释义/词表）
+        return StanceClaimSupport.isHighRiskFullyGrounded(text, citations, zhAttributionFramingTerms)
     }
 }
 
@@ -588,7 +552,7 @@ internal fun buildStanceSystemPrompt(
                 This question asks about a concrete medical, legal, or investment decision on an esoteric-guarded book.
                 - Answer directly by ONLY explaining what the supplied text/passage itself says in "book" paragraphs (NO "outside" and NO "guess" paragraphs).
                 - Set "boundary": "${BookStanceCopy.HIGH_RISK_BOUNDARY}".
-                - Start every "book" sentence with explicit book attribution (such as 原文写 / 书里讲 / 爻辞为 / 象传解释 / 本段指出 / 本书认为) and state ONLY what the book itself says about the hexagram, line, or principle.
+                - Start every "book" sentence with explicit book attribution (such as 原文写 / 书里讲 / 爻辞为 / 象传解释 / 本段指出 / 本书认为) and stay strictly close to the exact wording of the cited original sentence(s) — only restate or gloss what the cited original sentence itself says, without adding outside concepts or interpretations.
                 - NEVER give the reader any concrete medical, legal, or investment recommendation, action directive, or real-world decision advice (NEVER say whether to buy/sell stocks/funds/crypto, take/stop/change medicine, sue, sign contracts, or use mind/hexagrams to treat illness or invest) — NOT EVEN if citing a real quote.
                 - If the supplied blocks do not directly discuss anything relevant to explain from the book, output {"paragraphs":[],"boundary":"${BookStanceCopy.HIGH_RISK_BOUNDARY}"}.
             """.trimIndent()

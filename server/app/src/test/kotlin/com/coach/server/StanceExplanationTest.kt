@@ -559,6 +559,114 @@ class StanceExplanationTest {
     }
 
     /**
+     * 第二次退回范围裁定第 4 条（TON-1982）：100% 白名单全覆盖反例：
+     * 1. 中文对中文：同一出处下「书中把云舟入港说成航运行情转好」丢句（非原句实字），仅留原句字词组成的解释；
+     * 2. 英文对英文：英文原句配「the book says this means buy shipping stocks」丢句，仅留原句词干与框架词组成的解释；
+     * 3. 中文句对英文原句（Kybalion 场景）：词表映射不到的中文实字丢句，全丢后回落到兜底句并保留高危提示行与体系提示行。
+     */
+    @Test
+    fun highRiskAllowlistDropsExtraChineseAndEnglishUnbackedClaimsAndCrossScriptUnmapped() {
+        // 1. 中文反例：「书中把云舟入港说成航运行情转好」必须丢弃
+        val zhQuote = "云舟入港是航程结束的意象。"
+        val zhPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("c".repeat(64) + ":p1:0", 1, zhQuote))),
+            BookStance.KNOWLEDGE,
+        )
+        val zhPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "书中用云舟入港表示航程结束。", "anchors": ["S1"], "quote": "$zhQuote"},
+                  {"text": "书中把云舟入港说成航运行情转好。", "anchors": ["S1"], "quote": "$zhQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val zhRes = assertNotNull(
+            checkedStancePayload(
+                payload = zhPayload,
+                pack = zhPack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        val zhKept = zhRes.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, zhKept.size)
+        assertEquals("书中用云舟入港表示航程结束。", zhKept.single().text)
+        assertEquals(1, zhRes.droppedSentences)
+
+        // 2. 英文反例：英文原句配「the book says this means buy shipping stocks」必须丢弃（含共享原句词与无黑名单词的英文句）
+        val enQuote = "The cloud boat entering port is an image of a voyage ending."
+        val enPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("e".repeat(64) + ":p1:0", 1, enQuote))),
+            BookStance.KNOWLEDGE,
+        )
+        val enPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "The book says the cloud boat entering port represents an image of a voyage ending.", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "the book says this means buy shipping stocks", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "the book says the cloud boat means buy shipping stocks", "anchors": ["S1"], "quote": "$enQuote"},
+                  {"text": "The book says the cloud boat represents a lucky voyage ahead.", "anchors": ["S1"], "quote": "$enQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val enRes = assertNotNull(
+            checkedStancePayload(
+                payload = enPayload,
+                pack = enPack,
+                stance = BookStance.KNOWLEDGE,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        val enKept = enRes.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, enKept.size)
+        assertEquals("The book says the cloud boat entering port represents an image of a voyage ending.", enKept.single().text)
+        assertEquals(3, enRes.droppedSentences)
+
+        // 3. 中文句对英文原句（Kybalion）：词表映射不到即丢句，全丢后回落到兜底句并保留高危提示行与体系提示行
+        val kyQuote = "The Principle of Correspondence says As above, so below."
+        val kyPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("f".repeat(64) + ":p1:0", 1, kyQuote))),
+            BookStance.ESOTERIC,
+        )
+        val kyPayload = """
+            {
+              "paragraphs": [{
+                "layer": "book",
+                "sentences": [
+                  {"text": "书里讲对应原则能让身体自动康复。", "anchors": ["S1"], "quote": "$kyQuote"}
+                ]
+              }],
+              "boundary": "high_risk"
+            }
+        """.trimIndent()
+        val kyRes = assertNotNull(
+            checkedStancePayload(
+                payload = kyPayload,
+                pack = kyPack,
+                stance = BookStance.ESOTERIC,
+                guards = setOf(BookStanceGuard.ESOTERIC),
+                forceHighRisk = true,
+            ),
+        )
+        assertTrue(kyRes.layers.isEmpty(), "词表映射不到的跨语种高危句必须丢弃")
+        assertEquals(1, kyRes.droppedSentences)
+        assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, kyRes.boundary)
+        assertEquals(BookStanceCopy.HIGH_RISK_NOTICE, kyRes.highRiskNotice)
+        assertEquals(BookStanceCopy.ESOTERIC_SYSTEM_NOTICE, kyRes.systemNotice)
+        assertEquals(BookStanceCopy.NO_BOOK_DIRECT, kyRes.noBookNotice)
+    }
+
+    /**
      * 反例 5（TON-1976 §3）：请求不带 stance，走旧路径，返回结构和现在一样。
      */
     @Test

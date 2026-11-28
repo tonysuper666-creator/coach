@@ -4,6 +4,9 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.awt.ComposeDialog
 import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
@@ -11,6 +14,11 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.desktop.books.*
+import com.coach.ui.CoachTheme
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skiko.SkiaLayer
 import org.junit.Assert.assertEquals
@@ -23,6 +31,7 @@ import java.awt.Container
 import java.awt.GraphicsEnvironment
 import java.awt.event.KeyEvent
 import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.swing.SwingUtilities
@@ -302,6 +311,103 @@ class SingleBookCompanionLiveWindowTest {
                 println("W2B_LIVE_WINDOW_METRICS={\"cachedFirstScreenMs\":$cachedFirstScreenMs,\"coldRestartResumeMs\":$resumeMs,\"realComposeWindow\":true}")
             } finally {
                 edt { window2.dispose() }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun chapterOpenQuestionStaysWithItsChapterOnContinueAndNavigation() {
+        assumeTrue(!GraphicsEnvironment.isHeadless())
+        val root = Files.createTempDirectory("coach-chapter-open-window-")
+        try {
+            val library = TextbookLibrary(root.resolve("library"), todayCardEnabled = true)
+            val source = root.resolve("chapters.md")
+            Files.writeString(source, listOf("Supply", "Demand").mapIndexed { i, title ->
+                "# Chapter ${i + 1} $title\n\n$title curves describe how market prices affect the quantity traded."
+            }.joinToString("\n\u000c\n"))
+            val book = library.importBook(source)
+            val chapters = book.lessons.indices.mapNotNull { ChapterCompanionGrouping.groupForSection(book, it) }
+                .distinctBy { it.chapterId }
+            assertEquals(2, chapters.size)
+            val (first, second) = chapters
+            fun question(group: ChapterSectionGroup): String {
+                val block = group.sections.flatMap { it.blocks }.first { !it.heading }
+                val points = (1..3).map { i ->
+                    ChapterOpenPoint("p$i", "Point $i", block.id, block.page, block.text.take(10), block.start, block.start + 10)
+                }
+                return ChapterOpenJson.encodeQuestion(ChapterOpenQuestion("Explain ${group.chapterTitle}", points))
+            }
+            val old = ChapterPracticeDraft(
+                bookId = book.id, tocNodeId = first.chapterId, page = first.firstPage, companionOpen = true,
+                openQuestionJson = question(first), openAnswerDraft = "unfinished first chapter retry",
+                openAttemptsJson = ChapterOpenJson.encodeAttempts(listOf(ChapterOpenAttempt(1, "first answer",
+                    listOf(com.coach.domain.grade.ChapterOpenJudgement("p1", "ZERO", "first feedback", ""))))),
+            )
+            library.saveChapterPracticeDraft(book.id, first.chapterId, first.pageCount, old)
+            library.save(book.copy(readingPage = second.firstPage))
+            val controller = TextbookController(library)
+            runBlocking { controller.load(); controller.openBook(book.id) }
+            assertEquals(second.firstPage, controller.state.value.page)
+            val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val explainer = object : BookExplainer(DesktopConnectionSettings(root.resolve("connection"), { null }), library) {
+                override suspend fun generateChapterOpenQuestion(input: JsonObject): CourseServerCallResult {
+                    requests += input.getValue("chapterId").jsonPrimitive.content
+                    return CourseServerCallResult(Json.parseToJsonElement(question(second)).jsonObject, null)
+                }
+            }
+            val window = edt {
+                ComposeWindow().apply {
+                    title = "Coach chapter open question"
+                    setSize(1280, 820)
+                    setContent {
+                        val ui = controller.state.collectAsState().value
+                        CoachTheme {
+                            TextbookReader(ui, library, UnconnectedBookLearningSupport, null, remember { FocusRequester() },
+                                onNoteSession = {}, onPage = { runBlocking { controller.page(it) } },
+                                onBack = {}, onLearn = {}, explainProvider = explainer, resumeDraft = ui.activePracticeDraft,
+                                onPracticeDraftChange = controller::saveChapterPracticeDraft)
+                        }
+                    }
+                    isVisible = true
+                }
+            }
+            try {
+                fun hasText(value: String) = edt {
+                    nodes(window).any { node -> node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { it.text == value } }
+                }
+                waitFor("second chapter question on reopen", window) {
+                    check(!hasText("Explain ${first.chapterTitle}")) { "Continue showed the previous chapter's question" }
+                    hasText("Explain ${second.chapterTitle}")
+                }
+                assertTrue(node(window, "chapter-open-attempt-0") == null)
+                setText(window, "chapter-open-input", "second chapter draft")
+                waitFor("second answer saved", window) {
+                    library.loadChapterPracticeDraft(book.id, second.chapterId)?.openAnswerDraft == "second chapter draft"
+                }
+                sendKeyViaMediator(window, KeyEvent.VK_T, 't')
+                click(window, "toc-item-0")
+                waitFor("first chapter question and grade", window) {
+                    hasText("Explain ${first.chapterTitle}") && node(window, "chapter-open-attempt-0") != null
+                }
+                fun input() = node(window, "chapter-open-input")?.config?.getOrNull(SemanticsProperties.EditableText)?.text
+                assertEquals(old.openAnswerDraft, input())
+                edt {
+                    val surface = activeSurfaces(window).first()
+                    val canvas = surface.layer.canvas
+                    val wheel = MouseWheelEvent(canvas, MouseEvent.MOUSE_WHEEL, System.currentTimeMillis(), 0,
+                        canvas.width / 4, canvas.height / 2, 0, false, MouseWheelEvent.WHEEL_UNIT_SCROLL, 3, 1)
+                    invokeDeclared(surface.mediator, "onMouseWheelEvent", MouseWheelEvent::class.java, wheel)
+                }
+                waitFor("second chapter draft on return", window) {
+                    hasText("Explain ${second.chapterTitle}") && input() == "second chapter draft"
+                }
+                assertTrue(node(window, "chapter-open-attempt-0") == null)
+                assertEquals(listOf(second.chapterId), requests)
+            } finally {
+                edt { window.dispose() }
+                runBlocking { controller.flushPendingSaves() }
             }
         } finally {
             root.toFile().deleteRecursively()

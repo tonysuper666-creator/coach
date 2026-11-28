@@ -1001,7 +1001,7 @@ internal fun SingleBookCompanionPanel(
                     }
                 }
                 }
-                if (!originalOnly) {
+                if (!originalOnly) key(book.id, chapterGroup.chapterId) {
                     ChapterOpenQuestionCard(
                         bookId = book.id,
                         chapterId = chapterGroup.chapterId,

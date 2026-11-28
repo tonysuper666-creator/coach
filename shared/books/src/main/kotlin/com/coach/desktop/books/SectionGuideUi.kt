@@ -356,6 +356,8 @@ internal data class InlineExplainEntry(
     val label: String,
     val explanation: Explanation,
     val sentBlocks: List<SourceBlock>,
+    val action: SelectionExplainAction = SelectionExplainAction.ASK,
+    val questionText: String? = null,
 )
 
 /**
@@ -406,7 +408,19 @@ internal fun InlineSelectionExplainCard(
             for ((index, entry) in thread.turns.withIndex()) {
                 Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(entry.label, style = MaterialTheme.typography.labelMedium, color = v7Pine())
-                    if (entry.explanation.citations.isEmpty()) {
+                    val stanceAns = entry.explanation.stanceAnswer
+                    if (stanceAns != null) {
+                        LayeredAnswerCard(
+                            book = book,
+                            allBlocks = allBlocks,
+                            answer = stanceAns,
+                            onOpenCitation = { cite ->
+                                entry.sentBlocks.firstOrNull { it.id == cite.docId }?.let {
+                                    onOpenCitation(Citation("S1", cite.docId, cite.page, cite.quote), it)
+                                }
+                            },
+                        )
+                    } else if (entry.explanation.citations.isEmpty()) {
                         Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
                         if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
                     } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks) { citation ->

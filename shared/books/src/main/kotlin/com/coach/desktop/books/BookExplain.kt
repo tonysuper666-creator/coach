@@ -30,6 +30,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
+import com.coach.protocol.AnswerLayerKind
+import com.coach.protocol.BookStance
+import com.coach.protocol.BookStanceCopy
+import com.coach.protocol.BookStanceGuard
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalDeskMetrics
 import com.coach.ui.v7.PaperButton
@@ -52,7 +56,12 @@ import java.nio.file.Path
  * be found again on that page (TON-1963). Empty for citations restored from older caches.
  */
 internal data class Citation(val anchor: String, val blockId: String, val page: Int, val quote: String = "")
-internal data class Explanation(val text: String, val citations: List<Citation>, val elapsedMs: Long)
+internal data class Explanation(
+    val text: String,
+    val citations: List<Citation>,
+    val elapsedMs: Long,
+    val stanceAnswer: StanceAnswer? = null,
+)
 internal sealed interface ExplainResult {
     data class Done(val explanation: Explanation) : ExplainResult
     /** [message] 是给人看的那一句；[trouble] 决定给不给「再试一次」或「重新配对」。 */
@@ -182,11 +191,27 @@ internal object ExplainWire {
         return listOfNotNull(blocks.getOrNull(i - 1)?.takeIf { !it.heading }, chosen, blocks.getOrNull(i + 1)?.takeIf { !it.heading })
     }
 
-    fun request(requestId: String, chosen: SourceBlock, context: List<SourceBlock>): JsonObject = buildJsonObject {
+    fun request(
+        requestId: String,
+        chosen: SourceBlock,
+        context: List<SourceBlock>,
+        stanceRequest: ExplainStanceRequest? = null,
+    ): JsonObject = buildJsonObject {
         put("requestId", requestId)
         put("kind", "explain")
         put("selection", chosen.text.trim().take(4_000))
         put("blocks", buildJsonArray { for (b in context) add(buildJsonObject { put("id", b.id); put("text", b.text) }) })
+        encodeStanceFields(stanceRequest)
+    }
+
+    private fun JsonObjectBuilder.encodeStanceFields(stanceRequest: ExplainStanceRequest?) {
+        if (stanceRequest == null) return
+        put("stance", stanceRequest.stance.wire)
+        if (stanceRequest.guards.isNotEmpty()) {
+            put("guards", buildJsonArray { stanceRequest.guards.forEach { add(JsonPrimitive(it.wire)) } })
+        }
+        stanceRequest.readThroughPage?.let { put("readThroughPage", it) }
+        stanceRequest.bookPages?.let { put("bookPages", it) }
     }
 
     fun sectionGuideRequest(
@@ -219,6 +244,7 @@ internal object ExplainWire {
         sectionContext: ExplainSectionContext? = null,
         question: String? = null,
         history: List<FollowUpTurn> = emptyList(),
+        stanceRequest: ExplainStanceRequest? = null,
     ): JsonObject = buildJsonObject {
         require(kind in setOf("explain", "example", "rephrase", "split", "ask"))
         require(chosen.text.trim().length in 1..4_000)
@@ -243,6 +269,7 @@ internal object ExplainWire {
                 }
             })
         }
+        encodeStanceFields(stanceRequest)
     }
 
     private fun encodeSectionContext(ctx: ExplainSectionContext): JsonObject = buildJsonObject {
@@ -316,6 +343,10 @@ internal object ExplainWire {
     }
 
     fun parse(body: JsonObject, sent: List<SourceBlock>): ExplainResult {
+        val rawStance = (body["stance"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        if (rawStance != null) {
+            return parseStance(body, sent, rawStance)
+        }
         val text = (body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         val citations = (body["sources"] as? JsonArray).orEmpty().map { value ->
             val source = value as? JsonObject ?: return ExplainResult.Refused("这次回答的出处无法核对。")
@@ -336,11 +367,142 @@ internal object ExplainWire {
         val elapsed = (body["elapsedMs"] as? JsonPrimitive)?.longOrNull ?: 0L
         return ExplainResult.Done(Explanation(text, citations, elapsed))
     }
+
+    /**
+     * 按立场分层回答的客户端核验（TON-1976 §3 / TON-1977 #4）：
+     * 遇到不认识的层、缺标签、或「本书」块里任何一句缺出处/出处无法核对，整块不显示。
+     */
+    private fun parseStance(body: JsonObject, sent: List<SourceBlock>, rawStance: String): ExplainResult {
+        val stance = BookStance.fromWire(rawStance)
+            ?: return ExplainResult.Refused("这次回答的立场无法核对。")
+        val elapsed = (body["elapsedMs"] as? JsonPrimitive)?.longOrNull ?: 0L
+        val gateObj = body["gate"] as? JsonObject
+        val dropped = (gateObj?.get("droppedSentences") as? JsonPrimitive)?.intOrNull ?: 0
+        val outOfRange = (gateObj?.get("outOfRange") as? JsonPrimitive)?.intOrNull ?: 0
+        val modelCalled = (body["modelCalled"] as? JsonPrimitive)?.booleanOrNull ?: true
+        val summaryText = (body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+
+        val boundaryObj = body["boundary"] as? JsonObject
+        if (boundaryObj != null) {
+            val msg = (boundaryObj["message"] as? JsonPrimitive)?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_TEXT
+            val actionLabel = (boundaryObj["actionLabel"] as? JsonPrimitive)?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_ACTION
+            val kind = (boundaryObj["kind"] as? JsonPrimitive)?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: BookStanceCopy.ESOTERIC_BOUNDARY_KIND
+            val answer = StanceAnswer(
+                stance = stance,
+                layers = emptyList(),
+                systemNotice = null,
+                noBookNotice = null,
+                boundary = StanceBoundary(kind, msg, actionLabel),
+                modelCalled = modelCalled,
+                droppedSentences = dropped,
+                outOfRange = outOfRange,
+            )
+            return ExplainResult.Done(Explanation(summaryText.ifBlank { msg }, emptyList(), elapsed, answer))
+        }
+
+        val sentById = sent.associateBy { it.id }
+        val layers = mutableListOf<StanceLayer>()
+        val flatCitations = mutableListOf<Citation>()
+        val rawLayers = body["layers"] as? JsonArray
+        if (rawLayers != null) {
+            for (el in rawLayers) {
+                val obj = el as? JsonObject ?: continue
+                val kind = AnswerLayerKind.fromWire((obj["layer"] as? JsonPrimitive)?.contentOrNull) ?: continue
+                val label = (obj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                when (kind) {
+                    AnswerLayerKind.OUTSIDE -> {
+                        if (!label.startsWith(BookStanceCopy.OUTSIDE_PREFIX)) continue
+                        val text = (obj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                        layers += StanceLayer.Outside(label, text)
+                    }
+                    AnswerLayerKind.GUESS -> {
+                        if (!label.startsWith(BookStanceCopy.GUESS_PREFIX)) continue
+                        val text = (obj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                        layers += StanceLayer.Guess(label, text)
+                    }
+                    AnswerLayerKind.BOOK -> {
+                        val rawSentences = obj["sentences"] as? JsonArray ?: continue
+                        if (rawSentences.isEmpty()) continue
+                        var blockValid = true
+                        val parsedSentences = mutableListOf<StanceBookSentence>()
+                        for (sEl in rawSentences) {
+                            val sObj = sEl as? JsonObject
+                            val sText = (sObj?.get("text") as? JsonPrimitive)?.contentOrNull?.trim()
+                            val rawCites = sObj?.get("citations") as? JsonArray
+                            if (sText.isNullOrBlank() || rawCites == null || rawCites.isEmpty()) {
+                                blockValid = false
+                                break
+                            }
+                            val cites = mutableListOf<StanceCitation>()
+                            for (cEl in rawCites) {
+                                val cObj = cEl as? JsonObject
+                                val docId = (cObj?.get("docId") as? JsonPrimitive)?.contentOrNull?.trim()
+                                val page = (cObj?.get("pdfPage") as? JsonPrimitive)?.intOrNull
+                                val startUtf16 = (cObj?.get("startUtf16") as? JsonPrimitive)?.intOrNull
+                                val endUtf16 = (cObj?.get("endUtf16") as? JsonPrimitive)?.intOrNull
+                                val quote = (cObj?.get("quote") as? JsonPrimitive)?.contentOrNull
+                                val block = docId?.let { sentById[it] }
+                                if (docId.isNullOrBlank() || page == null || block == null || block.page != page ||
+                                    startUtf16 == null || endUtf16 == null || startUtf16 < 0 || endUtf16 <= startUtf16 ||
+                                    quote.isNullOrBlank()
+                                ) {
+                                    blockValid = false
+                                    break
+                                }
+                                cites += StanceCitation(docId, page, startUtf16, endUtf16, quote)
+                            }
+                            if (!blockValid || cites.isEmpty()) {
+                                blockValid = false
+                                break
+                            }
+                            parsedSentences += StanceBookSentence(sText, cites)
+                        }
+                        // 本书块里只要有任何一句缺出处或出处无法核对，整块不显示。
+                        if (blockValid && parsedSentences.isNotEmpty()) {
+                            layers += StanceLayer.Book(label, parsedSentences)
+                            parsedSentences.forEach { s ->
+                                s.citations.forEach { c ->
+                                    flatCitations += Citation("S${flatCitations.size + 1}", c.docId, c.page, c.quote)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val systemNotice = if (stance == BookStance.ESOTERIC) {
+            (body["systemNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                ?: BookStanceCopy.ESOTERIC_SYSTEM_NOTICE
+        } else null
+        val noBookNotice = (body["noBookNotice"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+
+        if (layers.isEmpty() && noBookNotice.isNullOrBlank()) {
+            val fallback = summaryText.trim().ifBlank { "这次回答的出处无法核对。" }
+            return ExplainResult.Refused(fallback)
+        }
+        val answer = StanceAnswer(
+            stance = stance,
+            layers = layers,
+            systemNotice = systemNotice,
+            noBookNotice = noBookNotice,
+            boundary = null,
+            modelCalled = modelCalled,
+            droppedSentences = dropped,
+            outOfRange = outOfRange,
+        )
+        return ExplainResult.Done(Explanation(summaryText, flatCitations, elapsed, answer))
+    }
 }
 
 private sealed interface BlockState {
     data object Waiting : BlockState
-    data class Done(val explanation: Explanation, val context: List<SourceBlock>) : BlockState
+    data class Done(val explanations: List<Explanation>, val context: List<SourceBlock>, val switching: Boolean = false) : BlockState {
+        val explanation: Explanation get() = explanations.first()
+    }
     data class Failed(val message: String, val trouble: ExplainTrouble) : BlockState
 }
 
@@ -401,14 +563,40 @@ internal fun BookExplainPanel(
         )
     }
 
-    fun start(block: SourceBlock) {
-        states[block.id] = BlockState.Waiting
+    val stanceResolution = remember(book.id, library) {
+        library?.let { BookStanceSources.forLibrary(it).resolve(book) } ?: BookStanceResolution.Undetermined
+    }
+    val bookPages = remember(book.id, book.pages) {
+        maxOf(book.pages.size, book.pages.maxOfOrNull { it.number } ?: 1)
+    }
+
+    fun stanceRequestFor(override: BookStance? = null): ExplainStanceRequest? {
+        val det = stanceResolution as? BookStanceResolution.Determined ?: return null
+        return ExplainStanceRequest(
+            stance = override ?: det.defaultStance,
+            guards = det.guards,
+            readThroughPage = book.readingPage.takeIf { it in 1..bookPages },
+            bookPages = bookPages,
+        )
+    }
+
+    fun start(block: SourceBlock, stanceOverride: BookStance? = null) {
+        val previousDone = if (stanceOverride != null) states[block.id] as? BlockState.Done else null
+        states[block.id] = if (previousDone != null) previousDone.copy(switching = true) else BlockState.Waiting
         scope.launch {
             val candidates = if (selection == null) blocks else listOf(block)
-            val result = explainer.explain(block, candidates)
+            val req = stanceRequestFor(stanceOverride)
+            val result = if (req != null) explainer.explainWithStance(block, candidates, req)
+                else explainer.explain(block, candidates)
             states[block.id] = when (result) {
-                is ExplainResult.Done -> BlockState.Done(result.explanation, ExplainWire.context(candidates, block))
-                is ExplainResult.Refused -> BlockState.Failed(result.message, result.trouble)
+                is ExplainResult.Done -> {
+                    val prevList = previousDone?.explanations.orEmpty()
+                    BlockState.Done(prevList + result.explanation, ExplainWire.context(candidates, block))
+                }
+                is ExplainResult.Refused -> {
+                    if (previousDone != null) previousDone.copy(switching = false)
+                    else BlockState.Failed(result.message, result.trouble)
+                }
             }
         }
     }
@@ -615,10 +803,45 @@ internal fun BookExplainPanel(
                             else opened = Citation("", it.id, it.page) to it
                         }
                     }
-                    if (state is BlockState.Done) ExplanationView(book, blocks, state.explanation, state.context) { citation ->
-                        state.context.firstOrNull { it.id == citation.blockId }?.let {
-                            if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
-                            else opened = citation to it
+                    if (state is BlockState.Done) {
+                        val det = stanceResolution as? BookStanceResolution.Determined
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            state.explanations.forEach { exp ->
+                                val stanceAns = exp.stanceAnswer
+                                if (stanceAns != null) {
+                                    LayeredAnswerCard(
+                                        book = book,
+                                        allBlocks = blocks,
+                                        answer = stanceAns,
+                                        bookDefaultStance = det?.defaultStance,
+                                        bookSecondaryStance = det?.secondaryStance,
+                                        bookGuards = det?.guards.orEmpty(),
+                                        onOpenCitation = { cite ->
+                                            val passage = stanceCitationPassage(book, state.context, cite)
+                                            if (passage != null && onOpenOriginal != null) {
+                                                onOpenOriginal(passage)
+                                            } else {
+                                                state.context.firstOrNull { it.id == cite.docId }?.let { blk ->
+                                                    opened = Citation("S1", cite.docId, cite.page, cite.quote) to blk
+                                                }
+                                            }
+                                        },
+                                        onSwitchStance = { nextStance -> start(block, stanceOverride = nextStance) },
+                                        onBoundaryReadBook = { start(block, stanceOverride = stanceAns.stance) },
+                                        switchEnabled = !state.switching,
+                                    )
+                                } else {
+                                    ExplanationView(book, blocks, exp, state.context) { citation ->
+                                        state.context.firstOrNull { it.id == citation.blockId }?.let {
+                                            if (onOpenOriginal != null) onOpenOriginal(BookPassage.from(book, it))
+                                            else opened = citation to it
+                                        }
+                                    }
+                                }
+                            }
+                            if (state.switching) {
+                                Text("正在换个角度整理…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                            }
                         }
                     }
                 }

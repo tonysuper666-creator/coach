@@ -347,3 +347,18 @@ tasks.register<JavaExec>("examCoverage") {
     }.flatten()
     args(examArgs)
 }
+
+// 路线 1 公开书库导入与客户端同源请求构造（TON-1977，仅测试源码集，不进正式安装包）。
+tasks.register<JavaExec>("prepareBookStanceCorpus") {
+    group = "verification"
+    description = "Import public-corpus books through TextbookLibrary and emit client-identical explain/ask payloads."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.getByName("test").runtimeClasspath
+    mainClass.set("com.coach.desktop.books.BookStanceCorpusPrep")
+    jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8", "-Djava.awt.headless=true")
+    val stanceArgs = listOf("corpus", "questions", "cache", "entry", "mode", "only", "set").mapNotNull { name ->
+        val value = providers.gradleProperty("stance.$name").orNull ?: return@mapNotNull null
+        listOf("--$name", value)
+    }.flatten()
+    args(stanceArgs)
+}

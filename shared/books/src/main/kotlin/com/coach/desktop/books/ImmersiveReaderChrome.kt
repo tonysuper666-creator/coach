@@ -1052,6 +1052,10 @@ internal fun CompanionAskPane(
     collectionFallbackPages: List<CollectionQaCitation> = emptyList(),
     onRetryCollection: () -> Unit = {},
     onOpenCollectionCitation: (CollectionQaCitation) -> Unit = {},
+    bookStanceResolution: BookStanceResolution = BookStanceResolution.Undetermined,
+    onOpenStanceCitation: ((StanceCitation, List<SourceBlock>) -> Unit)? = null,
+    onSwitchTurnStance: ((InlineExplainEntry, com.coach.protocol.BookStance) -> Unit)? = null,
+    onBoundaryReadBook: ((InlineExplainEntry) -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     val offline = LocalCoachConnectivity.current == CoachConnectivityStatus.OFFLINE
@@ -1233,10 +1237,34 @@ internal fun CompanionAskPane(
                         }
                     }
                     if (thread != null) {
+                        val detStance = bookStanceResolution as? BookStanceResolution.Determined
                         for ((index, entry) in thread.turns.withIndex()) {
                             Column(Modifier.fillMaxWidth().testTag("inline-explain-turn-$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(entry.label, style = MaterialTheme.typography.labelMedium, color = colors.actionPrimary)
-                                if (entry.explanation.citations.isEmpty()) {
+                                val stanceAns = entry.explanation.stanceAnswer
+                                if (stanceAns != null) {
+                                    LayeredAnswerCard(
+                                        book = book,
+                                        allBlocks = allBlocks,
+                                        answer = stanceAns,
+                                        bookDefaultStance = detStance?.defaultStance,
+                                        bookSecondaryStance = detStance?.secondaryStance,
+                                        bookGuards = detStance?.guards.orEmpty(),
+                                        showReaderPage = true,
+                                        onOpenCitation = { cite ->
+                                            if (onOpenStanceCitation != null) {
+                                                onOpenStanceCitation(cite, entry.sentBlocks)
+                                            } else {
+                                                entry.sentBlocks.firstOrNull { it.id == cite.docId }?.let {
+                                                    onOpenCitation(Citation("S1", cite.docId, cite.page, cite.quote), it)
+                                                }
+                                            }
+                                        },
+                                        onSwitchStance = onSwitchTurnStance?.let { cb -> { nextStance -> cb(entry, nextStance) } },
+                                        onBoundaryReadBook = onBoundaryReadBook?.let { cb -> { cb(entry) } },
+                                        switchEnabled = !thread.loading,
+                                    )
+                                } else if (entry.explanation.citations.isEmpty()) {
                                     Text(ReadableText.withoutCitationMarks(entry.explanation.text).ifBlank { "尚未收到回答" })
                                     if (entry.explanation.text.isNotBlank()) Text("回答中断", style = MaterialTheme.typography.labelSmall)
                                 } else ExplanationView(book, allBlocks, entry.explanation, entry.sentBlocks, showReaderPage = true) { citation ->

@@ -619,6 +619,9 @@ internal fun SingleBookCompanionPanel(
                                 currentPageOffset = currentPageOffset,
                                 visibleRanges = visiblePageRanges,
                                 library = library,
+                                onOpenPassage = { passage ->
+                                    onOpenAnchor(BookCompanionAnchor(passage.page, "${passage.book}:p${passage.page}:${passage.start}", passage.start, passage.end, passage.text))
+                                },
                             )
                         }
                     }

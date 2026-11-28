@@ -10,7 +10,12 @@ internal object BookLessonWire {
         blocks.all { !it.heading && it.text.isNotBlank() && it.text.length <= 8_000 } &&
         blocks.sumOf { it.text.length.toLong() } <= 24_000
 
-    fun request(requestId: String, blocks: List<SourceBlock>, bookPages: Int): JsonObject {
+    fun request(
+        requestId: String,
+        blocks: List<SourceBlock>,
+        bookPages: Int,
+        stanceRequest: ExplainStanceRequest? = null,
+    ): JsonObject {
         require(fits(blocks)) { TOO_LONG }
         require(requestId.matches(Regex("[a-f0-9]{1,32}")) && bookPages in 1..100_000)
         require(blocks.map { it.id }.distinct().size == blocks.size &&
@@ -22,6 +27,13 @@ internal object BookLessonWire {
             put("blocks", buildJsonArray {
                 blocks.forEach { block -> add(buildJsonObject { put("id", block.id); put("text", block.text) }) }
             })
+            if (stanceRequest != null) {
+                put("stance", stanceRequest.stance.wire)
+                if (stanceRequest.guards.isNotEmpty()) {
+                    put("guards", buildJsonArray { stanceRequest.guards.forEach { add(JsonPrimitive(it.wire)) } })
+                }
+                stanceRequest.readThroughPage?.let { put("readThroughPage", it) }
+            }
         }
     }
 

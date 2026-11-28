@@ -31,7 +31,8 @@ internal class ReaderTimeout(val phase: ReaderTimeoutStage) : Exception(phase.na
 /** Fixed codes only: never include model text, source text, paths or exception messages. */
 internal enum class ReaderFormatReason {
     STREAM_JSON, PAYLOAD_SIZE, PAYLOAD_JSON, ROOT_FIELDS, PARAGRAPH_COUNT,
-    PARAGRAPH_FIELDS, PARAGRAPH_TEXT, ANCHORS, DUPLICATE_ANCHORS, ANSWER_LOCATOR, ANSWER_CITATION
+    PARAGRAPH_FIELDS, PARAGRAPH_TEXT, ANCHORS, DUPLICATE_ANCHORS, ANSWER_LOCATOR, ANSWER_CITATION,
+    STANCE_LAYER, STANCE_PERSON,
 }
 internal class ReaderFormat(
     val servedBy: String? = null,
@@ -68,9 +69,16 @@ internal class ReaderBodyProgress(
     private val progressPaths: Set<Pair<List<String>, String>> = DEFAULT_PROGRESS_PATHS,
     private val progressArrayPaths: Set<List<String>> = emptySet(),
     private val allowNumbers: Boolean = false,
+    private val allowLiterals: Boolean = false,
 ) {
     companion object {
         val DEFAULT_PROGRESS_PATHS = setOf(listOf("paragraphs", "*") to "text")
+        val STANCE_PROGRESS_PATHS = setOf(
+            listOf("paragraphs", "*") to "text",
+            listOf("paragraphs", "*", "sentences", "*") to "text",
+            listOf("paragraphs", "*", "sentences", "*") to "quote",
+            emptyList<String>() to "boundary",
+        )
         val GUIDE_PROGRESS_PATHS = setOf(
             listOf("paragraphs", "*") to "text",
             listOf("hardPoints", "*") to "explanation",
@@ -88,6 +96,8 @@ internal class ReaderBodyProgress(
     private var string = false
     private var number = false
     private var numberHasDigit = false
+    private var literal: String? = null
+    private var literalPos = 0
     private var keyString = false
     private var bodyString = false
     private var escape = false
@@ -125,6 +135,20 @@ internal class ReaderBodyProgress(
                     else if (d.isLowSurrogate()) fail(StreamJsonError.BAD_SURROGATE)
                     else if (!d.isWhitespace() && !d.isISOControl() && Character.getType(d) != Character.FORMAT.toInt()) progress = true
                 }
+            }
+            if (literal != null) {
+                val expected = literal!!
+                if (c == expected[literalPos]) {
+                    literalPos++
+                    if (literalPos == expected.length) {
+                        literal = null
+                        literalPos = 0
+                        stack.lastOrNull()?.phase = 3
+                    }
+                } else {
+                    fail(StreamJsonError.UNEXPECTED_LITERAL)
+                }
+                continue
             }
             if (number) {
                 if (c in '0'..'9') {
@@ -207,6 +231,10 @@ internal class ReaderBodyProgress(
                 (c == '-' || c in '0'..'9') && allowNumbers && f?.phase == 2 -> {
                     number = true
                     numberHasDigit = c in '0'..'9'
+                }
+                allowLiterals && f?.phase == 2 && c in setOf('t', 'f', 'n') -> {
+                    literal = when (c) { 't' -> "true"; 'f' -> "false"; else -> "null" }
+                    literalPos = 1
                 }
                 c == ':' && f?.phase == 1 -> f.phase = 2
                 c == ',' && f?.phase == 3 -> f.phase = if (f.kind == '{') 0 else 2

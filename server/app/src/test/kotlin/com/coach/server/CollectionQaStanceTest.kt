@@ -236,8 +236,8 @@ class CollectionQaStanceTest {
                 assertTrue("HIGH-RISK BOUNDARY ACTIVE" in systemPrompt)
                 val modelJson = """{"paragraphs":[
                     {"layer":"book","bookId":"book-zhouyi","sentences":[
-                        {"text":"九五爻原文写有飛龍在天与利見大人。","anchors":["S1"],"quote":"飛龍在天，利見大人"},
-                        {"text":"九五爻说明当下很适合买入基金并加仓。","anchors":["S1"],"quote":"飛龍在天，利見大人"}
+                        {"text":"原文写九五为飛龍在天，利見大人。","anchors":["S1"],"quote":"飛龍在天，利見大人"},
+                        {"text":"原文写九五说明当下很适合买入基金并加仓。","anchors":["S1"],"quote":"飛龍在天，利見大人"}
                     ]},
                     {"layer":"outside","bookId":"book-zhouyi","kind":"今人解读","text":"实际投资需要看估值与个人风险承受能力。"}
                 ],"boundary":"high_risk"}"""
@@ -530,5 +530,163 @@ class CollectionQaStanceTest {
         val cites = sents.map { it.jsonObject.getValue("citations").jsonArray.single().jsonObject }
         assertEquals(listOf(qHouse, qLiving), cites.map { it.getValue("quote").jsonPrimitive.content })
         assertEquals(listOf(waldenPage.indexOf(qHouse), waldenPage.indexOf(qLiving)), cites.map { it.getValue("startUtf16").jsonPrimitive.int })
+    }
+
+    @Test
+    fun e4bStyleDropsHighRiskKybalionMedicationSentenceAndKeepsPureBookSentence() = runBlocking {
+        val kybalionPage = "There is always a correspondence between the laws and the planes of being. Different planes hold each their own harmony."
+        val kyQuote = "always a correspondence between the laws and the planes"
+        val books = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-kybalion")
+                put("title", "The Kybalion")
+                put("aliases", buildJsonArray { add(JsonPrimitive("Kybalion")) })
+                put("defaultStance", "esoteric")
+                put("guards", buildJsonArray { add(JsonPrimitive("esoteric")) })
+            })
+        }
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                val modelJson = """{"paragraphs":[{"layer":"book","bookId":"book-kybalion","sentences":[
+                    {"text":"本书认为不同层面各有对应规律，但降压药涉及真实治疗仍需遵医嘱。","anchors":["S1"],"quote":"$kyQuote"},
+                    {"text":"原文说对应在于层面。","anchors":["S1"],"quote":"$kyQuote"}
+                ]}],"boundary":"high_risk"}"""
+                return CollectionQaTransportReply(modelJson, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "esoteric")
+            put("question", "按 Kybalion，我能不能不吃降压药，靠心念调过来？")
+            put("bookStances", books)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-kybalion"); put("docLabel", "The Kybalion"); put("page", 17); put("text", kybalionPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertEquals(BookStanceCopy.HIGH_RISK_BOUNDARY, res.getValue("boundary").jsonPrimitive.content)
+        assertEquals(1, res.getValue("gate").jsonObject.getValue("droppedSentences").jsonPrimitive.int)
+        val sents = res.getValue("layers").jsonArray.single().jsonObject.getValue("sentences").jsonArray
+        assertEquals(1, sents.size)
+        assertEquals("原文说对应在于层面。", sents[0].jsonObject.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun o3aStyleRefusalOnFictionCollectionPreservesFictionNoBookNotice() = runBlocking {
+        val allowedPage = "She is tolerable, but not handsome enough to tempt me."
+        val fictionBooks = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-pride")
+                put("title", "Pride and Prejudice")
+                put("defaultStance", "original")
+                put("guards", buildJsonArray { add(JsonPrimitive("fiction")) })
+                put("readThroughPage", 12)
+                put("bookPages", 220)
+            })
+        }
+        var calls = 0
+        val transport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                calls++
+                assertTrue("""output {"paragraphs":[],"boundary":null}""" in systemPrompt)
+                // Force verified == null twice by emitting forbidden outside layer in original-only mode
+                val invalidForOriginal = """{"paragraphs":[{"layer":"outside","kind":"通行讲法","text":"前几页尚未写出结局。"}],"boundary":null}"""
+                return CollectionQaTransportReply(invalidForOriginal, "stub", 10, 10, 1, 2)
+            }
+        }
+        val request = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "original")
+            put("question", "最后伊丽莎白嫁给谁了？")
+            put("bookStances", fictionBooks)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-pride"); put("docLabel", "Pride"); put("page", 12); put("text", allowedPage)
+                })
+            })
+        }
+        val res = CollectionQaService(transport).ask(request)
+        assertEquals(2, calls)
+        assertTrue(res.getValue("modelCalled").jsonPrimitive.boolean)
+        assertTrue(res.getValue("layers").jsonArray.isEmpty())
+        assertEquals(BookStanceCopy.NO_BOOK_FICTION, res.getValue("noBookNotice").jsonPrimitive.content)
+    }
+
+    @Test
+    fun c2aAndC1aClassicCollectionPreservesOutsideAndRetriesZeroBookDropped() = runBlocking {
+        val lunyuPage = "學而時習之，不亦說乎？有朋自遠方來，不亦樂乎？"
+        val classicBooks = buildJsonArray {
+            add(buildJsonObject {
+                put("bookId", "book-lunyu")
+                put("title", "论语")
+                put("defaultStance", "classic")
+                put("guards", JsonArray(emptyList()))
+            })
+        }
+
+        // Case C2-A: outside answer with tolerable formatting (empty anchors/newline/bookTitle) is preserved cleanly
+        val c2aTransport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                val payload = """{"stance":"classic","paragraphs":[{"layer":"outside","kind":"注家读法","bookTitle":"论语","anchors":[],"text":"朱熹在论语集注中\n将「習」解释为鸟数飞。"}],"boundary":null}"""
+                return CollectionQaTransportReply(payload, "stub", 10, 10, 1, 2)
+            }
+        }
+        val c2aReq = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "classic")
+            put("question", "朱熹怎么解释「習」？")
+            put("bookStances", classicBooks)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-lunyu"); put("docLabel", "论语"); put("page", 1); put("text", lunyuPage)
+                })
+            })
+        }
+        val c2aRes = CollectionQaService(c2aTransport).ask(c2aReq)
+        assertFalse(c2aRes.getValue("insufficientEvidence").jsonPrimitive.boolean)
+        val c2aLayers = c2aRes.getValue("layers").jsonArray
+        assertEquals(1, c2aLayers.size)
+        assertEquals("outside", c2aLayers[0].jsonObject.getValue("layer").jsonPrimitive.content)
+        assertTrue("朱熹" in c2aLayers[0].jsonObject.getValue("text").jsonPrimitive.content)
+        assertEquals(BookStanceCopy.NO_BOOK_DIRECT, c2aRes.getValue("noBookNotice").jsonPrimitive.content)
+
+        // Case C1-A: attempt 1 drops all book sentences (ungrounded), attempt 2 retries and recovers book sentence
+        var c1aCalls = 0
+        val c1aTransport = object : CollectionQaTransport {
+            override suspend fun ask(systemPrompt: String, userPrompt: String, friend: String?, device: String?, maxTokens: Int): CollectionQaTransportReply {
+                c1aCalls++
+                val payload = if (c1aCalls == 1) {
+                    """{"paragraphs":[{"layer":"book","bookId":"book-lunyu","sentences":[
+                        {"text":"宇宙星辰与航海规则十分重要。","anchors":["S1"],"quote":"學而時習之，不亦說乎"}
+                    ]}],"boundary":null}"""
+                } else {
+                    """{"paragraphs":[{"layer":"book","bookId":"book-lunyu","sentences":[
+                        {"text":"原文说学了以后时常复习也很喜悦。","anchors":["S1"],"quote":"學而時習之，不亦說乎"}
+                    ]}],"boundary":null}"""
+                }
+                return CollectionQaTransportReply(payload, "stub", 10, 10, 1, 2)
+            }
+        }
+        val c1aReq = buildJsonObject {
+            put("collectionId", "__virtual_read_library__")
+            put("collectionKind", "BOOKLIST")
+            put("stance", "classic")
+            put("question", "这一章原文在说什么？")
+            put("bookStances", classicBooks)
+            put("blocks", buildJsonArray {
+                add(buildJsonObject {
+                    put("blockId", "B1"); put("bookId", "book-lunyu"); put("docLabel", "论语"); put("page", 1); put("text", lunyuPage)
+                })
+            })
+        }
+        val c1aRes = CollectionQaService(c1aTransport).ask(c1aReq)
+        assertEquals(2, c1aCalls)
+        assertEquals(1, c1aRes.getValue("layers").jsonArray.single().jsonObject.getValue("sentences").jsonArray.size)
+        assertTrue(c1aRes["noBookNotice"] is JsonNull)
     }
 }

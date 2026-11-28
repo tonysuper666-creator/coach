@@ -21,6 +21,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
+import org.slf4j.LoggerFactory
 
 internal data class CollectionBookStanceSpec(
     val bookId: String,
@@ -171,6 +172,7 @@ internal object EsotericBookMatcher {
 }
 
 internal object CollectionQaStanceEngine {
+    private val log = LoggerFactory.getLogger("coach.reader")
     private val json = Json { ignoreUnknownKeys = true }
     private val blockIdRegex = Regex("""B\d{1,2}""")
     private val leakageRegex = Regex(
@@ -406,18 +408,28 @@ internal object CollectionQaStanceEngine {
         )
 
         var rejectReason: RejectReason? = null
-        fun checkAttempt(text: String): VerifiedCollectionResult? = checkedPayload(
-            payload = text,
-            blocks = stanceBlocks,
-            byAnchor = byAnchor,
-            anchorTextMap = anchorTextMap,
-            books = parsedBooks,
-            bookById = bookById,
-            esotericBookIds = esotericBookIds,
-            preHighRisk = preHighRisk,
-            responseStanceWire = responseStanceWire,
-            onReject = { rejectReason = it },
-        )
+        val attemptRejects = mutableListOf<String>()
+        fun checkAttempt(attempt: Int, text: String): VerifiedCollectionResult? {
+            rejectReason = null
+            val res = checkedPayload(
+                payload = text,
+                blocks = stanceBlocks,
+                byAnchor = byAnchor,
+                anchorTextMap = anchorTextMap,
+                books = parsedBooks,
+                bookById = bookById,
+                esotericBookIds = esotericBookIds,
+                preHighRisk = preHighRisk,
+                responseStanceWire = responseStanceWire,
+                onReject = { rejectReason = it },
+            )
+            if (res == null) {
+                val code = (rejectReason ?: RejectReason.JSON).name
+                attemptRejects += code
+                log.info("COACH collection.stance.reject attempt={} reason={}", attempt, code)
+            }
+            return res
+        }
 
         val reply1 = transport.ask(
             systemPrompt = sysPrompt,
@@ -426,7 +438,7 @@ internal object CollectionQaStanceEngine {
             device = device,
             maxTokens = 6144,
         )
-        val verified1 = checkAttempt(reply1.text)
+        val verified1 = checkAttempt(1, reply1.text)
         var verified = verified1
         var lastReply = reply1
         val needsCitationRetry = verified1 != null && verified1.totalBookSentences == 0 &&
@@ -446,7 +458,7 @@ internal object CollectionQaStanceEngine {
                 maxTokens = 6144,
             )
             lastReply = reply2
-            val verified2 = checkAttempt(reply2.text)
+            val verified2 = checkAttempt(2, reply2.text)
             verified = when {
                 verified1 == null -> verified2
                 verified2 != null && (verified2.totalBookSentences > 0 || verified1.layers.isEmpty()) -> verified2
@@ -489,6 +501,7 @@ internal object CollectionQaStanceEngine {
                 modelCalled = true,
                 droppedSentences = 0,
                 outOfRange = 0,
+                rejects = attemptRejects,
                 elapsedMs = elapsedMs,
                 servedBy = lastReply.servedBy,
                 ttftMs = lastReply.ttftMs,
@@ -507,6 +520,7 @@ internal object CollectionQaStanceEngine {
             modelCalled = true,
             droppedSentences = finalVerified.droppedSentences,
             outOfRange = finalVerified.outOfRange,
+            rejects = attemptRejects,
             elapsedMs = elapsedMs,
             servedBy = lastReply.servedBy,
             ttftMs = lastReply.ttftMs,
@@ -1045,6 +1059,7 @@ internal object CollectionQaStanceEngine {
         modelCalled: Boolean,
         droppedSentences: Int,
         outOfRange: Int,
+        rejects: List<String> = emptyList(),
         elapsedMs: Long,
         servedBy: String,
         ttftMs: Long,
@@ -1139,6 +1154,7 @@ internal object CollectionQaStanceEngine {
             put("gate", buildJsonObject {
                 put("droppedSentences", droppedSentences)
                 put("outOfRange", outOfRange)
+                put("rejects", buildJsonArray { rejects.forEach { add(JsonPrimitive(it)) } })
             })
             put("text", summaryText)
             put("sentences", JsonArray(emptyList()))

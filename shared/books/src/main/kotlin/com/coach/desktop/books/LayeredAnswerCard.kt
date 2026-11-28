@@ -34,6 +34,17 @@ import com.coach.protocol.BookStanceGuard
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.V7TextButton
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 /**
  * 随单书讲解/选段提问请求发往服务端的立场与边界参数。
@@ -101,6 +112,187 @@ internal data class StanceAnswer(
     val droppedSentences: Int = 0,
     val outOfRange: Int = 0,
 )
+
+/**
+ * 立场回答与旧版出处的持久化编解码器（向下兼容 `book_ask_turns.citations_json`）：
+ * - 非立场回答（`stanceAnswer == null`）仍以旧格式 JSON 数组落盘，不改动既有同步与迁移行为；
+ * - 立场回答以 JSON 对象 `{"citations":[...],"stanceAnswer":{...}}` 落盘，重开后完整恢复
+ *   原题头、分层、逐句引文 UTF-16 区间、系统提示与拦截卡。
+ */
+internal object StanceAnswerCodec {
+    private val json = Json { ignoreUnknownKeys = true }
+
+    fun encodeCitationsColumn(explanation: Explanation): String {
+        val flat = buildJsonArray {
+            for (c in explanation.citations) {
+                add(buildJsonObject {
+                    put("anchor", c.anchor)
+                    put("blockId", c.blockId)
+                    put("page", c.page)
+                    if (c.quote.isNotEmpty()) put("quote", c.quote)
+                })
+            }
+        }
+        val stanceAnswer = explanation.stanceAnswer ?: return flat.toString()
+        return buildJsonObject {
+            put("citations", flat)
+            put("stanceAnswer", encodeStanceAnswer(stanceAnswer))
+        }.toString()
+    }
+
+    fun decodeCitationsColumn(raw: String): Pair<List<Citation>, StanceAnswer?> {
+        if (raw.isBlank()) return emptyList<Citation>() to null
+        val root = runCatching { json.parseToJsonElement(raw) }.getOrNull() ?: return emptyList<Citation>() to null
+        return when (root) {
+            is JsonArray -> parseFlatCitations(root) to null
+            is JsonObject -> {
+                val flat = (root["citations"] as? JsonArray)?.let(::parseFlatCitations).orEmpty()
+                val stance = (root["stanceAnswer"] as? JsonObject)?.let(::decodeStanceAnswer)
+                flat to stance
+            }
+            else -> emptyList<Citation>() to null
+        }
+    }
+
+    private fun parseFlatCitations(arr: JsonArray): List<Citation> = arr.mapNotNull { el ->
+        val o = el as? JsonObject ?: return@mapNotNull null
+        Citation(
+            anchor = o["anchor"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            blockId = o["blockId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+            page = o["page"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+            quote = o["quote"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        )
+    }
+
+    fun encodeStanceAnswer(answer: StanceAnswer): JsonObject = buildJsonObject {
+        put("stance", answer.stance.wire)
+        put("layers", buildJsonArray {
+            for (layer in answer.layers) {
+                add(buildJsonObject {
+                    put("layer", layer.kind.wire)
+                    put("label", layer.label)
+                    when (layer) {
+                        is StanceLayer.Book -> put("sentences", buildJsonArray {
+                            for (s in layer.sentences) {
+                                add(buildJsonObject {
+                                    put("text", s.text)
+                                    put("citations", buildJsonArray {
+                                        for (c in s.citations) {
+                                            add(buildJsonObject {
+                                                put("docId", c.docId)
+                                                put("pdfPage", c.page)
+                                                put("startUtf16", c.startUtf16)
+                                                put("endUtf16", c.endUtf16)
+                                                put("quote", c.quote)
+                                            })
+                                        }
+                                    })
+                                })
+                            }
+                        })
+                        is StanceLayer.Outside -> put("text", layer.text)
+                        is StanceLayer.Guess -> put("text", layer.text)
+                    }
+                })
+            }
+        })
+        answer.systemNotice?.let { put("systemNotice", it) }
+        answer.noBookNotice?.let { put("noBookNotice", it) }
+        answer.boundary?.let { b ->
+            put("boundary", buildJsonObject {
+                put("kind", b.kind)
+                put("message", b.message)
+                put("actionLabel", b.actionLabel)
+            })
+        }
+        put("modelCalled", answer.modelCalled)
+        put("droppedSentences", answer.droppedSentences)
+        put("outOfRange", answer.outOfRange)
+    }
+
+    fun decodeStanceAnswer(obj: JsonObject): StanceAnswer? {
+        val stance = BookStance.fromWire((obj["stance"] as? JsonPrimitive)?.contentOrNull) ?: return null
+        val modelCalled = (obj["modelCalled"] as? JsonPrimitive)?.booleanOrNull ?: true
+        val dropped = (obj["droppedSentences"] as? JsonPrimitive)?.intOrNull ?: 0
+        val outOfRange = (obj["outOfRange"] as? JsonPrimitive)?.intOrNull ?: 0
+        val systemNotice = (obj["systemNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val noBookNotice = (obj["noBookNotice"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val boundary = (obj["boundary"] as? JsonObject)?.let { bObj ->
+            val kind = (bObj["kind"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: BookStanceCopy.ESOTERIC_BOUNDARY_KIND
+            val message = (bObj["message"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: BookStanceCopy.ESOTERIC_BOUNDARY_TEXT
+            val actionLabel = (bObj["actionLabel"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: BookStanceCopy.ESOTERIC_BOUNDARY_ACTION
+            StanceBoundary(kind, message, actionLabel)
+        }
+        val layers = mutableListOf<StanceLayer>()
+        for (el in (obj["layers"] as? JsonArray).orEmpty()) {
+            val lObj = el as? JsonObject ?: continue
+            val kind = AnswerLayerKind.fromWire((lObj["layer"] as? JsonPrimitive)?.contentOrNull) ?: continue
+            val label = (lObj["label"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            when (kind) {
+                AnswerLayerKind.OUTSIDE -> {
+                    val text = (lObj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                    layers += StanceLayer.Outside(label, text)
+                }
+                AnswerLayerKind.GUESS -> {
+                    val text = (lObj["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                    layers += StanceLayer.Guess(label, text)
+                }
+                AnswerLayerKind.BOOK -> {
+                    val rawSents = lObj["sentences"] as? JsonArray ?: continue
+                    if (rawSents.isEmpty()) continue
+                    var valid = true
+                    val sents = mutableListOf<StanceBookSentence>()
+                    for (sEl in rawSents) {
+                        val sObj = sEl as? JsonObject
+                        val sText = (sObj?.get("text") as? JsonPrimitive)?.contentOrNull?.trim()
+                        val rawCites = sObj?.get("citations") as? JsonArray
+                        if (sText.isNullOrBlank() || rawCites == null || rawCites.isEmpty()) {
+                            valid = false
+                            break
+                        }
+                        val cites = mutableListOf<StanceCitation>()
+                        for (cEl in rawCites) {
+                            val cObj = cEl as? JsonObject
+                            val docId = (cObj?.get("docId") as? JsonPrimitive)?.contentOrNull?.trim()
+                            val page = (cObj?.get("pdfPage") as? JsonPrimitive)?.intOrNull
+                            val startUtf16 = (cObj?.get("startUtf16") as? JsonPrimitive)?.intOrNull
+                            val endUtf16 = (cObj?.get("endUtf16") as? JsonPrimitive)?.intOrNull
+                            val quote = (cObj?.get("quote") as? JsonPrimitive)?.contentOrNull
+                            if (docId.isNullOrBlank() || page == null || startUtf16 == null || endUtf16 == null ||
+                                startUtf16 < 0 || endUtf16 <= startUtf16 || quote.isNullOrBlank()
+                            ) {
+                                valid = false
+                                break
+                            }
+                            cites += StanceCitation(docId, page, startUtf16, endUtf16, quote)
+                        }
+                        if (!valid || cites.isEmpty()) {
+                            valid = false
+                            break
+                        }
+                        sents += StanceBookSentence(sText, cites)
+                    }
+                    if (valid && sents.isNotEmpty()) {
+                        layers += StanceLayer.Book(label, sents)
+                    }
+                }
+            }
+        }
+        return StanceAnswer(
+            stance = stance,
+            layers = layers,
+            systemNotice = systemNotice,
+            noBookNotice = noBookNotice,
+            boundary = boundary,
+            modelCalled = modelCalled,
+            droppedSentences = dropped,
+            outOfRange = outOfRange,
+        )
+    }
+}
 
 /**
  * 将逐句出处还原为原页上的精确 [BookPassage]（UTF-16 区间），点哪句就高亮哪句的原句。

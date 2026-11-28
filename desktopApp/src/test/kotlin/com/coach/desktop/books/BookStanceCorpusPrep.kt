@@ -35,9 +35,44 @@ object BookStanceCorpusPrep {
         val questionsPath = Path.of(requireNotNull(opts["--questions"]) { "missing --questions" }).toAbsolutePath().normalize()
         val cacheDir = Path.of(requireNotNull(opts["--cache"]) { "missing --cache" }).toAbsolutePath().normalize()
         val entry = opts["--entry"] ?: "ask"
+        val mode = opts["--mode"] ?: "forced"
         val onlyIds = opts["--only"]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
         val includeLocked = (opts["--set"] == "locked")
+        val forcedConfig = opts["--forced-config"]?.takeIf { it.isNotBlank() }?.let { Path.of(it).toAbsolutePath().normalize() }
+        val noSeedForced = opts["--no-seed-forced"]?.equals("true", ignoreCase = true) == true
 
+        val preparedPayload = prepare(
+            corpusDir = corpusDir,
+            questionsPath = questionsPath,
+            cacheDir = cacheDir,
+            entry = entry,
+            mode = mode,
+            onlyIds = onlyIds,
+            includeLocked = includeLocked,
+            forcedConfig = forcedConfig,
+            seedForcedFile = (mode == "forced" && forcedConfig == null && !noSeedForced),
+        )
+        val outFile = cacheDir.resolve("prepared-$entry.json")
+        Files.writeString(outFile, json.encodeToString(JsonObject.serializer(), preparedPayload))
+        System.err.println("[prep] wrote ${preparedPayload.getValue("items").jsonArray.size} items to $outFile")
+    }
+
+    /**
+     * 通过客户端正式 [BookStanceSources.forLibrary] 判定每本书的立场、限制标记与 `stanceSource`：
+     * - 已判定：从 [BookStanceResolution.Determined] 读取 `defaultStance`、`guards` 和 `source`（仅换立场题使用 `switchTo` 切换目标立场，仍保留客户端判定的 `guards`）；
+     * - 未判定（如缺少 `book-stance-forced.json` 或书不在文件里）：记录 `stanceSource = "undetermined"`，按真实客户端上线边界发旧路径请求（不带 `stance` / `guards`），让验收脚本能捕获配置未生效。
+     */
+    internal fun prepare(
+        corpusDir: Path,
+        questionsPath: Path,
+        cacheDir: Path,
+        entry: String = "ask",
+        mode: String = "forced",
+        onlyIds: Set<String>? = null,
+        includeLocked: Boolean = false,
+        forcedConfig: Path? = null,
+        seedForcedFile: Boolean = false,
+    ): JsonObject {
         Files.createDirectories(cacheDir)
         val libDir = cacheDir.resolve("library")
         val library = TextbookLibrary(libDir, lazyPdfExtras = true, todayCardEnabled = false)
@@ -62,7 +97,7 @@ object BookStanceCorpusPrep {
         val importedByKey = LinkedHashMap<String, Textbook>()
         val existingByHash = library.catalog().associateBy { it.id }
 
-        // Always import all 10 corpus books when no --only filter, or only needed books when filtered
+        // Always import all corpus books when no --only filter, or only needed books when filtered
         val keysToImport = if (onlyIds == null) booksSpec.keys else neededBookKeys
         for (bookKey in keysToImport) {
             val meta = booksSpec[bookKey]?.jsonObject ?: error("Unknown book key: $bookKey")
@@ -80,24 +115,32 @@ object BookStanceCorpusPrep {
             importedByKey[bookKey] = book
         }
 
-        // Write book-stance-forced.json using real imported SHA-256 hashes (also reusable on winbox!)
-        val forcedJson = buildJsonObject {
-            for ((bookKey, book) in importedByKey) {
-                val meta = booksSpec.getValue(bookKey).jsonObject
-                put(book.id, buildJsonObject {
-                    put("bookKey", bookKey)
-                    put("title", book.title)
-                    put("defaultStance", (meta["defaultStance"] as JsonPrimitive).content)
-                    val sec = (meta["secondaryStance"] as? JsonPrimitive)?.contentOrNull
-                    if (sec != null) put("secondaryStance", sec)
-                    put("guards", meta["guards"] ?: JsonArray(emptyList()))
-                })
+        val libForcedFile = libDir.resolve(ForcedFileBookStanceSource.FILE_NAME)
+        if (forcedConfig != null) {
+            Files.deleteIfExists(libForcedFile)
+            if (Files.isRegularFile(forcedConfig)) {
+                Files.copy(forcedConfig, libForcedFile)
             }
+        } else if (seedForcedFile && mode == "forced") {
+            val forcedJson = buildJsonObject {
+                for ((bookKey, book) in importedByKey) {
+                    val meta = booksSpec.getValue(bookKey).jsonObject
+                    put(book.id, buildJsonObject {
+                        put("bookKey", bookKey)
+                        put("title", book.title)
+                        put("defaultStance", (meta["defaultStance"] as JsonPrimitive).content)
+                        val sec = (meta["secondaryStance"] as? JsonPrimitive)?.contentOrNull
+                        if (sec != null) put("secondaryStance", sec)
+                        put("guards", meta["guards"] ?: JsonArray(emptyList()))
+                    })
+                }
+            }
+            val forcedText = json.encodeToString(JsonObject.serializer(), forcedJson)
+            Files.writeString(cacheDir.resolve(ForcedFileBookStanceSource.FILE_NAME), forcedText)
+            Files.writeString(libForcedFile, forcedText)
         }
-        val forcedText = json.encodeToString(JsonObject.serializer(), forcedJson)
-        Files.writeString(cacheDir.resolve(ForcedFileBookStanceSource.FILE_NAME), forcedText)
-        Files.writeString(libDir.resolve(ForcedFileBookStanceSource.FILE_NAME), forcedText)
 
+        val stanceSourceResolver = BookStanceSources.forLibrary(library)
         val pageTexts = LinkedHashMap<String, String>()
         val preparedItems = buildJsonArray {
             for (item in targetItems) {
@@ -141,13 +184,12 @@ object BookStanceCorpusPrep {
                     }
                 }
 
-                val stanceWire = (item["stance"] as JsonPrimitive).content
-                val stance = requireNotNull(BookStance.fromWire(stanceWire)) { "Bad stance: $stanceWire" }
-                val initialStanceWire = (item["initialStance"] as? JsonPrimitive)?.contentOrNull
-                val initialStance = initialStanceWire?.let { requireNotNull(BookStance.fromWire(it)) }
-                val guards = (item["guards"] as? JsonArray).orEmpty().mapNotNull {
-                    BookStanceGuard.fromWire((it as? JsonPrimitive)?.contentOrNull)
-                }.toSet()
+                // 真实走客户端 BookStanceSources.forLibrary(library).resolve(book) 判定立场、限制标记与来源
+                val resolution = stanceSourceResolver.resolve(book)
+                val determined = resolution as? BookStanceResolution.Determined
+                val actualStanceSource = determined?.source ?: "undetermined"
+                val resolvedGuards = determined?.guards.orEmpty()
+
                 val rawRtp = item["readThroughPage"]
                 val readThroughPage: Int? = when {
                     rawRtp == null || rawRtp is JsonNull -> null
@@ -156,14 +198,14 @@ object BookStanceCorpusPrep {
                     else -> null
                 }
                 val strictSinglePage = (item["strictSinglePage"] as? JsonPrimitive)?.booleanOrNull == true
-                val effectiveReadThroughPage: Int? = if (BookStanceGuard.FICTION in guards) {
+                val effectiveReadThroughPage: Int? = if (BookStanceGuard.FICTION in resolvedGuards) {
                     if (readThroughPage != null) maxOf(readThroughPage, chosen.page) else chosen.page
                 } else null
 
                 val kind = if (entry == "explain") "explain" else "ask"
                 val question = (item["question"] as? JsonPrimitive)?.contentOrNull
 
-                fun buildWire(targetStance: BookStance): JsonObject {
+                fun buildWire(stanceReq: ExplainStanceRequest?): JsonObject {
                     val reqId = UUID.randomUUID().toString().replace("-", "")
                     val base = ExplainWire.selectionRequest(
                         requestId = reqId,
@@ -172,15 +214,29 @@ object BookStanceCorpusPrep {
                         blocks = sentBlocks,
                         sectionContext = secCtx,
                         question = if (kind == "ask") question else null,
-                        stanceRequest = ExplainStanceRequest(
-                            stance = targetStance,
-                            guards = guards,
-                            readThroughPage = readThroughPage,
-                            bookPages = bookPages,
-                        ),
+                        stanceRequest = stanceReq,
                     )
                     return BookLessonWire.withSource(base, snapshot)
                 }
+
+                val switchTarget = (item["switchTo"] as? JsonPrimitive)?.contentOrNull?.let(BookStance::fromWire)
+                val hasInitialStep = item["initialStance"] != null && item["initialStance"] !is JsonNull
+                val mainStanceReq = determined?.let { det ->
+                    ExplainStanceRequest(
+                        stance = switchTarget ?: det.defaultStance,
+                        guards = det.guards,
+                        readThroughPage = readThroughPage,
+                        bookPages = bookPages,
+                    )
+                }
+                val initialStanceReq = if (determined != null && hasInitialStep) {
+                    ExplainStanceRequest(
+                        stance = determined.defaultStance,
+                        guards = determined.guards,
+                        readThroughPage = readThroughPage,
+                        bookPages = bookPages,
+                    )
+                } else null
 
                 add(buildJsonObject {
                     put("id", id)
@@ -192,29 +248,34 @@ object BookStanceCorpusPrep {
                     put("locator", locator)
                     put("selectionPage", chosen.page)
                     put("selectionBlockId", chosen.id)
+                    put("stanceSource", actualStanceSource)
+                    if (determined != null) {
+                        put("resolvedDefaultStance", determined.defaultStance.wire)
+                        put("resolvedGuards", buildJsonArray { determined.guards.forEach { add(JsonPrimitive(it.wire)) } })
+                    } else {
+                        put("resolvedDefaultStance", JsonNull)
+                        put("resolvedGuards", JsonArray(emptyList()))
+                    }
                     if (readThroughPage != null) put("readThroughPage", readThroughPage) else put("readThroughPage", JsonNull)
                     if (effectiveReadThroughPage != null) put("effectiveReadThroughPage", effectiveReadThroughPage) else put("effectiveReadThroughPage", JsonNull)
                     put("strictSinglePage", strictSinglePage)
                     put("meta", item)
-                    put("request", buildWire(stance))
-                    if (initialStance != null) {
-                        put("initialStance", initialStance.wire)
-                        put("initialRequest", buildWire(initialStance))
+                    put("request", buildWire(mainStanceReq))
+                    if (initialStanceReq != null) {
+                        put("initialStance", initialStanceReq.stance.wire)
+                        put("initialRequest", buildWire(initialStanceReq))
                     }
                 })
             }
         }
 
-        val preparedPayload = buildJsonObject {
+        return buildJsonObject {
             put("entry", entry)
             put("items", preparedItems)
             put("pages", buildJsonObject {
                 for ((k, v) in pageTexts) put(k, v)
             })
         }
-        val outFile = cacheDir.resolve("prepared-$entry.json")
-        Files.writeString(outFile, json.encodeToString(JsonObject.serializer(), preparedPayload))
-        System.err.println("[prep] wrote ${preparedItems.size} items to $outFile")
     }
 
     private fun locateBlock(book: Textbook, locator: String): Pair<SourceBlock, Int>? {

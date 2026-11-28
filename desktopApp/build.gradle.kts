@@ -356,9 +356,19 @@ tasks.register<JavaExec>("prepareBookStanceCorpus") {
     classpath = sourceSets.getByName("test").runtimeClasspath
     mainClass.set("com.coach.desktop.books.BookStanceCorpusPrep")
     jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8", "-Djava.awt.headless=true")
-    val stanceArgs = listOf("corpus", "questions", "cache", "entry", "mode", "only", "set").mapNotNull { name ->
-        val value = providers.gradleProperty("stance.$name").orNull ?: return@mapNotNull null
-        listOf("--$name", value)
+    val stanceArgs = listOf(
+        "corpus" to "--corpus",
+        "questions" to "--questions",
+        "cache" to "--cache",
+        "entry" to "--entry",
+        "mode" to "--mode",
+        "only" to "--only",
+        "set" to "--set",
+        "forcedConfig" to "--forced-config",
+        "noSeedForced" to "--no-seed-forced",
+    ).mapNotNull { (prop, flag) ->
+        val value = providers.gradleProperty("stance.$prop").orNull ?: return@mapNotNull null
+        listOf(flag, value)
     }.flatten()
     args(stanceArgs)
 }

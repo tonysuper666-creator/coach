@@ -1001,6 +1001,12 @@ internal fun checkedStancePayload(
                         continue
                     }
 
+                    // 规则 1：逐句核对陈述与该句所引原文是否内容相符，防止无关句借用另一句的真实引文冒充「本书」
+                    if (!StanceClaimSupport.isSupported(text, citations, blocks)) {
+                        droppedSentences++
+                        continue
+                    }
+
                     // 层标签全部由程序按立场与出处块决定，不由模型决定（§2）
                     val label = when (stance) {
                         BookStance.KNOWLEDGE, BookStance.ESOTERIC, BookStance.ORIGINAL -> BookStanceCopy.BOOK_DEFAULT

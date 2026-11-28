@@ -77,6 +77,8 @@ def prepare_corpus_requests(
     stance_mode: str,
     only: str | None,
     set_name: str | None,
+    forced_config: Path | None = None,
+    no_seed_forced: bool = False,
 ) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     gradle_args = [
@@ -93,6 +95,10 @@ def prepare_corpus_requests(
         gradle_args.append(f"-Pstance.only={only}")
     if set_name:
         gradle_args.append(f"-Pstance.set={set_name}")
+    if forced_config is not None:
+        gradle_args.append(f"-Pstance.forcedConfig={forced_config}")
+    if no_seed_forced:
+        gradle_args.append("-Pstance.noSeedForced=true")
     print(f"[run] preparing corpus & client wire payloads ({entry}) ...", file=sys.stderr, flush=True)
     subprocess.run(gradle_args, cwd=ROOT, check=True)
     prepared = cache_dir / f"prepared-{entry}.json"
@@ -133,14 +139,15 @@ def post_explain(server_url: str, token: str, device_id: str, payload: dict[str,
 
 def post_explain_with_retry(server_url: str, token: str, device_id: str, payload: dict[str, Any], retries: int = 2) -> dict[str, Any]:
     last_err: Exception | None = None
+    expect_stance = "stance" in payload and payload["stance"] is not None
     for attempt in range(retries + 1):
         req_payload = dict(payload)
         if attempt > 0:
             req_payload["requestId"] = uuid.uuid4().hex
         try:
             res = post_explain(server_url, token, device_id, req_payload)
-            # If the server returned a transient legacy error without `stance` field, retry once
-            if "stance" not in res and attempt < retries:
+            # Only retry on missing `stance` when the request itself actually asked for a stance response
+            if expect_stance and "stance" not in res and attempt < retries:
                 time.sleep(1.5)
                 continue
             return res
@@ -235,6 +242,8 @@ def main() -> int:
     parser.add_argument("--device-id", default="desktop")
     parser.add_argument("--bridge-python", type=Path, default=None)
     parser.add_argument("--concurrency", type=int, default=2)
+    parser.add_argument("--forced-config", type=Path, default=None, help="Existing book-stance-forced.json to test without auto-seeding")
+    parser.add_argument("--no-seed-forced", action="store_true", help="Do not auto-write book-stance-forced.json; resolve from existing library state only")
     args = parser.parse_args()
 
     if args.entry == "collection":
@@ -250,19 +259,28 @@ def main() -> int:
     corpus_dir = args.corpus.expanduser().resolve()
     out_dir = args.out.resolve()
     cache_dir = args.cache.resolve()
+    forced_config = args.forced_config.expanduser().resolve() if args.forced_config else None
 
-    prepared_path = prepare_corpus_requests(corpus_dir, cache_dir, args.entry, args.stance, args.only, args.set_name)
+    prepared_path = prepare_corpus_requests(
+        corpus_dir,
+        cache_dir,
+        args.entry,
+        args.stance,
+        args.only,
+        args.set_name,
+        forced_config=forced_config,
+        no_seed_forced=args.no_seed_forced,
+    )
     prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
     items = prepared["items"]
     pages = prepared["pages"]
 
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
+    # 保留已有输出目录中的既有文件，仅按需创建目录并覆盖本次产物，绝不递归删除 out_dir。
     (out_dir / "answers").mkdir(parents=True, exist_ok=True)
     (out_dir / "pages.json").write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
 
-    # Copy generated book-stance-forced.json alongside out for convenience
-    forced_file = cache_dir / "book-stance-forced.json"
+    # Copy active book-stance-forced.json from the library directory if present
+    forced_file = cache_dir / "library" / "book-stance-forced.json"
     if forced_file.is_file():
         shutil.copy2(forced_file, out_dir / "book-stance-forced.json")
 
@@ -406,7 +424,9 @@ def main() -> int:
                 "selectionBlockId": item["selectionBlockId"],
                 "readThroughPage": item.get("readThroughPage"),
                 "effectiveReadThroughPage": item.get("effectiveReadThroughPage"),
-                "stanceSource": expected_source,
+                "stanceSource": item.get("stanceSource", "undetermined"),
+                "resolvedDefaultStance": item.get("resolvedDefaultStance"),
+                "resolvedGuards": item.get("resolvedGuards"),
                 "meta": item["meta"],
             }
             if "initialStance" in item:

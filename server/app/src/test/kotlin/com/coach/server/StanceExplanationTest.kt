@@ -116,6 +116,75 @@ class StanceExplanationTest {
     }
 
     /**
+     * QA 回归反例：两句共用同一个真实引文（且带完全相同的真实 quote），原文只支持第一句，
+     * 第二句（含反序、含虚词陷阱、中文对中文、英文对英文）一律不得借用他人引文标成「本书」。
+     */
+    @Test
+    fun unrelatedStatementBorrowingSameRealQuoteIsDroppedPerSentence() {
+        val evidence = "Only pears grow in this orchard."
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("a".repeat(64) + ":p1:0", 1, evidence))),
+            BookStance.KNOWLEDGE,
+        )
+        // 1. 中文陈述共用英文真实引文（原顺序）
+        val forward = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"果园里只种梨。","anchors":["S1"],"quote":"$evidence"},
+                {"text":"月球表面有一座歌剧院。","anchors":["S1"],"quote":"$evidence"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val r1 = assertNotNull(checkedStancePayload(forward, pack, BookStance.KNOWLEDGE))
+        val kept1 = r1.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, kept1.size, "kept=${kept1.size}, dropped=${r1.droppedSentences}")
+        assertEquals("果园里只种梨。", kept1.single().text)
+        assertEquals(1, r1.droppedSentences)
+
+        // 2. 反序 + 虚词陷阱（「只」不得借 "Only" 放过无关句）
+        val reversed = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"月球表面只有一座歌剧院。","anchors":["S1"],"quote":"$evidence"},
+                {"text":"果园里只种梨。","anchors":["S1"],"quote":"$evidence"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val r2 = assertNotNull(checkedStancePayload(reversed, pack, BookStance.KNOWLEDGE))
+        val kept2 = r2.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, kept2.size)
+        assertEquals("果园里只种梨。", kept2.single().text)
+        assertEquals(1, r2.droppedSentences)
+
+        // 3. 中文原文共用同一真实引文
+        val zhEvidence = "道可道，非常道。"
+        val zhPack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("b".repeat(64) + ":p1:0", 1, zhEvidence))),
+            BookStance.CLASSIC,
+        )
+        val zhPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"能够言说的道并非恒常之道。","anchors":["S1"],"quote":"$zhEvidence"},
+                {"text":"月球表面有一座歌剧院。","anchors":["S1"],"quote":"$zhEvidence"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val r3 = assertNotNull(checkedStancePayload(zhPayload, zhPack, BookStance.CLASSIC))
+        val kept3 = r3.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, kept3.size)
+        assertEquals("能够言说的道并非恒常之道。", kept3.single().text)
+        assertEquals(1, r3.droppedSentences)
+
+        // 4. 英文陈述共用英文真实引文
+        val enPayload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"Only pears are grown inside the orchard.","anchors":["S1"],"quote":"$evidence"},
+                {"text":"An opera house stands on the lunar surface.","anchors":["S1"],"quote":"$evidence"}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val r4 = assertNotNull(checkedStancePayload(enPayload, pack, BookStance.KNOWLEDGE))
+        val kept4 = r4.layers.filterIsInstance<CheckedStanceLayer.Book>().flatMap { it.sentences }
+        assertEquals(1, kept4.size)
+        assertEquals("Only pears are grown inside the orchard.", kept4.single().text)
+        assertEquals(1, r4.droppedSentences)
+    }
+
+    /**
      * 反例 2（TON-1976 §3）：小说书在 knowledge 立场下，模型给了超过有效进度的出处：
      * 这一句被丢、越界记 1。
      */

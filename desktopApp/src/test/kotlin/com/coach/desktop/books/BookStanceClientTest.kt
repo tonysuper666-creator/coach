@@ -318,4 +318,239 @@ class BookStanceClientTest {
             http.stop(0)
         }
     }
+
+    /**
+     * QA 回归（Fix #2）：通过 `beginBookQuestion -> finishBookQuestion -> loadLatestAskThread`
+     * 以及 `saveAskTurn -> loadLatestAskThread` 保存并重开回答，必须完整恢复原题头、分层、
+     * 逐句引文 UTF-16 范围、原问题与操作类型，绝不能丢失 `stanceAnswer` 退化成旧格式。
+     */
+    @Test
+    fun persistedStanceAnswerSurvivesBeginFinishAndSaveReopen() {
+        val root = folder.root.toPath()
+        val libDir = root.resolve("library")
+        val library = TextbookLibrary(libDir)
+        val pageText = "She is tolerable, but not handsome enough to tempt me. Darcy walked away in silence."
+        val book = library.importBook(Files.writeString(root.resolve("pride.txt"), pageText))
+        val block = book.sourceBlocks().first { it.isBodyParagraph }
+        val q1 = "She is tolerable"
+        val q2 = "Darcy walked away in silence."
+        val s1 = book.page(block.page)!!.text.indexOf(q1)
+        val s2 = book.page(block.page)!!.text.indexOf(q2)
+        assertTrue(s1 >= 0 && s2 > s1)
+
+        val question = "达西当时的态度是什么？"
+        val firstStanceAnswer = StanceAnswer(
+            stance = BookStance.ORIGINAL,
+            layers = listOf(
+                StanceLayer.Book(
+                    label = BookStanceCopy.BOOK_DEFAULT,
+                    sentences = listOf(
+                        StanceBookSentence(
+                            text = "达西认为她只是勉强过得去。",
+                            citations = listOf(StanceCitation(block.id, block.page, s1, s1 + q1.length, q1)),
+                        ),
+                        StanceBookSentence(
+                            text = "随后达西沉默离开。",
+                            citations = listOf(StanceCitation(block.id, block.page, s2, s2 + q2.length, q2)),
+                        ),
+                    ),
+                ),
+            ),
+            modelCalled = true,
+            droppedSentences = 0,
+            outOfRange = 0,
+        )
+        val switchedStanceAnswer = StanceAnswer(
+            stance = BookStance.KNOWLEDGE,
+            layers = listOf(
+                StanceLayer.Book(
+                    label = BookStanceCopy.BOOK_DEFAULT,
+                    sentences = listOf(
+                        StanceBookSentence(
+                            text = "原文显示达西拒绝邀请并认为她不够动人。",
+                            citations = listOf(StanceCitation(block.id, block.page, s1, s1 + q1.length, q1)),
+                        ),
+                    ),
+                ),
+                StanceLayer.Outside(
+                    label = BookStanceCopy.outsideLabel("通行讲法"),
+                    text = "这是小说开篇刻画傲慢态度的经典手法。",
+                ),
+            ),
+            modelCalled = true,
+            droppedSentences = 1,
+            outOfRange = 0,
+        )
+
+        val threadId = "stance-persist-thread"
+        val turn1 = library.beginBookQuestion(book.id, threadId, block, "Chapter 1", question, listOf(block))
+        library.finishBookQuestion(
+            turn1,
+            Explanation(
+                text = "达西认为她只是勉强过得去。随后达西沉默离开。",
+                citations = listOf(
+                    Citation("S1", block.id, block.page, q1),
+                    Citation("S2", block.id, block.page, q2),
+                ),
+                elapsedMs = 15L,
+                stanceAnswer = firstStanceAnswer,
+            ),
+        )
+        val turn2 = library.beginBookQuestion(book.id, threadId, block, "Chapter 1", question, listOf(block))
+        library.finishBookQuestion(
+            turn2,
+            Explanation(
+                text = "原文显示达西拒绝邀请并认为她不够动人。",
+                citations = listOf(Citation("S1", block.id, block.page, q1)),
+                elapsedMs = 22L,
+                stanceAnswer = switchedStanceAnswer,
+            ),
+        )
+        val explainStanceAnswer = StanceAnswer(
+            stance = BookStance.ESOTERIC,
+            layers = listOf(
+                StanceLayer.Book(
+                    label = BookStanceCopy.BOOK_DEFAULT,
+                    sentences = listOf(
+                        StanceBookSentence(
+                            text = "这段描写表现了初始冷淡。",
+                            citations = listOf(StanceCitation(block.id, block.page, s1, s1 + q1.length, q1)),
+                        ),
+                    ),
+                ),
+            ),
+            systemNotice = BookStanceCopy.ESOTERIC_SYSTEM_NOTICE,
+            modelCalled = true,
+        )
+        library.saveAskTurn(
+            bookId = book.id,
+            threadId = threadId,
+            selection = block,
+            sectionLocation = "Chapter 1",
+            actionKind = SelectionExplainAction.EXPLAIN.kind,
+            label = SelectionExplainAction.EXPLAIN.label,
+            questionText = null,
+            explanation = Explanation("这段描写表现了初始冷淡。", listOf(Citation("S1", block.id, block.page, q1)), 9L, explainStanceAnswer),
+            sentBlocks = listOf(block),
+        )
+
+        // 重新打开数据库后逐项校验：原题头、分层、逐句引文 UTF-16 范围、原问题与操作类型
+        val reopened = TextbookLibrary(libDir)
+        val restored = assertNotNull(reopened.loadLatestAskThread(book.id, threadId))
+        assertEquals(3, restored.turns.size)
+
+        val r0 = restored.turns[0]
+        assertEquals(SelectionExplainAction.ASK, r0.action)
+        assertEquals(question, r0.questionText)
+        val sa0 = assertNotNull(r0.explanation.stanceAnswer, "重开后 stanceAnswer 不能变回 null")
+        assertEquals(firstStanceAnswer, sa0)
+        val bookLayer0 = assertIs<StanceLayer.Book>(sa0.layers.single())
+        assertEquals(2, bookLayer0.sentences.size)
+        assertEquals(s1, bookLayer0.sentences[0].citations.single().startUtf16)
+        assertEquals(s1 + q1.length, bookLayer0.sentences[0].citations.single().endUtf16)
+        assertEquals(s2, bookLayer0.sentences[1].citations.single().startUtf16)
+        assertEquals(s2 + q2.length, bookLayer0.sentences[1].citations.single().endUtf16)
+
+        val r1 = restored.turns[1]
+        assertEquals(SelectionExplainAction.ASK, r1.action)
+        assertEquals(question, r1.questionText)
+        val sa1 = assertNotNull(r1.explanation.stanceAnswer)
+        assertEquals(switchedStanceAnswer, sa1)
+        assertEquals(BookStance.KNOWLEDGE, sa1.stance)
+        assertEquals(2, sa1.layers.size)
+        assertIs<StanceLayer.Book>(sa1.layers[0])
+        assertIs<StanceLayer.Outside>(sa1.layers[1])
+
+        val r2 = restored.turns[2]
+        assertEquals(SelectionExplainAction.EXPLAIN, r2.action)
+        assertNull(r2.questionText)
+        assertEquals(explainStanceAnswer, r2.explanation.stanceAnswer)
+    }
+
+    /**
+     * QA 回归（Fix #3）：跑题准备工具必须通过客户端 `BookStanceSources.forLibrary(library).resolve(book)`
+     * 读取实际立场判定与 `stanceSource`，配置缺失或不一致时不得从题表硬塞 stance/guards 或伪造 `forced`。
+     */
+    @Test
+    fun corpusPrepReadsClientStanceSourceAndDetectsMissingForcedConfig() {
+        val root = folder.root.toPath()
+        val corpusDir = root.resolve("corpus")
+        val bookDir = corpusDir.resolve("sample/demo")
+        Files.createDirectories(bookDir)
+        val bookFile = bookDir.resolve("demo.txt")
+        Files.writeString(bookFile, "Chapter 1\n\nOnly pears grow in this orchard every autumn.")
+        val questionsPath = root.resolve("questions.json")
+        Files.writeString(
+            questionsPath,
+            """
+            {
+              "schema": 1,
+              "books": {
+                "sample/demo": {
+                  "title": "Demo Orchard",
+                  "file": "demo.txt",
+                  "defaultStance": "knowledge",
+                  "secondaryStance": null,
+                  "guards": []
+                }
+              },
+              "explainDefaults": [],
+              "questions": [
+                {
+                  "id": "T1",
+                  "entry": "ask",
+                  "book": "sample/demo",
+                  "locator": "Only pears grow",
+                  "question": "果园里种什么？",
+                  "stance": "knowledge",
+                  "guards": [],
+                  "readThroughPage": null,
+                  "expectBoundary": false,
+                  "allowNoBook": false,
+                  "isClassical": false
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        // 1. 无 book-stance-forced.json 且不自动生成 -> 客户端判定为 undetermined，发旧路径请求（不带 stance/guards）
+        val cacheMissing = root.resolve("cache-missing")
+        val missingPrepared = BookStanceCorpusPrep.prepare(
+            corpusDir = corpusDir,
+            questionsPath = questionsPath,
+            cacheDir = cacheMissing,
+            entry = "ask",
+            mode = "forced",
+            seedForcedFile = false,
+        )
+        val missingItem = missingPrepared.getValue("items").jsonArray.single().jsonObject
+        assertEquals("undetermined", missingItem.getValue("stanceSource").jsonPrimitive.content)
+        val missingReq = missingItem.getValue("request").jsonObject
+        assertNull(missingReq["stance"], "缺少配置时跑题请求不得从题表硬塞 stance")
+        assertNull(missingReq["guards"], "缺少配置时跑题请求不得从题表硬塞 guards")
+
+        // 2. 放入自定义的 book-stance-forced.json（与题表不同：life + fiction）-> 请求必须反映客户端实际配置而非题表
+        val bookHash = missingItem.getValue("bookHash").jsonPrimitive.content
+        val customForced = root.resolve("custom-forced.json")
+        Files.writeString(
+            customForced,
+            """{"$bookHash":{"defaultStance":"life","guards":["fiction"]}}""",
+        )
+        val cacheCustom = root.resolve("cache-custom")
+        val customPrepared = BookStanceCorpusPrep.prepare(
+            corpusDir = corpusDir,
+            questionsPath = questionsPath,
+            cacheDir = cacheCustom,
+            entry = "ask",
+            mode = "forced",
+            forcedConfig = customForced,
+            seedForcedFile = false,
+        )
+        val customItem = customPrepared.getValue("items").jsonArray.single().jsonObject
+        assertEquals("forced", customItem.getValue("stanceSource").jsonPrimitive.content)
+        val customReq = customItem.getValue("request").jsonObject
+        assertEquals("life", customReq.getValue("stance").jsonPrimitive.content)
+        assertEquals(listOf("fiction"), customReq.getValue("guards").jsonArray.map { it.jsonPrimitive.content })
+    }
 }

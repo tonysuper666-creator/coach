@@ -33,6 +33,8 @@ object ExamPointDrillLimits {
     const val MIN_CHOICES: Int = 3
     const val MAX_CHOICES: Int = 5
     const val MAX_TOKENS: Int = 16_000
+    // The extra generation tokens cover thinking, which is not sent to the checker.
+    const val CHECKER_DRAFT_RESERVE_TOKENS: Int = 8_000
     // api_batch.py reserves 4 KiB in addition to both serialized UTF-8 prompts.
     const val BRIDGE_PROMPT_BYTES: Int = 90_000 - 4096
 }
@@ -868,7 +870,8 @@ class ExamPointDrillPipeline(
         // Generation, rewrites and blind checks share the same evidence. Allow room for the
         // generated paper on the check, as well as the topic and instructions on each request.
         val overhead = (system + sourcePrompt(topicTitle, emptyList(), essayWanted)).toByteArray().size
-        val evidenceBytes = ExamPointDrillLimits.BRIDGE_PROMPT_BYTES - overhead - 4 * ExamPointDrillLimits.MAX_TOKENS
+        val evidenceBytes = ExamPointDrillLimits.BRIDGE_PROMPT_BYTES - overhead -
+            4 * ExamPointDrillLimits.CHECKER_DRAFT_RESERVE_TOKENS
         val kept = selectEvidence(topicId, topicTitle, prepared, evidenceBytes)
         val prompt = sourcePrompt(topicTitle, kept, essayWanted)
         // Durable batches cache their result by key, even after a prompt or exam format changes.

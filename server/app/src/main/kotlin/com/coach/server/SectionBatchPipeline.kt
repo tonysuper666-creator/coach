@@ -545,15 +545,41 @@ object Utf16AnchorVerifier {
         return null
     }
 
-    /** Maps a whitespace-collapsed, punctuation-normalized search back to exact raw UTF-16 [start, end). */
+    /**
+     * Maps a whitespace-collapsed, typography-normalized search back to exact raw UTF-16 [start, end).
+     * Joins PDF line-break hyphens (`letter + hyphen + newline/space + letter`) and soft hyphens (`U+00AD`)
+     * into a single word without relaxing any other matching rules.
+     */
     internal fun findNormalizedUtf16Span(raw: String, query: String): Pair<Int, Int>? {
-        val normQuery = normalizeForMatch(query)
+        findNormalizedUtf16SpanPass(raw, query, keepCompoundHyphen = false)?.let { return it }
+        // Secondary pass only for compound hyphenated words broken at a line wrap ("risk-\naverse" vs "risk-averse"):
+        // preserves the hyphen while collapsing whitespace after it, never joining non-wrapped "risk-averse" to "riskaverse".
+        if (query.any(::isLineBreakHyphen)) {
+            return findNormalizedUtf16SpanPass(raw, query, keepCompoundHyphen = true)
+        }
+        return null
+    }
+
+    private fun findNormalizedUtf16SpanPass(raw: String, query: String, keepCompoundHyphen: Boolean): Pair<Int, Int>? {
+        val normQuery = normalizeForMatch(query, keepCompoundHyphen)
         if (normQuery.length < 6) return null
         val normChars = StringBuilder(raw.length)
         val rawIndices = IntArray(raw.length + 1)
         var outLen = 0
         var lastWasSpace = true
-        for (i in raw.indices) {
+        var i = 0
+        while (i < raw.length) {
+            val joinedNext = hyphenJoinNextIndex(raw, i)
+            if (joinedNext >= 0) {
+                if (keepCompoundHyphen && raw[i] != '\u00AD') {
+                    rawIndices[outLen] = i
+                    normChars.append('-')
+                    outLen++
+                    lastWasSpace = false
+                }
+                i = joinedNext
+                continue
+            }
             val ch = normalizeChar(raw[i])
             if (ch.isWhitespace()) {
                 if (!lastWasSpace && outLen > 0) {
@@ -568,6 +594,7 @@ object Utf16AnchorVerifier {
                 outLen++
                 lastWasSpace = false
             }
+            i++
         }
         val haystack = normChars.toString().trimEnd()
         val hit = haystack.indexOf(normQuery)
@@ -578,19 +605,59 @@ object Utf16AnchorVerifier {
         return if (rawStart in 0 until rawEnd) rawStart to rawEnd else null
     }
 
+    private fun isHyphenJoinLetter(c: Char): Boolean =
+        c.isLetter() && c.code !in 0x4E00..0x9FFF && c.code !in 0x3400..0x4DBF
+
+    private fun isLineBreakHyphen(c: Char): Boolean =
+        c == '-' || c == '\u2010' || c == '\u2011'
+
+    /**
+     * Returns the index of the next letter when `text[i]` is:
+     * - a soft hyphen (`U+00AD`) between letters (with optional whitespace), or
+     * - a line-break hyphen (`-`, `U+2010`, `U+2011`) preceded immediately by a letter and followed by
+     *   one or more whitespace characters (newline/space) and then a letter.
+     * Em/en dashes, minus signs, spaced dashes ("a - b"), digit ranges ("2020- 2021"), and unspaced
+     * compound hyphens ("cost-effective") return -1.
+     */
+    private fun hyphenJoinNextIndex(text: String, i: Int): Int {
+        if (i <= 0 || !isHyphenJoinLetter(text[i - 1])) return -1
+        val ch = text[i]
+        val isSoft = ch == '\u00AD'
+        if (!isSoft && !isLineBreakHyphen(ch)) return -1
+        var j = i + 1
+        var sawSpace = false
+        while (j < text.length && normalizeChar(text[j]).isWhitespace()) {
+            sawSpace = true
+            j++
+        }
+        if (!isSoft && !sawSpace) return -1
+        return if (j < text.length && isHyphenJoinLetter(text[j])) j else -1
+    }
+
     private fun normalizeChar(c: Char): Char = when (c) {
-        '\u2212', '\u2013', '\u2014' -> '-'
+        '\u2010', '\u2011', '\u2212', '\u2013', '\u2014' -> '-'
         '\u2018', '\u2019' -> '\''
         '\u201c', '\u201d' -> '"'
         '\u00a0' -> ' '
         else -> c
     }
 
-    private fun normalizeForMatch(s: String): String {
-        val sb = StringBuilder(s.length)
+    private fun normalizeForMatch(s: String, keepCompoundHyphen: Boolean = false): String {
+        val nfkc = Normalizer.normalize(s, Normalizer.Form.NFKC)
+        val sb = StringBuilder(nfkc.length)
         var lastSpace = true
-        for (raw in Normalizer.normalize(s, Normalizer.Form.NFKC)) {
-            val ch = normalizeChar(raw)
+        var i = 0
+        while (i < nfkc.length) {
+            val joinedNext = hyphenJoinNextIndex(nfkc, i)
+            if (joinedNext >= 0) {
+                if (keepCompoundHyphen && nfkc[i] != '\u00AD') {
+                    sb.append('-')
+                    lastSpace = false
+                }
+                i = joinedNext
+                continue
+            }
+            val ch = normalizeChar(nfkc[i])
             if (ch.isWhitespace()) {
                 if (!lastSpace && sb.isNotEmpty()) {
                     sb.append(' ')
@@ -600,6 +667,7 @@ object Utf16AnchorVerifier {
                 sb.append(ch.lowercaseChar())
                 lastSpace = false
             }
+            i++
         }
         return sb.toString().trim()
     }

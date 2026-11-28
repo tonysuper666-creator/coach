@@ -723,4 +723,78 @@ class CoursePipelineAndGatesTest {
         assertTrue((seenMaxTokens["course_topic_map"] ?: 0) >= 6_000)
         assertTrue((seenMaxTokens["course_topic_reduce"] ?: 0) >= 8_000)
     }
+
+    @Test
+    fun citationVerifierJoinsLineBreakAndSoftHyphensWithoutRelaxingOtherRules() {
+        val rawPage = """
+            The synthetic pilot found a pos- itive response in out-
+            patient visits when coinsurance fell sharply.
+            In addition, the soft\u00ADhyphenated term sig\u00AD
+            nificant appeared in the table discussion, and risk-
+            averse households bought fuller coverage.
+            A cost-effective intervention lowered costs in 2020- 2021.
+            Health - income gaps widened, while demand— and supply shifted together.
+            The pos itive typo without a hyphen is distinct from one word.
+        """.trimIndent().replace("\\u00AD", "\u00AD")
+        val blk = CourseMaterialTextBlock("tb:p44:0", "tb", "Synthetic Textbook", "CORE_TEXTBOOK", 1, 44, 0, rawPage)
+        val byPage = mapOf(("tb" to 44) to listOf(blk))
+        val byBook = mapOf("tb" to listOf(blk))
+
+        fun verify(quote: String) = CourseQualityGates.verifyCitation(
+            buildJsonObject {
+                put("bookId", "tb")
+                put("page", 44)
+                put("quote", quote)
+            },
+            byPage,
+            byBook,
+        )
+
+        // Positive cases: letter + hyphen + space/newline + letter, soft hyphen (with or without newline),
+        // Unicode hyphen U+2010, and compound word wrapped at its hyphen ("risk-\naverse" vs "risk-averse").
+        val pSpace = verify("The synthetic pilot found a positive response in outpatient visits when coinsurance fell sharply.")
+        assertNotNull(pSpace, "Hyphen + space ('pos- itive') and hyphen + newline ('out-\\npatient') must verify")
+        assertEquals(
+            "The synthetic pilot found a pos- itive response in out-\npatient visits when coinsurance fell sharply.",
+            rawPage.substring(pSpace.startUtf16, pSpace.endUtf16),
+        )
+
+        val pSoft = verify("In addition, the softhyphenated term significant appeared in the table discussion")
+        assertNotNull(pSoft, "Soft hyphen U+00AD (with or without newline) must verify")
+        assertTrue(rawPage.substring(pSoft.startUtf16, pSoft.endUtf16).contains("soft\u00ADhyphenated"))
+
+        val pCompoundWrapped = verify("and risk-averse households bought fuller coverage.")
+        assertNotNull(pCompoundWrapped, "Compound word wrapped at hyphen ('risk-\\naverse') must match 'risk-averse'")
+
+        val unicodeHyphenRaw = "The ex\u2010\nperiment tracked clinic visits."
+        val unicodeSpan = Utf16AnchorVerifier.findNormalizedUtf16Span(unicodeHyphenRaw, "The experiment tracked clinic visits.")
+        assertNotNull(unicodeSpan, "Unicode hyphen U+2010 + newline must join split word")
+        assertEquals(0 to unicodeHyphenRaw.length, unicodeSpan)
+
+        // Negative cases: MUST NOT relax any other comparison rules!
+        assertNull(
+            verify("A costeffective intervention lowered costs in 2020- 2021."),
+            "Unspaced compound hyphen ('cost-effective') must NOT match 'costeffective'",
+        )
+        assertNull(
+            verify("A cost-effective intervention lowered costs in 20202021."),
+            "Digit range ('2020- 2021') must NOT be joined into '20202021'",
+        )
+        assertNull(
+            verify("Healthincome gaps widened"),
+            "Spaced dash ('Health - income') must NOT be joined into 'Healthincome'",
+        )
+        assertNull(
+            verify("while demandand supply shifted together."),
+            "Em-dash ('demand— and') must NOT be joined into 'demandand'",
+        )
+        assertNull(
+            verify("The positive typo without a hyphen is distinct from one word."),
+            "Space without hyphen ('pos itive') must NOT match 'positive'",
+        )
+        assertNull(
+            verify("The synthetic pilot found a positive response in outpatient visits when coinsurance rose sharply."),
+            "Altered word ('fell' -> 'rose') must still be rejected",
+        )
+    }
 }

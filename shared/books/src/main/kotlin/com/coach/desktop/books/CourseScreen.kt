@@ -33,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,15 +60,26 @@ internal fun estimateTopicMinutes(topic: CourseTopicEntry): Int {
     return (pages * 2).coerceIn(10, 35)
 }
 
+/**
+ * 课程页、排计划页和模考页共用的一条考纲提示。
+ *
+ * 左边是当前范围，右边始终保留「放进考纲」这个被动入口；还没回答过「有没有考纲」时再加一句问询
+ * 和「不再提示」。以前课程页一条状态、模考页另一条提示，同一件事出现两遍；现在只有这一条。
+ * 课程页保持一行，问句留给真正要排计划的页面。
+ */
 @Composable
-internal fun CourseSyllabusPromptBar(
+internal fun CourseSyllabusBar(
+    scopeText: String,
+    addLabel: String,
     onAddSyllabus: () -> Unit,
-    onSkip: () -> Unit,
     modifier: Modifier = Modifier,
+    tag: String = "course-exam-scope-line",
+    askText: String? = null,
+    onMutePrompt: (() -> Unit)? = null,
 ) {
     val colors = CoachTheme.colors
     Surface(
-        modifier = modifier.fillMaxWidth().testTag("course-syllabus-prompt-bar"),
+        modifier = modifier.fillMaxWidth().testTag(tag),
         shape = RoundedCornerShape(8.dp),
         color = colors.surface2,
         border = BorderStroke(1.dp, colors.borderSubtle),
@@ -76,25 +89,47 @@ internal fun CourseSyllabusPromptBar(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                "有考纲或往年题吗？没有也能先学",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.fgPrimary,
-                modifier = Modifier.weight(1f),
-            )
-            PaperButton(
-                onClick = onAddSyllabus,
-                modifier = Modifier.testTag("course-syllabus-prompt-add"),
-            ) {
-                Text("放进来")
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(scopeText, style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary)
+                if (askText != null) {
+                    Text(askText, style = MaterialTheme.typography.labelSmall, color = colors.fgSecondary)
+                }
             }
-            V7TextButton(
-                onClick = onSkip,
-                modifier = Modifier.testTag("course-syllabus-prompt-skip"),
-            ) {
-                Text("跳过")
+            SyllabusBarAction(
+                label = addLabel,
+                tag = "course-syllabus-prompt-add",
+                color = colors.actionPrimary,
+                onClick = onAddSyllabus,
+            )
+            if (onMutePrompt != null) {
+                SyllabusBarAction(
+                    label = "不再提示",
+                    tag = "course-syllabus-prompt-skip",
+                    color = colors.fgSecondary,
+                    onClick = onMutePrompt,
+                )
             }
         }
+    }
+}
+
+/** 提示条上的文字动作：用原生文字加点击，避免按钮自身的内边距把这一条撑高。 */
+@Composable
+private fun SyllabusBarAction(
+    label: String,
+    tag: String,
+    color: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .testTag(tag)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = color)
     }
 }
 
@@ -116,6 +151,8 @@ internal fun CourseScreen(
     onSetTopicStatus: (topicId: String, status: CourseTopicStatus) -> Unit,
     onUpdateExamProfile: (CourseExamProfile) -> Unit,
     onDismissNotice: () -> Unit = {},
+    spoilerNoticeMuted: Boolean = false,
+    onMuteSpoilerNotice: () -> Unit = {},
     intake: CourseIntakeReceipt? = null,
     onChangeIntakeType: (key: String, role: CourseMaterialRole?) -> Unit = { _, _ -> },
     onDismissIntake: () -> Unit = {},
@@ -138,6 +175,10 @@ internal fun CourseScreen(
     var excludedExpanded by remember(detail.courseId, detail.excludedTopics.size) {
         mutableStateOf(detail.excludedTopics.size in 1..6)
     }
+    var spoilerNoticeClosed by remember(detail.courseId, detail.spoilerSanitizedCount) { mutableStateOf(false) }
+    var spoilerInfoOpen by remember(detail.courseId) { mutableStateOf(false) }
+    val spoilerFilteredText =
+        "已自动过滤 ${detail.spoilerSanitizedCount} 处个人笔记中的真题回忆，仅保留知识点线索，不进入练习题干。"
 
     val plan = if (isExam) detail.countdownPlan else null
     val topicGapById = remember(plan) {
@@ -324,37 +365,20 @@ internal fun CourseScreen(
             }
 
             if (isExam) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onAddMaterials)
-                        .testTag("course-exam-scope-line"),
-                    shape = RoundedCornerShape(8.dp),
-                    color = colors.surface2,
-                    border = BorderStroke(1.dp, colors.borderSubtle),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            when {
-                                detail.syllabusNarrowsScope -> "已按考纲安排范围，可继续补充考纲或往年题"
-                                detail.hasSyllabusOrScope -> "已收到考纲，暂按整本书安排"
-                                else -> "按整本书安排，放进考纲后可以缩小范围"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.fgPrimary,
-                            modifier = Modifier.weight(1f).padding(end = 8.dp),
-                        )
-                        Text(
-                            if (detail.hasSyllabusOrScope) "补充材料" else "放进考纲",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = colors.actionPrimary,
-                        )
-                    }
-                }
+                CourseSyllabusBar(
+                    scopeText = when {
+                        detail.syllabusNarrowsScope -> "已按考纲安排范围，可继续补充考纲或往年题"
+                        detail.hasSyllabusOrScope -> "已收到考纲，暂按整本书安排"
+                        else -> "按整本书安排，放进考纲后可以缩小范围"
+                    },
+                    addLabel = if (detail.hasSyllabusOrScope) "补充材料" else "放进考纲",
+                    onAddSyllabus = onAddMaterials,
+                    onMutePrompt = if (detail.shouldShowSyllabusPrompt) {
+                        { onUpdateExamProfile(detail.examProfile.copy(syllabusPromptState = CourseSyllabusPromptState.SKIPPED)) }
+                    } else {
+                        null
+                    },
+                )
 
                 CourseExamPointMap(
                     detail,
@@ -454,11 +478,23 @@ internal fun CourseScreen(
             if (!notice.isNullOrBlank()) {
                 CourseNoticeBanner(text = notice, onDismiss = onDismissNotice, tag = "course-notice-banner")
             } else if (isExam && detail.spoilerSanitizedCount > 0) {
-                CourseNoticeBanner(
-                    text = "已自动过滤 ${detail.spoilerSanitizedCount} 处个人笔记中的真题回忆，仅保留知识点线索，不进入练习题干。",
-                    onDismiss = null,
-                    tag = "course-spoiler-notice",
-                )
+                if (spoilerNoticeMuted || spoilerNoticeClosed) {
+                    // 关掉之后信息仍可查，不靠一直挂着提示条。
+                    V7TextButton(
+                        onClick = { spoilerInfoOpen = true },
+                        modifier = Modifier.testTag("course-spoiler-entry"),
+                    ) {
+                        Text("个人笔记里的真题回忆已过滤 ${detail.spoilerSanitizedCount} 处")
+                    }
+                } else {
+                    CourseNoticeBanner(
+                        text = spoilerFilteredText,
+                        onDismiss = { spoilerNoticeClosed = true },
+                        tag = "course-spoiler-notice",
+                        onMute = onMuteSpoilerNotice,
+                        muteTag = "course-spoiler-notice-mute",
+                    )
+                }
             }
 
             // Strictly <= 1 PrimaryButton on the entire screen (UX-4)
@@ -640,6 +676,24 @@ internal fun CourseScreen(
             onSave = { updated ->
                 examDialogOpen = false
                 onUpdateExamProfile(updated)
+            },
+        )
+    }
+
+    if (spoilerInfoOpen) {
+        AlertDialog(
+            onDismissRequest = { spoilerInfoOpen = false },
+            title = { Text("真题回忆已过滤") },
+            text = {
+                Text(
+                    spoilerFilteredText + "\n\n原始笔记还在，只是不会进入练习题干；需要时仍可在批注里回看。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                V7TextButton({ spoilerInfoOpen = false }, modifier = Modifier.testTag("course-spoiler-info-close")) {
+                    Text("知道了")
+                }
             },
         )
     }
@@ -1115,9 +1169,13 @@ private fun CourseScheduleSubScreen(
             }
 
             if (detail.shouldShowSyllabusPrompt) {
-                CourseSyllabusPromptBar(
+                CourseSyllabusBar(
+                    scopeText = "按整本书安排，放进考纲后可以缩小范围",
+                    addLabel = "放进考纲",
                     onAddSyllabus = onAddSyllabus,
-                    onSkip = onSkipSyllabusPrompt,
+                    tag = "course-syllabus-prompt-bar",
+                    askText = "有考纲或往年题吗？没有也能先学",
+                    onMutePrompt = onSkipSyllabusPrompt,
                 )
             }
 
@@ -1127,6 +1185,12 @@ private fun CourseScheduleSubScreen(
                 deck = when {
                     detail.syllabusNarrowsScope -> plan?.headerSummaryLine ?: "按考纲与讲义排定学习顺序。"
                     detail.hasSyllabusOrScope -> "已收到考纲，暂按整本书安排。"
+                    // 上面那条提示已经在问考纲，这里不再重复同一句话
+                    detail.shouldShowSyllabusPrompt -> if (isWeekly) {
+                        "每天读哪几章、练哪几题，按章节顺序排。"
+                    } else {
+                        "从考试日往前排，先补薄弱章节。"
+                    }
                     else -> "按整本书安排，放进考纲后可以缩小范围。"
                 },
                 meta = buildString {
@@ -1228,7 +1292,13 @@ private fun CourseScheduleSubScreen(
 }
 
 @Composable
-private fun CourseNoticeBanner(text: String, onDismiss: (() -> Unit)?, tag: String) {
+private fun CourseNoticeBanner(
+    text: String,
+    onDismiss: (() -> Unit)?,
+    tag: String,
+    onMute: (() -> Unit)? = null,
+    muteTag: String = "$tag-mute",
+) {
     val colors = CoachTheme.colors
     Surface(
         modifier = Modifier.fillMaxWidth().testTag(tag),
@@ -1238,12 +1308,15 @@ private fun CourseNoticeBanner(text: String, onDismiss: (() -> Unit)?, tag: Stri
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(text, style = MaterialTheme.typography.bodySmall, color = colors.warningFg, modifier = Modifier.weight(1f))
             if (onDismiss != null) {
                 V7TextButton(onDismiss) { Text("知道了") }
+            }
+            if (onMute != null) {
+                V7TextButton(onMute, modifier = Modifier.testTag(muteTag)) { Text("不再提示") }
             }
         }
     }

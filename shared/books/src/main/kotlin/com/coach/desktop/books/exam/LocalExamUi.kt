@@ -186,9 +186,13 @@ internal fun CourseMockHubPane(
             }
 
             if (detail.shouldShowSyllabusPrompt) {
-                CourseSyllabusPromptBar(
+                CourseSyllabusBar(
+                    scopeText = "按整本书安排，放进考纲后可以缩小范围",
+                    addLabel = "放进考纲",
                     onAddSyllabus = onAddMaterials,
-                    onSkip = onSkipSyllabusPrompt,
+                    tag = "course-syllabus-prompt-bar",
+                    askText = "有考纲或往年题吗？没有也能先学",
+                    onMutePrompt = onSkipSyllabusPrompt,
                 )
             }
 

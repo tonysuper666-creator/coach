@@ -1310,6 +1310,45 @@ function Find-ReaderCompanionToggle($lines, [int]$winW = 0, [int]$winH = 0) {
     if (-not $hits.Count) { return $null }
     return @($hits | Sort-Object Y, @{ Expression = { $_.X }; Descending = $true })[0]
 }
+# 出处点开后，伴读抽屉可能还在，底栏也可能隐藏。用当前帧的抽屉标题行定位「×」。
+function Confirm-Step5CiteLanding([string]$citePage, [int]$winW, [int]$winH, [double]$scale) {
+    $tabTolerance = [int][Math]::Round(18 * $scale)
+    # 「×」太小，整帧 OCR 通常不认；实测按钮中心离窗口右沿约 48dp（150% 时为 72px）。
+    $closeX = $winW - [int][Math]::Round(48 * $scale)
+    $footerTop = $winH - [int][Math]::Round(64 * $scale)
+    $nowPage = $null
+    foreach ($try in 1..6) {
+        Hover ([int]($winW / 2)) ($winH - 10)
+        Start-Sleep -Milliseconds 500
+        $lines = Shot 5 "explain-cite$try"
+        $drawer = Find-CompanionTabLabel $lines '讲解' $tabTolerance $winW $winH
+        if ($drawer) {
+            if ($try -eq 6) { break }
+            Note "步骤5 点伴读抽屉标题行右侧的「×」($closeX,$($drawer.Y))，再核对底栏页码"
+            $null = Click-At $closeX $drawer.Y -BeforePress {
+                $current = Find-CompanionTabLabel (Shot 5 "explain-cite-close-guard$try") '讲解' $tabTolerance $winW $winH
+                $current -and [Math]::Abs($current.Y - $drawer.Y) -le $tabTolerance
+            }
+            Start-Sleep -Seconds 1
+            continue
+        }
+        $counter = Get-HudCounter $script:LastPng
+        if (-not $counter) {
+            $footer = $lines | Where-Object { (Get-LineBox $_).Y -ge $footerTop }
+            $counter = Get-PageCounter $footer $script:LastPng
+        }
+        if ($counter) {
+            $nowPage = "$($counter.Cur)"
+            if ($nowPage -eq $citePage) {
+                Note "步骤5 出处第 $citePage 页，阅读器底栏实读 $($counter.Text)"
+                return
+            }
+        }
+    }
+    if ($drawer) { Fail 5 '点了出处后伴读抽屉仍未收起，无法核对底栏页码（见 5-explain-cite*.png）' }
+    if (-not $nowPage) { Fail 5 "点了出处后读不到底栏页码，无法核对是否停在第 $citePage 页（见 5-explain-cite*.png）" }
+    Fail 5 "点了出处后底栏停在第 $nowPage 页，出处写的是第 $citePage 页（见 5-explain-cite*.png）"
+}
 # 打开伴读抽屉：先在预期区域核对同一页签行上的独立标签，未开时只点顶栏右半区独立「伴读」开关。
 function Ensure-CompanionDrawerOpen(
     [int]$step,
@@ -2660,7 +2699,8 @@ try {
             $null = Shot 5 'explain-full'
         }
         if (-not $chip) { Fail 5 "讲解出来了，但滚到底也读不到$what5（见 5-explain-wait*.png / 5-explain-full.png）" }
-        $chipPage = [regex]::Match(($chip.Text -replace '\s', ''), '第(\d+)[页頁贞貞虫]').Groups[1].Value
+        $chipPage = Get-CitePageNumber $chip.Text
+        if (-not $chipPage) { Fail 5 '讲解出处没有读出页码，无法核对实际落页（见 5-explain-full.png）' }
         Note "步骤5 讲解的出处：$($chip.Text)"
         $bx = Get-LineBox $chip
         $bxc = [int](($bx.X1 + $bx.X2) / 2); $byc = [int]$bx.Y
@@ -2669,43 +2709,9 @@ try {
         } else {
             Hover $midX ([int]($winH * 0.45)); Start-Sleep -Milliseconds 250
         }
-        $null = Click-At $bxc $byc; Start-Sleep -Seconds 2
-        # 窄窗（winbox 752×552）是底部半屏抽屉：点锚点只跳页、不自动收抽屉，堆在底缘的页号条压在抽屉上沿之上，
-        # 所以抽屉开着就能核对页码；宽屏浮层会自动收起抽屉，页号同样在底缘。
-        $pg = $null
-        foreach ($k in 1..10) {
-            Start-Sleep -Milliseconds 700
-            Hover $midX $hoverY; Start-Sleep -Milliseconds 400
-            $null = Shot 5 "explain-cite$k"
-            $p = Get-HudCounter $script:LastPng
-            if (-not $p) { $p = Get-PageCounter $script:Last $script:LastPng }
-            if ($p) { $pg = "$($p.Cur)"; if ($pg -eq "$chipPage") { break } }
-        }
-        # 11-23 14:36 那轮：出处点了、原文那段已高亮，可半屏抽屉正好压住底栏，十帧都读不出页号。
-        # 跟第 7 步同一个办法：读不出就先收起抽屉再读（顶栏「收起」，认不到就切「讲解」页签失焦后按 L）。
-        # 第 6 步开头会自己从顶栏「伴读」把抽屉打开。
-        if (-not $pg) {
-            $lines = Show-ReaderTop 5 'cite-close'; if (-not $lines) { $lines = Shot 5 'cite-close' }
-            $fold5 = Find-Text $lines '收起'
-            if ($fold5 -and $fold5.Y -lt [int]($winH * 0.2)) {
-                Note "步骤5 抽屉压住了底栏页号，点顶栏「收起」($($fold5.X),$($fold5.Y)) 再读"
-                Hover $fold5.X $fold5.Y; Start-Sleep -Milliseconds 400
-                $null = Click-At $fold5.X $fold5.Y
-            } else {
-                Note '步骤5 抽屉压住了底栏页号，切「讲解」页签失焦后按 L 收起再读'
-                $null = Click-At $tabX $tabY; Start-Sleep -Milliseconds 800
-                Send-Keys 'l'
-            }
-            Start-Sleep -Seconds 1
-            foreach ($k in 1..4) {
-                Hover $midX $hoverY; Start-Sleep -Milliseconds 500
-                $null = Shot 5 "explain-cite-closed$k"
-                $p = Get-HudCounter $script:LastPng
-                if (-not $p) { $p = Get-PageCounter $script:Last $script:LastPng }
-                if ($p) { $pg = "$($p.Cur)"; break }
-            }
-        }
-        if ("$pg" -ne "$chipPage") { Fail 5 "点了讲解里的出处（第 $chipPage 页），页码没跳过去（现在 $pg，见 5-explain-cite*.png）" }
+        if (-not (Click-At $bxc $byc)) { Fail 5 '讲解出处未能点下，无法核对实际落页（见 5-explain-full.png）' }
+        Start-Sleep -Seconds 2
+        Confirm-Step5CiteLanding $chipPage $winW $winH (Get-WindowDpiScale)
         if ($pageMode5) { Pass 5 "伴读抽屉「讲解」讲了当前这一页，讲解末尾的出处指向第 $chipPage 页，点了停在原文这一页" }
         else { Pass 5 "伴读抽屉「讲解」页签整理出本章要点，要点后面挂着「原文第 $chipPage 页」锚点，点了能跳回原文页" }
     } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }

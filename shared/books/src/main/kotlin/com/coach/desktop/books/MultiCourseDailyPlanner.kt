@@ -3,6 +3,7 @@ package com.coach.desktop.books
 import java.time.LocalDate
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 internal data class CourseDayInput(
     val courseId: String,
@@ -20,6 +21,7 @@ internal data class CourseDayTask(
     val reason: String,
     val lines: List<String>,
     val readFirstTitles: List<String>,
+    val deferral: String? = null,
 )
 
 internal data class MultiCourseDay(
@@ -37,28 +39,60 @@ internal data class MultiCourseDay(
  * A point with no question is a "read this section" task, not an empty question.
  */
 internal object MultiCourseDailyPlanner {
+    private const val UNKNOWN_START = "离考试近了会开始排"
+
     fun preview(
         today: LocalDate,
         courses: List<CourseDayInput>,
         budgetMinutes: Int,
         days: Int = 5,
-    ): List<MultiCourseDay> =
-        (0 until days.coerceIn(1, 14)).map { offset ->
-            plan(today.plusDays(offset.toLong()), courses, budgetMinutes)
+    ): List<MultiCourseDay> {
+        val preview = (0 until days.coerceIn(1, 14)).map { offset ->
+            planDay(today.plusDays(offset.toLong()), courses, budgetMinutes)
         }
+        if (preview.none { day -> day.courses.any { it.deferral != null } }) return preview
+        // Only look past the preview for courses that still need a start date at its end.
+        val waiting = mutableSetOf<String>()
+        for (day in preview) {
+            for (course in day.courses) {
+                if (course.deferral != null) waiting.add(course.courseId)
+                if (course.minutes > 0) waiting.remove(course.courseId)
+            }
+        }
+        val starts = mutableMapOf<String, LocalDate>()
+        val exams = courses.mapNotNull { c -> c.examDate?.let { c.courseId to it } }.toMap()
+        var date = preview.last().date.plusDays(1)
+        // Bound work on the home screen even for an exam date entered years in the future.
+        val horizon = today.plusYears(1)
+        while (date <= horizon && waiting.any { date < exams.getValue(it) }) {
+            for ((demand, tasks) in allocate(date, courses, preview.first().budgetMinutes)) {
+                if (tasks.minutes > 0 && waiting.remove(demand.input.courseId)) starts[demand.input.courseId] = date
+            }
+            date = date.plusDays(1)
+        }
+        // Walk back so each zero-minute row uses the next funded day after that row.
+        return preview.asReversed().map { day ->
+            val scheduled = day.courses.filter { it.minutes > 0 }
+            for (course in scheduled) starts[course.courseId] = day.date
+            val recipients = scheduled.joinToString("、") { "${it.title}（${exams.getValue(it.courseId).monthValue} 月考）" }
+            val priority = if (scheduled.isEmpty()) "今天的 ${day.budgetMinutes} 分钟排不下一项学习任务" else "今天的时间先给了$recipients"
+            val annotated = day.courses.map { course ->
+                val note = course.deferral
+                if (note == null) course else {
+                    val whenPart = starts[course.courseId]?.let { "预计 ${it.monthValue} 月 ${it.dayOfMonth} 日开始" } ?: UNKNOWN_START
+                    course.copy(reason = "$priority，$whenPart", deferral = "$note，$whenPart")
+                }
+            }
+            day.copy(courses = annotated)
+        }.asReversed()
+    }
 
-    fun plan(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay {
+    fun plan(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay =
+        preview(today, courses, budgetMinutes, days = 1).first()
+
+    private fun planDay(today: LocalDate, courses: List<CourseDayInput>, budgetMinutes: Int): MultiCourseDay {
         val cap = budgetMinutes.coerceIn(15, 240)
-        val demands = courses.map { input ->
-            val natural = ExamDailyTaskPlanner.plan(today, input.examDate, input.points, 240, input.pins)
-            Demand(input, natural, weight(input, natural))
-        }
-        val active = demands
-            .filter { it.weight > 0.0 && it.natural.minutes > 0 }
-            .sortedBy { it.input.courseId }
-        val fitted = fit(today, active, cap).associateBy { it.first.input.courseId }
-        val tasks = demands.map { demand ->
-            val planned = fitted[demand.input.courseId]?.second ?: zeroed(demand.natural)
+        val tasks = allocate(today, courses, cap).map { (demand, planned) ->
             val reason = reason(demand, planned.minutes)
             val titles = demand.input.points.associateBy { it.id }
             CourseDayTask(
@@ -67,8 +101,9 @@ internal object MultiCourseDailyPlanner {
                 tasks = planned,
                 minutes = planned.minutes,
                 reason = reason,
-                lines = taskLines(demand.input, planned, reason, titles),
+                lines = taskLines(planned, reason, titles),
                 readFirstTitles = planned.pointsWithoutQuestions.map { id -> titles[id]?.title?.ifBlank { id } ?: id },
+                deferral = if (demand.weight > 0 && planned.minutes == 0) "按每天要过的量分配，今天的 $cap 分钟里排不下" else null,
             )
         }
         val ordered = tasks.sortedWith(
@@ -82,40 +117,39 @@ internal object MultiCourseDailyPlanner {
     private data class Demand(
         val input: CourseDayInput,
         val natural: TodayExamTasks,
-        val weight: Double,
-    )
+    ) {
+        val remaining = input.points.count { !it.mastered }
+        val withErrors = input.points.count { it.wrongQuestions > 0 }
+        val weight = if (natural.timing == ExamTaskTiming.UPCOMING && natural.minutes > 0) {
+            (remaining + withErrors).coerceAtLeast(1).toDouble() / requireNotNull(natural.daysRemaining)
+        } else 0.0
+    }
 
-    private fun weight(input: CourseDayInput, natural: TodayExamTasks): Double {
-        val days = natural.daysRemaining ?: return 0.0
-        if (days < 0 || natural.minutes <= 0) return 0.0
-        if (natural.timing != ExamTaskTiming.UPCOMING && natural.timing != ExamTaskTiming.EXAM_DAY) return 0.0
-        val weak = input.points.count { !it.mastered } + input.points.count { it.wrongQuestions > 0 }
-        return (1.0 / (days + 1)) * weak.coerceAtLeast(1)
+    private fun allocate(today: LocalDate, courses: List<CourseDayInput>, cap: Int): List<Pair<Demand, TodayExamTasks>> {
+        val demands = courses.map { input ->
+            Demand(input, ExamDailyTaskPlanner.plan(today, input.examDate, input.points, 240, input.pins))
+        }
+        val active = demands.filter { it.weight > 0 }.sortedBy { it.input.courseId }
+        val fitted = fit(today, active, cap).associate { (demand, tasks) -> demand.input.courseId to tasks }
+        return demands.map { it to (fitted[it.input.courseId] ?: zeroed(it.natural)) }
     }
 
     private fun reason(demand: Demand, minutes: Int): String {
-        val days = demand.natural.daysRemaining
-        val weak = demand.input.points.count { !it.mastered }
-        val whenPart = when {
-            days == null -> "还没设考试日期"
-            days < 0 -> "考试已过"
-            days == 0 -> "今天考试"
-            days == 1 -> "还剩 1 天"
-            else -> "距考试 $days 天"
+        val days = demand.natural.daysRemaining ?: return "还没设考试日期"
+        if (days < 0) return "考试已过"
+        if (days == 0) return "今天考试，备考时间留空"
+        if (demand.natural.minutes == 0) return "距考试 $days 天，今天没有要排的任务"
+        val remaining = demand.remaining
+        val workload = when {
+            remaining == 0 -> "新考点已学完"
+            remaining < days -> "$remaining 个考点还没掌握，约每 ${(days.toDouble() / remaining).roundToInt()} 天过 1 个"
+            else -> "$remaining 个考点还没掌握，每天约需过 ${(remaining.toDouble() / days).roundToInt()} 个"
         }
-        val weakPart = if (weak > 0) "$weak 个考点还没掌握" else "没有新的薄弱考点"
-        val share = when {
-            days != null && days < 0 -> "不再占今天的时间"
-            minutes > 0 && weak > 0 -> "离考试近、薄弱考点多，所以今天 $minutes 分钟"
-            minutes > 0 -> "今天 $minutes 分钟"
-            demand.natural.minutes > 0 -> "今天的时间先给了更近、更薄弱的课，这门排进后面的天数"
-            else -> "今天没有要排的任务"
-        }
-        return "$whenPart，$weakPart，$share"
+        val review = if (demand.withErrors > 0) "，${demand.withErrors} 个有错题的考点各多算一份复习量" else ""
+        return "距考试 $days 天，$workload$review，今天 $minutes 分钟"
     }
 
     private fun taskLines(
-        input: CourseDayInput,
         tasks: TodayExamTasks,
         reason: String,
         titles: Map<String, ExamPointWork>,
@@ -136,7 +170,6 @@ internal object MultiCourseDailyPlanner {
         }
         if (tasks.reviewWrongCount > 0) lines += "复习 ${tasks.reviewWrongCount} 道错题 · $reason"
         if (tasks.practiceQuestionCount > 0) lines += "做 ${tasks.practiceQuestionCount} 道题 · $reason"
-        if (lines.isEmpty()) lines += reason
         return lines
     }
 
@@ -159,7 +192,6 @@ internal object MultiCourseDailyPlanner {
                 if (plans[index].minutes >= ceilings[index]) continue
                 val give = min(left, ceilings[index] - plans[index].minutes)
                 val trialBudget = plans[index].minutes + give
-                if (trialBudget < 15) continue
                 val trial = fitPlan(today, active[index], trialBudget)
                 val delta = trial.minutes - plans[index].minutes
                 if (delta <= 0 || delta > left) continue
@@ -173,6 +205,7 @@ internal object MultiCourseDailyPlanner {
     }
 
     private fun fitPlan(today: LocalDate, demand: Demand, budget: Int): TodayExamTasks {
+        if (budget >= demand.natural.minutes) return demand.natural.copy(budgetMinutes = budget)
         if (budget < 15) return zeroed(demand.natural)
         return ExamDailyTaskPlanner.plan(
             today,

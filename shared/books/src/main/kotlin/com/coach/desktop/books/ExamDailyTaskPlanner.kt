@@ -55,10 +55,10 @@ internal object ExamDailyTaskPlanner {
         pins: List<ExamTaskPin> = emptyList(),
     ): TodayExamTasks {
         val budget = budgetMinutes.coerceIn(15, 240)
-        if (examDate == null) {
+        if (examDate == null || examDate == today) {
             return TodayExamTasks(
-                daysRemaining = null,
-                timing = ExamTaskTiming.UNSET,
+                daysRemaining = if (examDate == null) null else 0,
+                timing = if (examDate == null) ExamTaskTiming.UNSET else ExamTaskTiming.EXAM_DAY,
                 newPointIds = emptyList(),
                 reviewWrongCount = 0,
                 practiceQuestionCount = 0,
@@ -66,20 +66,15 @@ internal object ExamDailyTaskPlanner {
                 budgetMinutes = budget,
                 pointsWithoutQuestions = emptyList(),
                 unscheduledNewPoints = 0,
-                header = "还没设考试日期",
+                header = if (examDate == null) "还没设考试日期" else "今天考试",
             )
         }
         val days = ChronoUnit.DAYS.between(today, examDate).toInt()
-        val timing = when {
-            days < 0 -> ExamTaskTiming.PAST
-            days == 0 -> ExamTaskTiming.EXAM_DAY
-            else -> ExamTaskTiming.UPCOMING
-        }
-        val header = when (timing) {
-            ExamTaskTiming.PAST -> "考试已过"
-            ExamTaskTiming.EXAM_DAY -> "今天考试"
-            ExamTaskTiming.UPCOMING -> if (days == 1) "还剩 1 天" else "距考试 $days 天"
-            ExamTaskTiming.UNSET -> "还没设考试日期"
+        val timing = if (days < 0) ExamTaskTiming.PAST else ExamTaskTiming.UPCOMING
+        val header = when {
+            days < 0 -> "考试已过"
+            days == 1 -> "还剩 1 天"
+            else -> "距考试 $days 天"
         }
         val pinnedToday = pins.filter { it.date == today }.map { it.pointId }.toSet()
         val pool = if (timing == ExamTaskTiming.PAST) {

@@ -169,6 +169,7 @@ class IllustratedReaderWindowTest {
                 val book = library.importBook(fixture(dir, format))
                 assertEquals(if (format == "pdf") 2 else 1, book.pages.sumOf { it.illustrations.size })
                 library.save(book.copy(promptSeen = true))
+                if (format == "pdf") BookHudPreferenceStore(library.directory).setPinned(true)
                 for (theme in listOf("light", "dark")) {
                     System.setProperty("coach.windows.theme", theme)
                     val controller = TextbookController(library)

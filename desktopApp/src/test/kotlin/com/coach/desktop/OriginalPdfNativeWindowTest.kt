@@ -57,6 +57,7 @@ class OriginalPdfNativeWindowTest {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-reader-view-")
         val library = TextbookLibrary(root.resolve("library"))
+        BookHudPreferenceStore(library.directory).setPinned(true)
         val book = library.importBook(viewSwitchPdf(root))
         val databaseUrl = "jdbc:sqlite:${library.directory.resolve("library.sqlite")}"
         DriverManager.getConnection(databaseUrl).use { db ->
@@ -255,6 +256,7 @@ class OriginalPdfNativeWindowTest {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-original-pdf-native-")
         val library = TextbookLibrary(root.resolve("library"))
+        BookHudPreferenceStore(library.directory).setPinned(true)
         val book = library.importBook(fixture(root))
         val page = book.pages.single()
         val phrase = "The second column repeats this sentence."
@@ -384,6 +386,7 @@ class OriginalPdfNativeWindowTest {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-original-modes-")
         val library = TextbookLibrary(root.resolve("library"))
+        BookHudPreferenceStore(library.directory).setPinned(true)
         val book = library.importBook(fixture(root, pages = 4))
         val right = book.page(2)!!
         val phrase = "The second column repeats this sentence."

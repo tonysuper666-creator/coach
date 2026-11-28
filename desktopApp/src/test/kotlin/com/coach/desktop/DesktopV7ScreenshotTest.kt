@@ -168,6 +168,7 @@ A second English paragraph lets us inspect the space between paragraphs and the 
             ready(controller) { it.screen == BookScreen.READER }
             val renderedSizes = mutableListOf<Float>()
             for (size in ReadingSize.entries) {
+                revealReaderHud()
                 onNodeWithTag("immersive-more-menu").performClick()
                 onNodeWithTag("v7-type-menu").performClick()
                 val option = onNodeWithTag("reading-size-${size.name}")

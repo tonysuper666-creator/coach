@@ -100,14 +100,34 @@ internal fun BookImportToast(notice: BookImportNotice?, onDismiss: (Long) -> Uni
     val shape = RoundedCornerShape(CoachV7.Radius.btn)
     Box(
         modifier
-            .padding(top = 56.dp, start = 16.dp, end = 16.dp)
             .paperShadow("card", colors.dark)
             .clip(shape)
             .background(colors.fgPrimary)
-            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
             .testTag("book-import-toast"),
     ) {
-        Text(notice.message, style = MaterialTheme.typography.bodySmall, color = colors.surface1)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                notice.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.surface1,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Text(
+                "×",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.surface1.copy(alpha = 0.85f),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable(role = Role.Button) { onDismiss(notice.id) }
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                    .testTag("book-import-toast-close"),
+            )
+        }
     }
 }
 

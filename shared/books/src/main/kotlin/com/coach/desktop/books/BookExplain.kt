@@ -557,6 +557,8 @@ internal fun BookExplainPanel(
         if (selection != null) listOf(selection) else blocks.filter { it.page == page && it.isBodyParagraph }
     }
     val aiEnabled = LocalReadingAiExplain.current
+    val allowBookExplain = LocalAllowBookExplain.current
+    var pendingConsent by remember(book.id) { mutableStateOf<PendingExplain?>(null) }
     val states = remember(book.id) { mutableStateMapOf<String, BlockState>() }
     val sectionStates = remember(book.id) { mutableStateMapOf<String, SectionGuideState>() }
     var sectionExpanded by remember(book.id, currentSection?.id) { mutableStateOf(false) }
@@ -659,12 +661,27 @@ internal fun BookExplainPanel(
             Text(explanationScope(first, last, chapter?.title ?: book.title), style = MaterialTheme.typography.titleSmall)
             val paired = explainer.identity
             if (!aiEnabled) {
-                Text(
-                    "已在设置中关闭伴读讲解与提问，开启后可在此查看本节讲解。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.fgSecondary,
-                    modifier = Modifier.testTag("explain-ai-disabled"),
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "这本书还没允许讲解。阅读照常；需要讲解时可以一键允许。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fgSecondary,
+                        modifier = Modifier.testTag("explain-ai-disabled"),
+                    )
+                    PaperButton(
+                        onClick = {
+                            consent.allow(book.id)
+                            allowBookExplain?.invoke(book.id)
+                            when (val req = pendingConsent) {
+                                is PendingExplain.Block -> start(req.block)
+                                is PendingExplain.Section -> startSection(req.context, req.sectionId)
+                                null -> Unit
+                            }
+                            pendingConsent = null
+                        },
+                        modifier = Modifier.testTag("explain-allow-book"),
+                    ) { Text("允许这本书讲解") }
+                }
             } else if (paired == null && explainer.loaded) {
                 Column(Modifier.testTag("explain-revoked-action"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -691,9 +708,13 @@ internal fun BookExplainPanel(
                         Text(currentSection.breadcrumb, style = MaterialTheme.typography.titleSmall, color = colors.fgPrimary, modifier = Modifier.weight(1f))
                         FaintSectionExplainButton(
                             expanded = sectionExpanded && secState is SectionGuideState.Ready,
-                            enabled = aiEnabled && paired != null && secState != SectionGuideState.Loading,
+                            enabled = paired != null && secState != SectionGuideState.Loading,
                             onClick = {
-                                if (secState is SectionGuideState.Ready) {
+                                if (!aiEnabled) {
+                                    val ctx = sectionContext() ?: return@FaintSectionExplainButton
+                                    pendingConsent = PendingExplain.Section(ctx, currentSection.id)
+                                    sectionExpanded = true
+                                } else if (secState is SectionGuideState.Ready) {
                                     sectionExpanded = !sectionExpanded
                                 } else {
                                     val ctx = sectionContext() ?: return@FaintSectionExplainButton
@@ -713,6 +734,9 @@ internal fun BookExplainPanel(
                             expanded = sectionExpanded,
                             onToggleExpand = { sectionExpanded = !sectionExpanded },
                             onAllowConsent = {
+                                consent.allow(book.id)
+                                allowBookExplain?.invoke(book.id)
+                                pendingConsent = null
                                 val ctx = sectionContext() ?: return@SectionGuideCard
                                 startSection(ctx, currentSection.id)
                             },
@@ -791,12 +815,15 @@ internal fun BookExplainPanel(
                             style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
                         FaintExplainButton(
                             label = if (state == BlockState.Waiting) "讲解中…" else "讲讲",
-                            enabled = aiEnabled && canExplain, waiting = state == BlockState.Waiting,
-                            emphasised = failed == null && aiEnabled && canExplain && (true || hovered),
+                            enabled = canExplain, waiting = state == BlockState.Waiting,
+                            emphasised = failed == null && canExplain && (true || hovered),
                             placeholder = failed != null,
                             modifier = Modifier.alignByBaseline().padding(start = 12.dp)
                                 .then(if (failed == null) Modifier.testTag("explain-button") else Modifier),
-                            onClick = { if (aiEnabled) start(block) })
+                            onClick = {
+                                if (aiEnabled) start(block)
+                                else pendingConsent = PendingExplain.Block(block)
+                            })
                     }
                     Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -807,6 +834,16 @@ internal fun BookExplainPanel(
                                     modifier = Modifier.testTag("explain-repair"),
                                 ) {
                                     Text("重新登录")
+                                }
+                                ExplainTrouble.ConsentRequired -> PaperButton(
+                                    onClick = {
+                                        consent.allow(book.id)
+                                        allowBookExplain?.invoke(book.id)
+                                        start(block)
+                                    },
+                                    modifier = Modifier.testTag("explain-allow-book"),
+                                ) {
+                                    Text("允许这本书讲解")
                                 }
                                 else -> QuietButton("再试一次", enabled = paired != null, modifier = Modifier.testTag("explain-retry")) { start(block) }
                             }

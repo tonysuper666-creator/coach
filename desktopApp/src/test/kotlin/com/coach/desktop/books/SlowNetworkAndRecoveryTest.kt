@@ -237,6 +237,10 @@ class SlowNetworkAndRecoveryTest {
                 }
                 // Trigger first-book import while the 12s slow first request window is active.
                 onNodeWithTag("upload-textbook").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("first-taste-try").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("first-taste-try").performClick()
 
                 // Throughout the 12-second window, neither HostOfflineBadge nor "再试一次" may appear.
                 waitUntil(timeoutMillis = 25_000) {
@@ -492,8 +496,12 @@ class SlowNetworkAndRecoveryTest {
                 }
                 val outageStartedNs = System.nanoTime()
 
-                // User imports the first book while offline -> FirstTastePanel holds on offline prompt + "再试一次".
+                // User imports the first book while offline -> click 来一道 -> FirstTastePanel holds on offline prompt + "再试一次".
                 onNodeWithTag("upload-textbook").performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithTag("first-taste-try").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("first-taste-try").performClick()
                 waitUntil(timeoutMillis = 15_000) {
                     onAllNodesWithTag("first-taste-primary").fetchSemanticsNodes().isNotEmpty()
                 }

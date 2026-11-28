@@ -10,13 +10,18 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.WindowsTextbookHost
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -195,6 +200,10 @@ class FirstOpenGuideTest {
                 onAllNodesWithTag("empty-route-course").assertCountEquals(0)
                 onNodeWithTag("upload-textbook").performClick()
                 waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("first-taste-try").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("first-taste-try").performClick()
+                waitUntil(timeoutMillis = 20_000) {
                     onAllNodesWithTag("first-taste-stem").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithTag("first-taste-option-0").performClick()
@@ -269,6 +278,94 @@ class FirstOpenGuideTest {
                 onNodeWithTag("first-taste-verdict").assertTextEquals("对了。")
             }
             assertEquals(1, calls.get(), "the first question was asked again")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun firstOpenShowsReaderTextImmediatelyAndNeverShowPersistsAcrossBooksAndRestart() {
+        val root = Files.createTempDirectory("coach-first-open-non-intrusive-")
+        try {
+            val md1 = root.resolve("econ1.md")
+            val md2 = root.resolve("econ2.md")
+            Files.writeString(md1, "# Chapter 1\n\nFIRST_BOOK_VISIBLE_BODY_TEXT prices adjust.\n")
+            Files.writeString(md2, "# Chapter 1\n\nSECOND_BOOK_VISIBLE_BODY_TEXT supply clears.\n")
+            val library = TextbookLibrary(root.resolve("library"))
+            val controller1 = TextbookController(library)
+            val explainer = object : BookExplainer(library = library) {
+                override suspend fun fetchChapterCompanion(requestJson: JsonObject, blocks: List<SourceBlock>): ChapterCompanionFetchResult =
+                    ChapterCompanionFetchResult.Ready(samplePack())
+            }
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(
+                        controller = controller1,
+                        bookExplainer = explainer,
+                        chooseBook = { md1 },
+                        firstOpenGuide = true,
+                    )
+                }
+                waitUntil(timeoutMillis = 20_000) { controller1.state.value.initialized }
+                onNodeWithTag("upload-textbook").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() &&
+                        onAllNodesWithTag("first-taste-strip").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNode(hasTestTag("reader-text") and hasText("FIRST_BOOK_VISIBLE_BODY_TEXT", substring = true)).assertIsDisplayed()
+                onAllNodesWithTag("first-taste").assertCountEquals(0)
+                onNodeWithTag("first-taste-try").assertIsDisplayed()
+                onNodeWithTag("first-taste-dismiss").assertIsDisplayed()
+                onNodeWithTag("first-taste-never").assertIsDisplayed().performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("first-taste-strip").fetchSemanticsNodes().isEmpty()
+                }
+                assertTrue(FirstOpenStore.isDone(library.directory))
+
+                // Switching to a second book in the same session must not trigger the strip or full-screen taste.
+                runBlocking { controller1.importBook(md2) }
+                waitUntil(timeoutMillis = 20_000) {
+                    controller1.state.value.book?.title?.contains("econ2") == true ||
+                        onAllNodesWithTag("reader-text").fetchSemanticsNodes().any {
+                            it.config.toString().contains("SECOND_BOOK_VISIBLE_BODY_TEXT")
+                        }
+                }
+                waitForIdle()
+                onAllNodesWithTag("first-taste-strip").assertCountEquals(0)
+                onAllNodesWithTag("first-taste").assertCountEquals(0)
+            }
+
+            // Simulating restart with a new controller/host: "不再提示" persists and still allows on-demand entry.
+            val controller2 = TextbookController(library)
+            runBlocking {
+                controller2.load()
+                val secondId = controller2.state.value.catalog.first { it.title.contains("econ2") }.id
+                controller2.openBook(secondId)
+            }
+            runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
+                setContent {
+                    WindowsTextbookHost(
+                        controller = controller2,
+                        bookExplainer = explainer,
+                        chooseBook = { null },
+                        firstOpenGuide = true,
+                    )
+                }
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty()
+                }
+                waitForIdle()
+                onAllNodesWithTag("first-taste-strip").assertCountEquals(0)
+                onAllNodesWithTag("first-taste").assertCountEquals(0)
+                onNodeWithTag("immersive-companion-toggle").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("companion-taste-quiz").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("companion-taste-quiz").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("first-taste-stem").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("first-taste-stem").assertIsDisplayed()
+            }
         } finally {
             root.toFile().deleteRecursively()
         }

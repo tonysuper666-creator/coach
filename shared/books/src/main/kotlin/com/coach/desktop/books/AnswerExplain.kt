@@ -145,7 +145,21 @@ internal fun LessonAnswerExplanation(
                 ) { Text("重新登录") }
             }
         }
-        !allowed -> Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
+        !allowed -> {
+            val allowBookExplain = LocalAllowBookExplain.current
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("已在设置中关闭伴读讲解与提问。", style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f))
+                if (allowBookExplain != null) {
+                    V7TextButton(
+                        onClick = {
+                            gate.consent.allow(book.id)
+                            allowBookExplain(book.id)
+                        },
+                        modifier = Modifier.testTag("answer-explain-allow-book"),
+                    ) { Text("允许这本书讲解") }
+                }
+            }
+        }
         else -> {
             val support = remember(book.id, lesson.id, practice.reference, gate, library) {
                 PairedBookExplainSupport(gate, practice.reference, library)

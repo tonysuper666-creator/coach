@@ -25,6 +25,8 @@ internal enum class ExplainTrouble(val retry: Boolean) {
     Busy(true),
     /** 这台电脑的连接被停用（401）：给一条回到配对的路。 */
     Revoked(false),
+    /** 还没允许这本书发送原文讲解：只在用户主动点讲解时原地给出「允许这本书讲解」按钮。 */
+    ConsentRequired(false),
     /** 其余：出处对不上、原文变了、服务端拒绝了这次请求。显示那句话，可以再试。 */
     Other(true);
 
@@ -56,6 +58,7 @@ internal enum class ExplainTrouble(val retry: Boolean) {
                 Unpaired -> UNPAIRED
                 Unreachable -> UNREACHABLE
                 Revoked -> REVOKED
+                ConsentRequired -> "这本书还没允许讲解，允许后只发送当前需要的片段。"
                 Busy -> said.ifEmpty { "讲解服务这会儿没顾上，稍后再试一次。" }
                 Other -> said.ifEmpty { "这次没讲成，可以再试一次。" }
             }

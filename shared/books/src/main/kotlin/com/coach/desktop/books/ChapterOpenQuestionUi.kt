@@ -109,17 +109,41 @@ internal fun ChapterOpenQuestionCard(
                     hint = "翻到有正文的一页后再试。",
                 )
                 question == null && busy -> CoachLoadingDots(label = "正在整理这一章的开放题…")
-                question == null && !aiEnabled -> CoachEmptyState(
-                    title = "打开伴读后，才会出这一章的开放题。",
-                    hint = "题只生成一次，存在这台电脑上。",
-                )
+                question == null && !aiEnabled -> {
+                    val allowBookExplain = LocalAllowBookExplain.current
+                    if (!LocalReadingAiExplain.current && allowBookExplain != null) {
+                        CoachEmptyState(
+                            title = "这本书还没允许讲解。",
+                            hint = "允许后可按当前章节生成开放题。",
+                            actionLabel = "允许这本书讲解",
+                            onAction = { allowBookExplain(bookId); fetchNonce++ },
+                        )
+                    } else {
+                        CoachEmptyState(
+                            title = "打开伴读后，才会出这一章的开放题。",
+                            hint = "题只生成一次，存在这台电脑上。",
+                        )
+                    }
+                }
                 question == null -> {
+                    val allowBookExplain = LocalAllowBookExplain.current
                     error?.let { message ->
                         CoachErrorBanner(
                             message = message,
-                            retryLabel = if (trouble.needsPairing) "去登录" else "重试",
+                            retryLabel = when {
+                                trouble == ExplainTrouble.ConsentRequired && allowBookExplain != null -> "允许这本书讲解"
+                                trouble.needsPairing -> "去登录"
+                                else -> "重试"
+                            },
                             onRetry = {
-                                if (trouble.needsPairing) onOpenLogin() else fetchNonce++
+                                when {
+                                    trouble == ExplainTrouble.ConsentRequired && allowBookExplain != null -> {
+                                        allowBookExplain(bookId)
+                                        fetchNonce++
+                                    }
+                                    trouble.needsPairing -> onOpenLogin()
+                                    else -> fetchNonce++
+                                }
                             },
                             modifier = Modifier.testTag("chapter-open-error"),
                         )

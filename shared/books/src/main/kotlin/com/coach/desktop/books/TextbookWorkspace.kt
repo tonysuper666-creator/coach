@@ -788,8 +788,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     )
                 }
                 if (!LocalImportNoticeHandled.current) {
-                    BookImportToast(ui.importNotice, controller::dismissImportNotice,
-                        Modifier.align(androidx.compose.ui.Alignment.TopCenter))
+                    BookImportToast(
+                        ui.importNotice,
+                        controller::dismissImportNotice,
+                        Modifier.align(Alignment.BottomStart)
+                            .padding(start = 16.dp, bottom = if (ui.screen == BookScreen.READER) 56.dp else 16.dp),
+                    )
                 }
             }
         }

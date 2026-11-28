@@ -13,6 +13,8 @@ import java.sql.SQLException
 internal val LocalReadingAutoGuide = compositionLocalOf { true }
 internal val LocalReadingSectionSummary = compositionLocalOf { true }
 internal val LocalReadingAiExplain = compositionLocalOf { true }
+internal val LocalAllowBookExplain = compositionLocalOf<((String) -> Unit)?> { null }
+internal val LocalOpenTasteQuiz = compositionLocalOf<(() -> Unit)?> { null }
 
 internal enum class ReadingSize(val label: String, val scale: Float) {
     SMALL("小", .9f), MEDIUM("中", 1f), LARGE("大", 1.15f)

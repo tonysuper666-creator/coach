@@ -542,6 +542,39 @@ class ReadingMethodTest {
     }
 
     @Test
+    fun unansweredAdvanceDoesNotRequireAnswersOrMarkWrong() {
+        val plan = ReadingChapterPlan(
+            "ch",
+            "章",
+            listOf(ReadingSectionRef("s1", "第一节", 2), ReadingSectionRef("s2", "第二节", 3)),
+        )
+        val before = ReadingMethodFlow.advanceBeforePretest(ChapterMethodProgress("PRETEST"))
+        assertEquals("READ", before.step)
+
+        val duringNext = ReadingMethodFlow.finishDuringPause(ChapterMethodProgress("PAUSE", sectionIndex = 0), plan.sections.size)
+        assertEquals("READ", duringNext.step)
+        assertEquals(1, duringNext.sectionIndex)
+
+        val afterQuiz = ReadingMethodFlow.advanceRecall(ChapterMethodProgress("RECALL"))
+        assertEquals("QUIZ", afterQuiz.step)
+
+        val quiz = listOf(
+            ReadingCheck("g1", "题1", ownWords = false, options = listOf("对", "错"), correct = "对", page = 4),
+            ReadingCheck("g2", "题2", ownWords = false, options = listOf("对", "错"), correct = "对", page = 5),
+        )
+        val blankDone = ReadingMethodFlow.advanceQuiz(afterQuiz, quiz)
+        assertEquals("DONE", blankDone.step)
+        assertTrue(blankDone.wrongIds.isEmpty())
+
+        val partialWrong = ReadingMethodFlow.advanceQuiz(
+            ReadingMethodFlow.recordAnswer(afterQuiz, "g1", "错"),
+            quiz,
+        )
+        assertEquals("RETURN", partialWrong.step)
+        assertEquals(listOf("g1"), partialWrong.wrongIds)
+    }
+
+    @Test
     fun companionChipIsNotASecondReadingMethod() {
         val label = studyModeTriggerLabel("逐节精读", compact = true, noun = "伴读", badge = "学法：逐节精读")
         assertEquals("伴读：逐节精读 ▾", label)

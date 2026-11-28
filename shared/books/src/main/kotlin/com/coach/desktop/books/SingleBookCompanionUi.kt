@@ -90,6 +90,9 @@ internal fun SingleBookCompanionPanel(
     val colors = CoachTheme.colors
     val originalOnly = studyPreference.detailLevel == ExplainDetailLevel.ORIGINAL_ONLY
     val aiEnabled = LocalReadingAiExplain.current && !originalOnly
+    val allowBookExplain = LocalAllowBookExplain.current
+    val openTasteQuiz = LocalOpenTasteQuiz.current
+    var inlineTasteOpen by remember(book.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val edition = book.id to book.structure?.editRevision
     val chapterGroup = remember(edition, book.lessons, currentSectionIndex) {
@@ -454,10 +457,30 @@ internal fun SingleBookCompanionPanel(
 
     var showMastery by remember(book.id) { mutableStateOf(false) }
     val masteryButton: @Composable () -> Unit = {
+        val pillShape = RoundedCornerShape(CoachV7.Radius.s)
+        Text(
+            if (showMastery) "返回" else "掌握",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (showMastery) colors.actionPrimary else colors.fgSecondary,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier
+                .clip(pillShape)
+                .border(1.dp, colors.borderSubtle, pillShape)
+                .clickable(role = Role.Button) { showMastery = !showMastery }
+                .pointerHoverIcon(PointerIcon.Hand)
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+                .testTag("companion-mod-mastery"),
+        )
+    }
+    val tasteQuizButton: @Composable () -> Unit = {
         V7TextButton(
-            onClick = { showMastery = !showMastery },
-            modifier = Modifier.testTag("companion-mod-mastery"),
-        ) { Text(if (showMastery) "返回" else "掌握") }
+            onClick = {
+                if (openTasteQuiz != null) openTasteQuiz()
+                else inlineTasteOpen = !inlineTasteOpen
+            },
+            modifier = Modifier.testTag("companion-taste-quiz"),
+        ) { Text("来道题") }
     }
 
     Column(modifier.fillMaxSize().testTag("single-book-companion")) {
@@ -511,7 +534,7 @@ internal fun SingleBookCompanionPanel(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 12.dp, vertical = 2.dp)
                             .testTag("companion-mode-bar"),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -578,10 +601,23 @@ internal fun SingleBookCompanionPanel(
                 Modifier
                     .fillMaxSize()
                     .verticalScroll(scroll)
-                    .padding(14.dp)
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
                     .testTag("companion-module-body"),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                if (inlineTasteOpen && openTasteQuiz == null) {
+                    FirstTastePanel(
+                        book = book,
+                        explainer = explainer,
+                        connectivity = connectivity,
+                        onReadBook = { inlineTasteOpen = false },
+                        onDone = { inlineTasteOpen = false },
+                        compact = true,
+                        onDismiss = { inlineTasteOpen = false },
+                        library = library,
+                        onAllowExplain = allowBookExplain?.let { cb -> { cb(book.id) } },
+                    )
+                }
                 if (readingExplanation) {
                     val chapter = remember(book, currentPage, currentPageOffset) {
                         BookChapterResolver.chapterForPage(book, currentPage, currentPageOffset)
@@ -788,10 +824,20 @@ internal fun SingleBookCompanionPanel(
                         RetrievedPageLinks(pages, { "第 ${it.page} 页" }, { onJumpPage(it.page) })
                         CoachErrorBanner(
                             message = state.message,
-                            retryLabel = if (state.trouble.needsPairing) "去登录" else "重试",
+                            retryLabel = when {
+                                state.trouble == ExplainTrouble.ConsentRequired && allowBookExplain != null -> "允许这本书讲解"
+                                state.trouble.needsPairing -> "去登录"
+                                else -> "重试"
+                            },
                             onRetry = {
-                                if (state.trouble.needsPairing) onOpenLogin()
-                                else fetchNonce++
+                                when {
+                                    state.trouble == ExplainTrouble.ConsentRequired && allowBookExplain != null -> {
+                                        allowBookExplain(book.id)
+                                        fetchNonce++
+                                    }
+                                    state.trouble.needsPairing -> onOpenLogin()
+                                    else -> fetchNonce++
+                                }
                             },
                             modifier = Modifier.testTag("companion-error-banner"),
                         )
@@ -800,8 +846,16 @@ internal fun SingleBookCompanionPanel(
                         when {
                             originalOnly -> CoachCardMeta("只看原文 · 可以在学法中调整讲解详略。")
                             !aiEnabled -> CoachEmptyState(
-                                title = "伴读整理已在设置中关闭。",
-                                hint = "打开设置里的伴读开关后，即可自动生成本章要点与练习。",
+                                title = "这本书还没允许讲解。",
+                                hint = "阅读照常。点下面按钮即可在本书开启伴读要点与练习。",
+                                actionLabel = if (allowBookExplain != null) "允许这本书讲解" else null,
+                                onAction = if (allowBookExplain != null) {
+                                    {
+                                        allowBookExplain(book.id)
+                                        fetchNonce++
+                                        modeFetchNonce++
+                                    }
+                                } else null,
                             )
                             explainer.loaded && explainer.identity == null -> CoachEmptyState(
                                 title = "登录后可使用本章伴读。",
@@ -1007,6 +1061,14 @@ internal fun SingleBookCompanionPanel(
                             )
                         },
                     )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    CoachCardMeta("随时点按做一道开胃题，不挡阅读")
+                    tasteQuizButton()
                 }
                 bottomContent?.invoke()
             }

@@ -671,6 +671,66 @@ class CourseExamPointsTest {
     }
 
     @Test
+    fun numberedSectionsAfterAChapterGlossaryNeedAHeadingOnTheDestinationPage() {
+        fun bookmark(number: String, title: String, page: Int) = BookTocNode(
+            "section-$number", null, page, 1, TocNodeKind.BACK_MATTER, number,
+            "$number $title*", page, page, source = HeadingSource.PDF_OUTLINE,
+        )
+        val section = bookmark("2.1", "Lattice defects", 12)
+        val chapter = section.copy(numberLabel = "2", title = "Chapter 2 Deformation", startPage = 11)
+        val nodes = listOf(
+            chapter, section, section.copy(numberLabel = null, title = "Local geometry"),
+            bookmark("2.2", "Elastic limits", 14),
+            section.copy(numberLabel = null, title = "Glossary", startPage = 15),
+            bookmark("2.3", "Practice example", 16),
+        )
+        val pages = listOf(
+            BookPage(12, "2.1 | Lattice defects\nDislocations permit atoms in a solid to rearrange under stress."),
+            BookPage(13, "Grain boundaries interrupt the regular arrangement of atoms in a crystalline solid."),
+            BookPage(14, "References\nSee section 2.2 Elastic limits in the catalogue for additional references."),
+            BookPage(16, "2.3 Practice example\nThis numbered entry occurs in the review at the back of the chapter."),
+        )
+        val spans = CourseExamPoints.bodyConfirmedSections(nodes, pages)
+        assertEquals(listOf(ExamSectionSpan("Lattice defects", "lattice defects", 12..13)), spans)
+        val evidence = pages.map { ExamTeachingPage("tb", it.number, CourseMaterialRole.CORE_TEXTBOOK, it.text, sectionEvidenceOnly = true) }
+        val point = CourseExamPoints.identifyFromPages("glossary", evidence, sectionSpansByBook = mapOf("tb" to spans)).single()
+        assertEquals("Lattice defects", point.title)
+        assertEquals(listOf(12, 13), point.sources.map { it.startPage })
+    }
+
+    @Test
+    fun navigationAndRankedCellsDoNotSeedTopicsButTextbookSectionsStillDo() {
+        val pages = listOf(
+            ExamTeachingPage("book", 11, CourseMaterialRole.CORE_TEXTBOOK, """
+                Student resources (https://example.invalid/help) are available online.
+                View a brief video: Visit the companion site for a demonstration.
+                Link to Learning: Follow this link for extra practice.
+                Sample archive (partial: Access the incomplete label here.
+                Cognitive mapping (CM): An internal representation of spatial relationships.
+                Table 1.2 Example placements
+                Rank Assignment
+                1 Satellite telemetry
+                2 Coastal surveying
+                3 Botanical fieldwork
+                4 Cellular transport
+                2.3 Memory consolidation
+                Learning stabilizes through a sequence of changes after initial acquisition.
+                Strategy
+                Apply the rule to an unfamiliar example.
+                Solution for (a)
+                The later measurement corresponds to a stronger memory trace.
+            """.trimIndent()),
+            ExamTeachingPage("book", 12, CourseMaterialRole.CORE_TEXTBOOK, """
+                4 Cellular transport
+                Cells move molecules across membranes by several distinct mechanisms.
+            """.trimIndent()),
+        )
+        val spans = listOf("Strategy", "Solution for (a)").map { ExamSectionSpan(it, it.lowercase(), 11..11) }
+        val titles = CourseExamPoints.identifyFromPages("ranked-cells", pages, sectionSpansByBook = mapOf("book" to spans)).map { it.title }.toSet()
+        assertEquals(setOf("Cognitive mapping (CM)", "Memory consolidation", "Cellular transport"), titles)
+    }
+
+    @Test
     fun tableCellLabelsAreRejectedWhileSectionSpanPagesRunningChapterHeadersAndMultiSlideTopicsStay() {
         // 1. Synthetic table rows ("All care: -0.22", "Dental care Source: ...", "100.0 All medical" near chart ticks)
         //    must NEVER become exam points.

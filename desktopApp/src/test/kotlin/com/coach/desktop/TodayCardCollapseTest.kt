@@ -59,6 +59,9 @@ class TodayCardCollapseTest {
                 ready(c) { it.screen == BookScreen.HOME && it.catalog.isNotEmpty() }
 
                 // 平时一行：只有摘要和「展开」，课表和时长都收着。
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithTag("home-exam-summary").fetchSemanticsNodes().isNotEmpty()
+                }
                 onNodeWithTag("home-exam-summary").assertIsDisplayed()
                 onNodeWithTag("home-exam-toggle", useUnmergedTree = true).assertTextEquals("展开")
                 onAllNodesWithTag("home-exam-course").assertCountEquals(0)

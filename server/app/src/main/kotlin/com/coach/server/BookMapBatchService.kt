@@ -232,39 +232,35 @@ class BookMapBatchService(
         val assembledById = LinkedHashMap<String, JsonObject>()
         var servedModel = BridgeClient.HAIKU
 
-        for ((chunkIdx, chunk) in chunks.withIndex()) {
-            val userPrompt = buildChunkPrompt(req.bookTitle, chunk)
-            val promptDigest = StudyModeJsonHelpers.sha256Hex(userPrompt).take(16)
-            val chunkKey = StudyModeJsonHelpers.sha256Hex(
-                "$topJobKey|chunk=$chunkIdx|$promptDigest",
-            )
-            when (val outcome = transport.submitOrPoll(
-                jobKey = chunkKey,
-                systemPrompt = systemPrompt,
-                userPrompt = userPrompt,
+        fun poll(key: String, system: String, prompt: String, stage: String, idx: Int): String? {
+            return when (val outcome = transport.submitOrPoll(
+                jobKey = key,
+                systemPrompt = system,
+                userPrompt = prompt,
                 maxTokens = 12_000,
                 friend = req.friend,
                 device = req.device,
             )) {
                 is BookMapBatchChunkOutcome.Pending -> {
                     minRetryAfterMs = minOf(minRetryAfterMs, outcome.retryAfterMs)
+                    null
                 }
                 is BookMapBatchChunkOutcome.Failed -> {
                     if (outcome.isQuota) throw BookMapQuotaExceededException(outcome.reason, outcome.errorCode)
-                    val stage = if (outcome.errorCode.startsWith("batch_result") || outcome.errorCode == "batch_incomplete" || outcome.errorCode == "batch_deadline") {
+                    val failureStage = if (outcome.errorCode.startsWith("batch_result") || outcome.errorCode == "batch_incomplete" || outcome.errorCode == "batch_deadline") {
                         "chunk_poll"
                     } else {
                         "chunk_submit"
                     }
-                    throw BookMapGenerationException(stage, outcome.errorCode, outcome.reason)
+                    throw BookMapGenerationException(failureStage, outcome.errorCode, outcome.reason)
                 }
                 is BookMapBatchChunkOutcome.Ready -> {
-                    completedChunks += 1
                     servedModel = outcome.model
                     if (req.friend == null) ledger?.record(
                         TokenLedgerEntry(
+                            entryId = key,
                             bookId = req.bookId,
-                            chapterId = "book-map-v2-chunk-$chunkIdx",
+                            chapterId = "book-map-v2-$stage-$idx",
                             sectionId = "BOOK_MAP_V2",
                             task = HaikuBookMapBatchTransport.TASK_NAME,
                             routeChannel = CompanionRouteChannel.HAIKU_BATCH,
@@ -275,13 +271,26 @@ class BookMapBatchService(
                             status = "ok",
                         ),
                     )
-                    val parsedChunk = parseAndValidateChunk(outcome.text, chunk, singleChapterBook = singleChapterBook)
-                    for (chObj in parsedChunk) {
-                        val cid = chObj["chapterId"]?.jsonPrimitive?.contentOrNull ?: continue
-                        assembledById[cid] = chObj
-                    }
+                    outcome.text
                 }
             }
+        }
+
+        for ((chunkIdx, chunk) in chunks.withIndex()) {
+            val prompt = buildChunkPrompt(req.bookTitle, chunk)
+            val key = StudyModeJsonHelpers.sha256Hex("$topJobKey|$chunkIdx|$systemPrompt|$prompt")
+            val draft = poll(key, systemPrompt, prompt, "chunk", chunkIdx) ?: continue
+            val chapters = parseAndValidateChunk(draft, chunk, singleChapterBook)
+            val evidence = BookMapEvidenceReview(chapters, chunk)
+            val reviewed = if (evidence.items.isEmpty()) chapters else {
+                val instruction = evidence.instruction + "\n" + languageRule(req.explainLang)
+                val payload = evidence.items.toString()
+                val reviewKey = StudyModeJsonHelpers.sha256Hex("$key|review|$instruction|$payload")
+                val verdict = poll(reviewKey, instruction, payload, "review", chunkIdx) ?: continue
+                evidence.apply(verdict)
+            }
+            completedChunks++
+            for (ch in reviewed) assembledById[ch.getValue("chapterId").jsonPrimitive.content] = ch
         }
 
         if (completedChunks < chunks.size) {
@@ -314,6 +323,7 @@ class BookMapBatchService(
         buildJsonObject {
             put("formatVersion", 2)
             put("pending", false)
+            put("primaryEvidenceReviewed", true)
             put("bookId", req.bookId)
             put("bookTitle", req.bookTitle)
             put("skeletonHash", req.skeletonHash)
@@ -347,12 +357,13 @@ class BookMapBatchService(
         return result
     }
 
+    private fun languageRule(lang: ServerExplainLang) = when (lang) {
+        ServerExplainLang.EN -> "Write oneLiner and each point summary in concise plain English."
+        ServerExplainLang.ZH -> "oneLiner 和每个要点的 summary 必须用简洁自然的大白话中文，不要整句照抄英文。"
+        ServerExplainLang.BILINGUAL -> "oneLiner 和每个要点的 summary 用简洁自然的大白话中文，必要专有名词可括号附英文。"
+    }
+
     private fun buildSystemPrompt(lang: ServerExplainLang, singleChapterBook: Boolean = false): String {
-        val langRule = when (lang) {
-            ServerExplainLang.EN -> "Write oneLiner and each point summary in concise plain English."
-            ServerExplainLang.ZH -> "oneLiner 和每个要点的 summary 必须用简洁自然的大白话中文，不要整句照抄英文。"
-            ServerExplainLang.BILINGUAL -> "oneLiner 和每个要点的 summary 用简洁自然的大白话中文，必要专有名词可括号附英文。"
-        }
         val countRule = if (singleChapterBook) {
             "1. 本书目前只有 1 个大章，请从前到后均匀提炼 8 到 10 个要点（若候选原句不足 8 条，则按实际条数给 3 到 7 个）。"
         } else {
@@ -363,9 +374,9 @@ class BookMapBatchService(
 {"chapters":[{"chapterId":"...","chapterNum":1,"oneLiner":"一句话说清本章讲什么","points":[{"summary":"一句人话要点","refs":[12]}]}]}
 硬规矩：
 $countRule
-2. 每个要点只写一句人话（尽量 15–38 字），并且 refs 数组里必须挂 1 到 2 个本章提供的整数 ref 编号，证明这句话就是从该原句来的。
+2. 每个要点只写一句人话（尽量 15–38 字），先选一句能独立表达要点的原句，再用一句话转述，只引用这一个 ref。每项判断、范围、因果和数字都必须只凭这句成立。
 3. 严禁编造 ref 编号，严禁跨章借用 ref，严禁在 summary 里加引号照抄大段原文。
-4. $langRule"""
+4. ${languageRule(lang)}"""
     }
 
     private fun buildChunkPrompt(bookTitle: String, chapters: List<BookMapV2ChapterInput>): String = buildString {
@@ -418,14 +429,11 @@ $countRule
                     (pObj["refs"] as? JsonArray).orEmpty().forEach { addAll(extractIntRefs(it)) }
                     pObj["ref"]?.let { addAll(extractIntRefs(it)) }
                 }
-                val validRefs = rawRefIds
-                    .distinct()
-                    .filter { it in allowedRefs }
-                    .take(2)
-                if (validRefs.isEmpty()) continue
+                val primary = rawRefIds.firstOrNull() ?: continue
+                if (primary !in allowedRefs) continue
                 verifiedPoints += buildJsonObject {
                     put("summary", summary)
-                    put("refs", buildJsonArray { validRefs.forEach { add(JsonPrimitive(it)) } })
+                    put("refs", buildJsonArray { add(JsonPrimitive(primary)) })
                 }
             }
 

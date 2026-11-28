@@ -94,6 +94,12 @@ internal fun interface BookOcr {
         recognize(image, control)
 }
 
+internal interface PositionedBookOcr : BookOcr {
+    fun recognizeWithBoxes(image: BookBitmap, control: BookImportControl, rotation: Int): RecognizedWords
+}
+
+internal data class RecognizedWords(val text: String, val boxes: List<PageTextBox>)
+
 internal interface BookXmlVisitor {
     fun startElement(localName: String, attr: (String) -> String?)
     fun text(value: String)

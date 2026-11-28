@@ -75,6 +75,7 @@ internal fun BookWhatAboutMapPanel(
         val loadedProgress = withContext(Dispatchers.IO) { BookMapReadProgress.loadForBook(library, book.id) }
         progressByChapter = loadedProgress
         val loadedDoc = withContext(Dispatchers.IO) { BookMapStore.load(library, book) }
+        if (activeJob?.isActive == true) return@LaunchedEffect
         if (loadedDoc != null) {
             state = BookMapUiState.Ready(loadedDoc)
         } else if (state !is BookMapUiState.Generating) {
@@ -429,6 +430,11 @@ internal fun BookWhatAboutMapView(
             }
 
             is BookMapUiState.Ready -> {
+                if (!state.document.primaryEvidenceReviewed) {
+                    V7TextButton(onClick = onGenerateAll, modifier = Modifier.testTag("book-map-review-primary")) {
+                        Text("重新核对地图引文")
+                    }
+                }
                 if (state.document.reconciledFromSkeleton) {
                     PaperCard(
                         Modifier.fillMaxWidth().testTag("book-map-v2-reconciled-banner"),

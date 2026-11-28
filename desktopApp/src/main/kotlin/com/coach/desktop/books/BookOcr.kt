@@ -47,7 +47,7 @@ internal object BookScanImages {
 /** Minimal C API bridge: bundled Windows engine + fast Simplified Chinese/English models.
  * No optional Windows language pack, system executable, network or Python at runtime.
  */
-internal object BundledBookOcr : BookOcr {
+internal object BundledBookOcr : PositionedBookOcr {
     private interface CancelCallback : Callback { fun invoke(context: Pointer?, words: Int): Byte }
     private interface Api : Library {
         fun TessBaseAPICreate(): Pointer
@@ -114,7 +114,19 @@ internal object BundledBookOcr : BookOcr {
     override fun recognize(image: BufferedImage, control: BookImportControl): String =
         recognize(image, control, englishOnly = false, singleBlock = false)
 
-    override fun recognize(image: BufferedImage, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String {
+    override fun recognize(image: BufferedImage, control: BookImportControl, englishOnly: Boolean, singleBlock: Boolean): String =
+        recognizePage(image, control, englishOnly, singleBlock, null)
+
+    override fun recognizeWithBoxes(image: BufferedImage, control: BookImportControl, rotation: Int): RecognizedWords {
+        var boxes = emptyList<PageTextBox>()
+        val text = recognizePage(image, control, false, false) { transcript, hocr ->
+            boxes = OcrWordGeometry.boxes(transcript, hocr, image.width, image.height, rotation)
+        }
+        return RecognizedWords(text, boxes)
+    }
+
+    private fun recognizePage(image: BufferedImage, control: BookImportControl, englishOnly: Boolean,
+                              singleBlock: Boolean, onLayout: ((String, String) -> Unit)?): String {
         control.check()
         BookScanImages.checkSize(image.width, image.height)
         // Composite transparent PNGs onto white, then send a compact grayscale raster.
@@ -156,7 +168,12 @@ internal object BundledBookOcr : BookOcr {
                     finally { bridge.TessDeleteText(text) }
                     if (singleBlock || original.isBlank()) return original
                     val layout = bridge.TessBaseAPIGetHOCRText(handle, 0) ?: return original
-                    try { return OcrMarginalNotes.separate(original, layout.getString(0, "UTF-8"), gray.width) }
+                    try {
+                        val hocr = layout.getString(0, "UTF-8")
+                        val transcript = OcrMarginalNotes.separate(original, hocr, gray.width)
+                        onLayout?.invoke(transcript, hocr)
+                        return transcript
+                    }
                     finally { bridge.TessDeleteText(layout) }
                 } finally { bridge.TessMonitorDelete(monitor) }
             } finally { bridge.TessBaseAPIDelete(handle) }

@@ -627,6 +627,18 @@ internal object BookPageTextBoxStore {
         }
     }
 
+    fun replaceRecognizedPage(db: Connection, bookId: String, page: Int, text: String, layout: PageTextLayout?) {
+        if (layout != null) {
+            saveInTransaction(db, bookId, mapOf(page to text), listOf(layout))
+        } else if (tableExists(db)) {
+            db.prepareStatement("DELETE FROM $TABLE WHERE book=? AND page=?").use { sql ->
+                sql.setString(1, bookId)
+                sql.setInt(2, page)
+                sql.executeUpdate()
+            }
+        }
+    }
+
     fun loadPage(db: Connection, bookId: String, page: Int): PageTextLayout? {
         if (!BookIllustrationAssets.isValidSha256(bookId) || page < 1 || !tableExists(db)) return null
         db.prepareStatement("SELECT page_width,page_height,boxes FROM $TABLE WHERE book=? AND page=?").use { sql ->

@@ -13,6 +13,11 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runSkikoComposeUiTest
 import com.coach.client.PairedCredentials
+import com.coach.server.BookMapBatchChunkOutcome
+import com.coach.server.BookMapBatchService
+import com.coach.server.BookMapBatchTransport
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.ui.theme.CoachTheme
@@ -408,6 +413,7 @@ class BookMapWhatAboutTest {
                 waitUntil(timeoutMillis = 5_000) {
                     runCatching { onNodeWithTag("book-map-v2-point-0-0").assertExists() }.isSuccess
                 }
+                onNodeWithTag("book-map-review-primary").assertExists()
                 assertEquals(0, reopenCalls.get(), "Reopening saved map must spend zero quota")
             }
         } finally {
@@ -739,8 +745,48 @@ commodities across domestic and international markets."""
     }
 
     @Test
+    fun mapDoesNotPublishTheDraftWhilePrimaryEvidenceReviewIsPending() = runBlocking {
+        val book = makeSamePageEpubBook()
+        val request = BookMapWire.buildBatchRequest(book)
+        val draft = fakeBatchResponseFor(request.payload)
+        val reviewKeys = mutableListOf<String>()
+        val narrowed = "Early markets help coordinate production across regions."
+        val transport = object : BookMapBatchTransport {
+            override fun submitOrPoll(jobKey: String, systemPrompt: String, userPrompt: String, maxTokens: Int,
+                                      friend: String?, device: String?): BookMapBatchChunkOutcome {
+                fun ready(text: String) = BookMapBatchChunkOutcome.Ready(text, "claude-haiku-5-5", 100, 50, 20)
+                if (!userPrompt.startsWith("[")) return ready(draft.toString())
+                reviewKeys += jobKey
+                if (reviewKeys.size == 1) return BookMapBatchChunkOutcome.Pending(1000)
+                val pairs = Json.parseToJsonElement(userPrompt).jsonArray
+                val results = pairs.mapIndexed { index, pair ->
+                    assertTrue(request.refMap.values.any { it.text.trim() == pair.jsonObject["source"]!!.jsonPrimitive.content })
+                    buildJsonObject {
+                        put("id", pair.jsonObject.getValue("id"))
+                        put("result", if (index == 0) "narrowed" else "supported")
+                        if (index == 0) put("summary", narrowed)
+                    }
+                }
+                return ready(buildJsonObject { put("reviews", JsonArray(results.reversed())) }.toString())
+            }
+        }
+        val service = BookMapBatchService(transport)
+        val parsed = BookMapBatchService.parseRequest(book.id, request.payload, null, "test")
+        val pending = service.generate(parsed)
+        assertTrue(BookMapWire.parseBatchResponse(book, pending, request.refMap) is BookMapBatchParseResult.Pending)
+        val response = service.generate(parsed)
+        val map = (BookMapWire.parseBatchResponse(book, response, request.refMap) as BookMapBatchParseResult.Ready).document
+        assertEquals(1, reviewKeys.distinct().size)
+        assertTrue(map.primaryEvidenceReviewed)
+        assertEquals(narrowed, map.chapters.first().points.first().summary)
+        assertTrue(map.chapters.flatMap { it.points }.all { it.anchors.size == 1 })
+        assertEquals(map, BookMapWire.decodeDocument(BookMapWire.encodeDocument(map)))
+    }
+
+    @Test
     fun realPublicCorpusEpubAndPdfMapSentencesHighlightWithoutNewlineTruncation() {
-        val corpusRoot = java.nio.file.Path.of(System.getProperty("user.home"), "Coach", "materials", "public-corpus")
+        val corpusRoot = System.getenv("COACH_MAP_PUBLIC_CORPUS")?.let { java.nio.file.Path.of(it) }
+            ?: java.nio.file.Path.of(System.getProperty("user.home"), "Coach", "materials", "public-corpus")
         val epubPaths = listOf(
             corpusRoot.resolve("nonfiction/origin-of-species/origin-of-species.epub"),
             corpusRoot.resolve("nonfiction/wealth-of-nations/wealth-of-nations.epub"),

@@ -209,6 +209,15 @@ class BookMapBatchServiceTest {
                     friend: String?,
                     device: String?,
                 ): BookMapBatchChunkOutcome {
+                    if (userPrompt.startsWith("[")) {
+                        val evidence = LedgerJson.parseToJsonElement(userPrompt).jsonArray
+                        assertEquals(3, evidence.size)
+                        assertTrue(evidence.all { it.jsonObject.keys == setOf("id", "source", "draft") })
+                        assertEquals("Information asymmetry creates adverse selection in insurance markets.",
+                            evidence[1].jsonObject.getValue("source").jsonPrimitive.content)
+                        val reply = """{"reviews":[{"id":3,"result":"supported"},{"id":1,"result":"supported"},{"id":2,"result":"narrowed","summary":"保险市场的信息不对称会导致逆向选择。"}]}"""
+                        return BookMapBatchChunkOutcome.Ready(reply, BridgeClient.HAIKU, 100, 60, 30L)
+                    }
                     assertTrue(canaryProse in userPrompt, "Book prose should be sent to model during generation")
                     val call = pollCount.incrementAndGet()
                     if (call == 1) return BookMapBatchChunkOutcome.Pending(2_500L)
@@ -221,7 +230,7 @@ class BookMapBatchServiceTest {
                                 "oneLiner":"第一章建立供需与激励分析框架",
                                 "points":[
                                     {"summary":"价格机制决定资源在医疗市场中的配置方向。","refs":[1]},
-                                    {"summary":"信息不对称会导致逆向选择问题。","refs":[2, 999]},
+                                    {"summary":"信息不对称会导致逆向选择，共付也会改变就医需求。","refs":[2, 3, 999]},
                                     {"summary":"共付比例直接影响患者的边际就医决策。","refs":[3]},
                                     {"summary":"这条编造的要点挂了不存在的引用，必须被丢弃。","refs":[888, 999]}
                                 ]
@@ -305,6 +314,7 @@ class BookMapBatchServiceTest {
                 assertEquals(BridgeClient.HAIKU, j2["model"]?.jsonPrimitive?.contentOrNull)
                 val pts = j2["chapters"]!!.jsonArray.single().jsonObject["points"]!!.jsonArray
                 assertEquals(3, pts.size, "Hallucinated ref point must be dropped fail-closed")
+                assertEquals("保险市场的信息不对称会导致逆向选择。", pts[1].jsonObject["summary"]!!.jsonPrimitive.content)
                 assertEquals(listOf(2), pts[1].jsonObject["refs"]!!.jsonArray.map { it.jsonPrimitive.intOrNull })
             } finally {
                 System.setOut(origOut)
@@ -344,6 +354,15 @@ class BookMapBatchServiceTest {
                 friend: String?,
                 device: String?,
             ): BookMapBatchChunkOutcome {
+                if (userPrompt.startsWith("[")) {
+                    val evidence = LedgerJson.parseToJsonElement(userPrompt).jsonArray
+                    val verdicts = evidence.map { buildJsonObject {
+                        put("id", it.jsonObject.getValue("id"))
+                        put("result", "supported")
+                    } }
+                    val reply = buildJsonObject { put("reviews", JsonArray(verdicts)) }
+                    return BookMapBatchChunkOutcome.Ready(reply.toString(), BridgeClient.HAIKU, 100, 50, 30L)
+                }
                 observedMaxTokens += maxTokens
                 val chHeaders = Regex("=== CHAPTER id=([^ ]+) num=(\\d+)").findAll(userPrompt).toList()
                 observedChunkCounts += chHeaders.size

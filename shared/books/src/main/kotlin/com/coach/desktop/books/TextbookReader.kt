@@ -1072,21 +1072,23 @@ internal fun TextbookReader(
             sayingsNotice = if (lookup.anchorMismatch) ConceptSayingLogic.ANCHOR_MISMATCH else null
         }
     }
-    val practiceDraftNodeId = remember(book.id, currentChapterGroup?.chapterId) {
-        currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
-    }
+    val practiceDraftNodeId = currentChapterGroup?.chapterId ?: currentSection?.id ?: "p${ui.page}"
     val exactResumeDraft = resumeDraft?.takeIf { it.bookId == book.id && it.tocNodeId == practiceDraftNodeId }
-    var practiceDraft by remember(book.id, currentChapterGroup?.chapterId) {
+    var practiceDraft by remember(book.id, practiceDraftNodeId) {
         // 存盘的草稿放到下面后台去读：书库在等别处的写锁时，这里同步去读会把整个窗口卡住。
         val restored = exactResumeDraft
             ?: resumeDraft?.takeIf { it.bookId == book.id && it.hasMeaningfulDraft() }
+                ?.copy(
+                    tocNodeId = practiceDraftNodeId, page = ui.page,
+                    openQuestionJson = "", openAnswerDraft = "", openAttemptsJson = "",
+                )
             ?: ChapterPracticeDraft(bookId = book.id, tocNodeId = practiceDraftNodeId, page = ui.page)
         mutableStateOf(restored)
     }
-    var practiceDraftReady by remember(book.id, currentChapterGroup?.chapterId) {
+    var practiceDraftReady by remember(book.id, practiceDraftNodeId) {
         mutableStateOf(exactResumeDraft != null)
     }
-    LaunchedEffect(book.id, currentChapterGroup?.chapterId) {
+    LaunchedEffect(book.id, practiceDraftNodeId) {
         if (exactResumeDraft != null) {
             practiceDraftReady = true
             return@LaunchedEffect
@@ -2008,6 +2010,8 @@ internal fun TextbookReader(
                                 },
                             )
                             Box(Modifier.weight(1f).fillMaxWidth()) {
+                        // Wait for this chapter's saved answers before enabling edits or generating a question.
+                        if (!practiceDraftReady) return@Box
                         SingleBookCompanionPanel(
                             book = book,
                             onOpenSectionMainline = onOpenSectionMainline,

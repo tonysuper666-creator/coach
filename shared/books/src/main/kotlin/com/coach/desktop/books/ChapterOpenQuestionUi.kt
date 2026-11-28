@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -60,6 +61,7 @@ internal fun ChapterOpenQuestionCard(
     var trouble by remember(chapterId) { mutableStateOf(ExplainTrouble.Other) }
     var fetchNonce by remember(chapterId) { mutableIntStateOf(0) }
     val prose = remember(blocks) { blocks.filter { !it.heading && it.text.isNotBlank() } }
+    val saveDraft by rememberUpdatedState(onDraftChange)
 
     LaunchedEffect(chapterId, draft.openQuestionJson, fetchNonce, aiEnabled, prose.size) {
         if (question != null || !aiEnabled || prose.isEmpty()) return@LaunchedEffect
@@ -81,7 +83,7 @@ internal fun ChapterOpenQuestionCard(
                 if (saved == null) {
                     error = "这一章暂时没能整理出开放题，请稍后重试。"
                 } else {
-                    onDraftChange(draft.copy(openQuestionJson = ChapterOpenJson.encodeQuestion(saved)))
+                    saveDraft(draft.copy(openQuestionJson = ChapterOpenJson.encodeQuestion(saved)))
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -162,7 +164,7 @@ internal fun ChapterOpenQuestionCard(
                     pageText = pageText,
                     draft = draft,
                     explainer = explainer,
-                    onDraftChange = onDraftChange,
+                    onDraftChange = { saveDraft(it) },
                     onOpenAnchor = onOpenAnchor,
                     onOpenLogin = onOpenLogin,
                     onPointsGraded = onPointsGraded,

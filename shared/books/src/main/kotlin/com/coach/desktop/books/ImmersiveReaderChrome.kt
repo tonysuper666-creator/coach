@@ -38,8 +38,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -61,7 +63,10 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.LocalV7Fonts
@@ -72,29 +77,105 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.roundToInt
 
-/** 按书持久化「用户是否曾主动收起顶底栏」：首次打开某本书时栏常显，主动收起一次后才开始自动隐藏。 */
+/**
+ * 全局 HUD 固定偏好：所有书默认自动隐藏顶底栏，仅在用户主动选择「固定顶底栏」时常显。
+ * 不再读写旧的逐书 `reader-hud-dismissed.txt`。
+ */
 internal class BookHudPreferenceStore(private val directory: Path) {
-    private val file: Path get() = directory.resolve("reader-hud-dismissed.txt")
+    private val file: Path get() = directory.resolve("reader-hud-preference.txt")
 
-    fun isDismissed(bookId: String): Boolean {
-        if (bookId.isBlank()) return false
-        return runCatching {
-            if (!Files.exists(file)) false
-            else Files.readAllLines(file).any { it.trim() == bookId }
-        }.getOrDefault(false)
-    }
+    fun isPinned(): Boolean = runCatching {
+        if (!Files.exists(file)) false
+        else Files.readString(file).trim() == "pinned"
+    }.getOrDefault(false)
 
-    fun markDismissed(bookId: String) {
-        if (bookId.isBlank()) return
+    fun setPinned(pinned: Boolean) {
         runCatching {
             Files.createDirectories(directory)
-            val existing = if (Files.exists(file)) Files.readAllLines(file).map(String::trim).filter(String::isNotEmpty).toMutableSet()
-            else linkedSetOf()
-            if (existing.add(bookId)) {
-                Files.writeString(file, existing.joinToString("\n", postfix = "\n"))
-            }
+            Files.writeString(file, if (pinned) "pinned\n" else "auto-hide\n")
         }
     }
+}
+
+/** 计算选段操作胶囊位置：优先放在选区上方，放不下时放到选区下方，始终避开上下安全区与左右边界。 */
+internal fun calculateSelectionPillOffset(
+    selectionRect: Rect,
+    pillSize: IntSize,
+    containerSize: IntSize,
+    topSafePx: Int,
+    bottomSafePx: Int,
+    gapPx: Int,
+    horizontalPaddingPx: Int,
+    availableLeftPx: Int = 0,
+    availableRightPx: Int = containerSize.width,
+): IntOffset {
+    val maxX = (availableRightPx - horizontalPaddingPx - pillSize.width).coerceAtLeast(availableLeftPx + horizontalPaddingPx)
+    val minX = (availableLeftPx + horizontalPaddingPx).coerceAtMost(maxX)
+    val centeredX = (((selectionRect.left + selectionRect.right) * 0.5f) - pillSize.width * 0.5f).roundToInt()
+    val x = centeredX.coerceIn(minX, maxX)
+
+    val maxY = (containerSize.height - bottomSafePx - pillSize.height).coerceAtLeast(topSafePx)
+    val aboveY = selectionRect.top.roundToInt() - gapPx - pillSize.height
+    val belowY = selectionRect.bottom.roundToInt() + gapPx
+    val y = when {
+        aboveY >= topSafePx -> aboveY.coerceAtMost(maxY)
+        belowY <= maxY -> belowY.coerceAtLeast(topSafePx)
+        else -> {
+            // 选区极高导致上下都逼近边缘时，取在安全区内落点更少遮挡的一侧。
+            val roomAbove = selectionRect.top.roundToInt() - topSafePx
+            val roomBelow = (containerSize.height - bottomSafePx) - selectionRect.bottom.roundToInt()
+            if (roomAbove >= roomBelow) topSafePx else maxY
+        }
+    }
+    return IntOffset(x, y)
+}
+
+internal sealed interface ReaderTopNotice {
+    val key: String
+
+    data class BookError(val message: String) : ReaderTopNotice {
+        override val key: String = "error:$message"
+    }
+
+    data class SourceAnchor(val message: String) : ReaderTopNotice {
+        override val key: String = "source:$message"
+    }
+
+    data class DamagedPages(val pages: List<Int>, val message: String) : ReaderTopNotice {
+        override val key: String = "damaged:${pages.joinToString(",")}"
+    }
+
+    data object ConnectionRevoked : ReaderTopNotice {
+        override val key: String = "revoked"
+    }
+}
+
+/** 统一阅读区顶部轻提示队列：同一时刻只返回最高优先级且未被关闭的一条，且与选段胶囊错峰显示。 */
+internal fun selectActiveReaderTopNotice(
+    workspaceError: String?,
+    bookErrorDismissed: Boolean,
+    sourceNotice: String?,
+    dismissedSourceNotice: String?,
+    damagedPages: List<Int>,
+    damagedPagesDismissed: Boolean,
+    connectionRevoked: Boolean,
+    revokedNoticeDismissed: Boolean,
+    selectionPillVisible: Boolean,
+): ReaderTopNotice? {
+    if (selectionPillVisible) return null
+    if (!workspaceError.isNullOrBlank() && !bookErrorDismissed) {
+        return ReaderTopNotice.BookError(workspaceError)
+    }
+    if (!sourceNotice.isNullOrBlank() && dismissedSourceNotice != sourceNotice) {
+        return ReaderTopNotice.SourceAnchor(sourceNotice)
+    }
+    if (damagedPages.isNotEmpty() && !damagedPagesDismissed) {
+        return ReaderTopNotice.DamagedPages(damagedPages, BookImportMessages.damagedPages(damagedPages))
+    }
+    if (connectionRevoked && !revokedNoticeDismissed) {
+        return ReaderTopNotice.ConnectionRevoked
+    }
+    return null
 }
 
 /** 统一伴读抽屉的三个页签：讲解、提问、批注，合在同一平面容器里，不再一层套一层。 */
@@ -128,7 +209,52 @@ internal fun companionPresentationForWidth(widthDp: Float): CompanionPresentatio
 
 internal fun companionSideWidth(widthDp: Float): Dp = when {
     widthDp >= 1440f -> 380.dp
-    else -> 360.dp
+    widthDp >= 1280f -> 360.dp
+    else -> 332.dp
+}
+
+/** 小窗下伴读抽屉收起时的底边轻把手，不挡正文且不抢键盘翻页焦点。 */
+@Composable
+internal fun CompanionBottomSheetHandle(
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = CoachTheme.colors
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(colors.surface1.copy(alpha = 0.96f))
+            .focusProperties { canFocus = false }
+            .clickable(role = Role.Button, onClick = onExpand)
+            .pointerHoverIcon(PointerIcon.Hand)
+            .testTag("companion-bottom-sheet-handle"),
+    ) {
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+        Box(
+            Modifier.fillMaxWidth().height(28.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .width(28.dp)
+                        .height(3.dp)
+                        .clip(CircleShape)
+                        .background(colors.borderSubtle),
+                )
+                Text(
+                    "伴读 ▴",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.fgSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -193,6 +319,10 @@ internal fun ImmersiveTopHud(
     modeControl: (@Composable () -> Unit)? = null,
     onMoreMenuDismiss: () -> Unit = {},
     onOpenBookNotes: () -> Unit = {},
+    connectionRevoked: Boolean = false,
+    onReconnectClick: (() -> Unit)? = null,
+    damagedPagesCount: Int = 0,
+    onDamagedPagesBadgeClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -264,6 +394,48 @@ internal fun ImmersiveTopHud(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f).padding(horizontal = if (compact) 4.dp else 8.dp).testTag("immersive-title"),
                 )
+                if (damagedPagesCount > 0 && onDamagedPagesBadgeClick != null) {
+                    Text(
+                        "坏页 $damagedPagesCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = v7Alert(),
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(CoachV7.Radius.s))
+                            .background(v7Alert().copy(alpha = 0.10f))
+                            .border(1.dp, v7Alert().copy(alpha = 0.35f), RoundedCornerShape(CoachV7.Radius.s))
+                            .clickable(role = Role.Button, onClick = onDamagedPagesBadgeClick)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                            .testTag("damaged-pages-badge"),
+                    )
+                }
+                if (connectionRevoked) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(CoachV7.Radius.s))
+                            .clickable(enabled = onReconnectClick != null, role = Role.Button) {
+                                onReconnectClick?.invoke()
+                            }
+                            .pointerHoverIcon(if (onReconnectClick != null) PointerIcon.Hand else PointerIcon.Default)
+                            .padding(horizontal = 4.dp, vertical = 3.dp)
+                            .testTag("reader-connection-status-dot"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Box(Modifier.size(7.dp).clip(CircleShape).background(v7Alert()))
+                        if (!compact) {
+                            Text(
+                                "已断开",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = v7Alert(),
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
                 if (modeControl != null) {
                     modeControl()
                 }

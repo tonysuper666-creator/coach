@@ -187,6 +187,8 @@ class BookPageViewTest {
                         onNoteSession = {}, onPage = { writes += it }, onBack = {}, onLearn = {})
                 } }
                 waitForIdle()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 fun sources() = onNodeWithTag("reader-text").fetchSemanticsNode().config[BookPageSources]
@@ -263,12 +265,14 @@ class BookPageViewTest {
             val book = library.importBook(file)
             assertEquals(1, book.pages.size)
             library.save(book.copy(promptSeen = true))
+            BookHudPreferenceStore(library.directory).setPinned(true)
             val controller = TextbookController(library)
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { WindowsTextbookHost(controller) { null } }
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.book != null && !controller.state.value.busy }
                 onNodeWithTag("home-read").performClick()
                 waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 waitForIdle()
                 onNodeWithTag("immersive-more-menu").performClick()

@@ -34,6 +34,9 @@ class ImmersiveReaderV2Test {
         runBlocking { controller.load(); controller.read() }
         setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
         waitForIdle()
+        onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+        waitForIdle()
         onNodeWithTag("immersive-companion-toggle").performClick()
         onNodeWithTag("companion-tab-ask").performClick()
         waitForIdle()
@@ -186,11 +189,9 @@ class ImmersiveReaderV2Test {
             }
         }
         waitForIdle()
-        // New books first show the controls. Enter the original pure-read state
-        // explicitly before checking its existing viewport and hairline guarantees.
-        onNodeWithTag("immersive-top-hud").assertExists()
-        onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
-        waitForIdle()
+        // Global auto-hide is on by default: initial open shows hairline without HUD.
+        onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+        onNodeWithTag("immersive-bottom-hud").assertDoesNotExist()
         // Pure-read: left rail hidden, Desk v7-paper absent, viewport >= 95%
         onNodeWithTag("host-navigation").assertDoesNotExist()
         onNodeWithTag("v7-paper").assertDoesNotExist()

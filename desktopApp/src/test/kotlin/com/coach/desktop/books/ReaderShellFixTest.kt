@@ -207,7 +207,10 @@ class ReaderShellFixTest {
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
                 waitForIdle()
 
-                // First open shows top & bottom HUD immediately (no Esc needed)
+                // HUD auto-hides globally by default; Tab reveals top & bottom HUD
+                onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertIsDisplayed()
                 onNodeWithTag("immersive-bottom-hud").assertIsDisplayed()
                 onNodeWithTag("immersive-back").assertIsDisplayed()
@@ -292,70 +295,82 @@ class ReaderShellFixTest {
                 controller.openBook(bookA.id, 1)
             }
 
-            // Session 1: Book A first open -> HUD stays visible on pointer move, toggles on center click
+            // Session 1: Book A opens auto-hidden; center click toggles; edge hover auto-hides on return; Book B also opens auto-hidden
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
                 waitForIdle()
 
+                onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+                onNodeWithTag("immersive-bottom-hud").assertDoesNotExist()
+                onNodeWithTag("immersive-progress-hairline").assertExists()
+
+                // Clicking center of reader body reveals HUD and keeps it visible while moving toward toolbar
+                onNodeWithTag("reader-page").performMouseInput { click(center) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
                 onNodeWithTag("immersive-bottom-hud").assertExists()
-
-                // Moving cursor to center BEFORE user dismisses must NOT auto-hide HUD
                 onNodeWithTag("textbook-reader").performMouseInput { moveTo(center) }
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
 
-                // Clicking center of reader body hides HUD and persists dismissal for Book A
+                // Clicking center again hides HUD
                 onNodeWithTag("reader-page").performMouseInput { click(center) }
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertDoesNotExist()
                 onNodeWithTag("immersive-bottom-hud").assertDoesNotExist()
-                waitUntil(timeoutMillis = 5_000) { BookHudPreferenceStore(library.directory).isDismissed(bookA.id) }
 
-                // Clicking center again brings HUD back and keeps it visible while moving toward toolbar
-                onNodeWithTag("reader-page").performMouseInput { click(center) }
-                waitForIdle()
-                onNodeWithTag("immersive-top-hud").assertExists()
-                onNodeWithTag("immersive-bottom-hud").assertExists()
-                onNodeWithTag("textbook-reader").performMouseInput { moveTo(center) }
-                waitForIdle()
-                onNodeWithTag("immersive-top-hud").assertExists()
-
-                // Hovering top edge then moving back to center auto-hides HUD now that Book A was dismissed once
+                // Hovering top edge reveals HUD and moving back to center auto-hides it
                 onNodeWithTag("textbook-reader").performMouseInput {
                     moveTo(Offset(center.x, 8f))
+                }
+                waitForIdle()
+                onNodeWithTag("immersive-top-hud").assertExists()
+                onNodeWithTag("textbook-reader").performMouseInput {
                     moveTo(center)
                 }
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertDoesNotExist()
 
-                // Switching to brand-new Book B: HUD is visible again because Book B has never been dismissed!
+                // Switching to brand-new Book B: HUD is ALSO auto-hidden globally!
                 runBlocking { controller.openBook(bookB.id, 1) }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.book?.id == bookB.id }
                 waitForIdle()
-                onNodeWithTag("immersive-top-hud").assertExists()
+                onNodeWithTag("immersive-top-hud").assertDoesNotExist()
 
-                // Original PDF view also supports center-click HUD toggle
+                // Original PDF view also opens auto-hidden and supports center-click HUD toggle
                 runBlocking { controller.openBook(pdfBook.id, 1) }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.book?.id == pdfBook.id }
-                waitForIdle()
-                onNodeWithTag("immersive-top-hud").assertExists()
-                onNodeWithTag("reader-page").performMouseInput { click(center) }
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertDoesNotExist()
                 onNodeWithTag("reader-page").performMouseInput { click(center) }
                 waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertExists()
+                onNodeWithTag("reader-page").performMouseInput { click(center) }
+                waitForIdle()
+                onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+
+                // Pinning HUD from overflow menu persists global pin preference
+                onNodeWithTag("reader-page").performMouseInput { click(center) }
+                waitForIdle()
+                onNodeWithTag("immersive-more-menu").performClick()
+                waitForIdle()
+                onNodeWithTag("immersive-pin-hud").performClick()
+                waitForIdle()
+                assertTrue(BookHudPreferenceStore(library.directory).isPinned())
             }
 
-            // Session 2 (fresh composition): reopening Book A remembers auto-hide state!
+            // Session 2 (fresh composition): global pin keeps HUD visible; unpinning returns to auto-hide
             runBlocking { controller.openBook(bookA.id, 1) }
             runSkikoComposeUiTest(size = Size(1280f, 800f), density = Density(1f)) {
                 setContent { Box(Modifier.fillMaxSize()) { WindowsTextbookHost(controller, chooseBook = { null }) } }
                 waitUntil(timeoutMillis = 10_000) { controller.state.value.book?.id == bookA.id }
                 waitForIdle()
+                onNodeWithTag("immersive-top-hud").assertExists()
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-top-hud").assertDoesNotExist()
+                assertFalse(BookHudPreferenceStore(library.directory).isPinned())
             }
         } finally {
             root.toFile().deleteRecursively()
@@ -399,6 +414,8 @@ class ReaderShellFixTest {
                 waitForIdle()
 
                 // --- P2 Path: Open Ask, auto-focus, edge click, empty hint, key-by-key input, send & reply ---
+                onNodeWithTag("textbook-reader").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-companion-toggle").performClick()
                 waitForIdle()
                 onNodeWithTag("companion-tab-ask").performClick()
@@ -488,6 +505,9 @@ class ReaderShellFixTest {
                     waitUntil(timeoutMillis = 10_000) { controller.state.value.screen == BookScreen.READER }
                     waitForIdle()
 
+                    onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                    onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                    waitForIdle()
                     onNodeWithTag("immersive-companion-toggle").performClick()
                     waitForIdle()
                     onNodeWithTag("companion-tab-ask").performClick()
@@ -544,6 +564,7 @@ class ReaderShellFixTest {
         var window: ComposeWindow? = null
         try {
             val library = TextbookLibrary(root.resolve("lib"))
+            BookHudPreferenceStore(library.directory).setPinned(true)
             val f1 = root.resolve("smith-realwin.md")
             val f2 = root.resolve("malthus-realwin.md")
             Files.writeString(f1, richSyntheticMarkdown("Wages and Profit RealWindow"))
@@ -733,6 +754,9 @@ class ReaderShellFixTest {
                 waitForIdle()
 
                 // 1. Reader bottom/side companion ASK tab offers "已读书目" even with 1 standalone book
+                onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                onNodeWithTag("reader-page").performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Tab) }
+                waitForIdle()
                 onNodeWithTag("immersive-companion-toggle").performClick()
                 waitForIdle()
                 onNodeWithTag("companion-tab-ask").performClick()
@@ -947,6 +971,7 @@ class ReaderShellFixTest {
             // Part A: Booklist sequential read progress (5-page Ch1 -> Ch2) + multi-book citations
             val libDirA = root.resolve("lib-booklist")
             val libraryA = TextbookLibrary(libDirA)
+            BookHudPreferenceStore(libraryA.directory).setPinned(true)
             val smithFile = root.resolve("Smith-Wealth.md").also {
                 val filler = "The annual labour of every nation is the fund which originally supplies it with all the necessaries and conveniences of life. ".repeat(7)
                 Files.writeString(
@@ -1089,6 +1114,7 @@ class ReaderShellFixTest {
             // Part B: Standalone single book (zero manual collections) Reader + HostSearchDialog "已读书目"
             val libDirB = root.resolve("lib-standalone")
             val libraryB = TextbookLibrary(libDirB)
+            BookHudPreferenceStore(libraryB.directory).setPinned(true)
             val nahanFile = root.resolve("NaHan.md").also {
                 Files.writeString(
                     it,

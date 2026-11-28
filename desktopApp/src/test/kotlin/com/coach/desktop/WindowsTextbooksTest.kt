@@ -50,8 +50,27 @@ An isolated specimen uses the same process on the second page.
     private fun ComposeUiTest.waitTag(tag: String) =
         waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
 
+    private fun ComposeUiTest.revealReaderHud() {
+        if (onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isEmpty()) {
+            if (onAllNodesWithTag("reader-page").fetchSemanticsNodes().isNotEmpty()) {
+                onNodeWithTag("reader-page").performSemanticsAction(SemanticsActions.RequestFocus)
+                waitForIdle()
+                onNodeWithTag("reader-page").performKeyInput { pressKey(Key.Tab) }
+                waitForIdle()
+            }
+            if (onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isEmpty()) {
+                onNodeWithTag("textbook-reader").performMouseInput { click(center) }
+                waitForIdle()
+            }
+            waitUntil(timeoutMillis = 5_000) {
+                onAllNodesWithTag("immersive-top-hud").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+    }
+
     private fun ComposeUiTest.openCompanion() {
         if (onAllNodesWithTag("immersive-companion-drawer").fetchSemanticsNodes().isEmpty()) {
+            revealReaderHud()
             onNodeWithTag("immersive-companion-toggle").performClick()
         }
         onNodeWithTag("companion-tab-explain").performClick()
@@ -69,6 +88,7 @@ An isolated specimen uses the same process on the second page.
             waitTag("upload-textbook")
             onNodeWithTag("upload-textbook").performClick()
             ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
+            revealReaderHud()
             onNodeWithTag("reader-page-number").performClick()
             onNodeWithTag("page-jump").performTextReplacement("2")
             onNodeWithTag("page-jump").performKeyInput { pressKey(Key.Enter) }
@@ -218,6 +238,7 @@ An isolated specimen uses the same process on the second page.
                 assertEquals(book.id, controller.state.value.book!!.id)
                 assertEquals(2, controller.state.value.page)
                 assertEquals(listOf(book.id), library.catalog().map { it.id })
+                revealReaderHud()
                 onNodeWithTag("immersive-back").performClick()
                 ready(controller) { it.screen == BookScreen.HOME }
             }
@@ -242,6 +263,7 @@ An isolated specimen uses the same process on the second page.
             nav("host-bar")
             onNodeWithTag("home-read").performClick()
             ready(controller) { it.screen == BookScreen.READER }
+            revealReaderHud()
             nav("immersive-back")
             onNodeWithTag("immersive-back").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
@@ -251,6 +273,7 @@ An isolated specimen uses the same process on the second page.
             nav("booklist-back")
             onNodeWithTag("booklist-book-${book.id}").performScrollTo().performClick()
             ready(controller) { it.screen == BookScreen.READER }
+            revealReaderHud()
             nav("immersive-back")
             onNodeWithTag("immersive-back").performClick()
             ready(controller) { it.screen == BookScreen.BOOKLIST && it.activeBooklistId == "fixture-list" }
@@ -266,7 +289,7 @@ An isolated specimen uses the same process on the second page.
         for (name in listOf("COACH_URL", "COACH_CLIENT_DIR", "COACH_TOKEN_FILE", "COACH_ACCEPTANCE_REPLAY", "COACH_AGENT_RUN_ID"))
             org.junit.Assume.assumeTrue("$name is set", System.getenv(name).isNullOrBlank())
         val saved = listOf("user.home", "jpackage.app-path", "coach.windows.theme").associateWith { System.getProperty(it) }
-        val root = Files.createTempDirectory("coach-explain-shell-")
+        val root = Files.createTempDirectory("coach-explain-shell-").toRealPath()
         try {
             for (dark in listOf(false, true)) {
                 val theme = if (dark) "dark" else "light"
@@ -321,6 +344,7 @@ An isolated specimen uses the same process on the second page.
             mac.mode = ExplainShellMac.Mode.OFFLINE
             login("246810")
             read()
+            revealReaderHud()
             val reader = shell()
             fun checkShell(state: String) {
                 assertEquals(stored.id, controller.state.value.book!!.id)
@@ -352,6 +376,7 @@ An isolated specimen uses the same process on the second page.
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("This passage says", substring = true).fetchSemanticsNodes().isNotEmpty() }
             checkShell("connected")
             assertEquals(2, mac.pairs.get())
+            revealReaderHud()
             onNodeWithTag("immersive-back").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
             onNodeWithTag("host-bar").assertIsDisplayed()

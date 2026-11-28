@@ -40,6 +40,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontFamily
@@ -298,6 +301,7 @@ internal fun BookPageView(
     /** EPUB 书内链接（尾注编号、返回箭头等）；点中链接文字时用 [onFollowLink] 跳到目标位置。 */
     links: EpubLinks = EpubLinks.NONE,
     onFollowLink: ((BookPageAnchor) -> Unit)? = null,
+    onSelectTextBounds: ((Rect?) -> Unit)? = null,
 ) {
     var preview by remember(book.id, libraryDirectory) { mutableStateOf<BookFigurePreview?>(null) }
     preview?.let { figure ->
@@ -327,6 +331,38 @@ internal fun BookPageView(
     val clipboard = LocalClipboard.current
     val pageClipboard = remember(clipboard) { PageClipboard(clipboard) }
     val latestOnSelectText by rememberUpdatedState(onSelectText)
+    val latestOnSelectTextBounds by rememberUpdatedState(onSelectTextBounds)
+    val selectionHalfLinePx = with(density) { (body.lineHeight.toPx() * 0.6f).coerceAtLeast(12.dp.toPx()) }
+    fun reportSelection(
+        block: SourceBlock?,
+        gesture: ReadingPointerGesture,
+        coords: LayoutCoordinates?,
+    ) {
+        latestOnSelectText?.invoke(block)
+        val boundsCb = latestOnSelectTextBounds ?: return
+        if (block == null) {
+            boundsCb(null)
+            return
+        }
+        val activeCoords = coords?.takeIf { it.isAttached } ?: run {
+            boundsCb(null)
+            return
+        }
+        val minX = minOf(gesture.down.x, gesture.up.x)
+        val maxX = maxOf(gesture.down.x, gesture.up.x).coerceAtLeast(minX + 8f)
+        val minY = (minOf(gesture.down.y, gesture.up.y) - selectionHalfLinePx).coerceAtLeast(0f)
+        val maxY = maxOf(gesture.down.y, gesture.up.y) + selectionHalfLinePx
+        val topLeft = activeCoords.localToRoot(Offset(minX, minY))
+        val bottomRight = activeCoords.localToRoot(Offset(maxX, maxY))
+        boundsCb(
+            Rect(
+                left = minOf(topLeft.x, bottomRight.x),
+                top = minOf(topLeft.y, bottomRight.y),
+                right = maxOf(topLeft.x, bottomRight.x),
+                bottom = maxOf(topLeft.y, bottomRight.y),
+            ),
+        )
+    }
     val windowsPaged = immersive && readMode.isWindowsPaged()
     // Reflowed PDF already has chapter and page navigation in the reader HUD.
     val topMargin = when {
@@ -580,19 +616,25 @@ internal fun BookPageView(
                         scrollbar = { BookReadScrollbar(it) }) { index ->
                         val page = pages[index]
                         val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
+                        var sheetCoords by remember(page) { mutableStateOf<LayoutCoordinates?>(null) }
                         val downPos = remember(scrollState) { arrayOf<ScrollReadPosition?>(null) }
                         val scrollSpot = rememberUpdatedState { g: ReadingPointerGesture ->
-                            val cb = latestOnSelectText ?: return@rememberUpdatedState
+                            if (latestOnSelectText == null) return@rememberUpdatedState
                             val moved = downPos[0] != null && downPos[0] != scrollState.position
                             when {
                                 !moved && (g.longPressed || (!g.isTouch && g.dragged)) ->
-                                    cb(page.selectionForGesture(book, g, scrollInsetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered))
-                                !g.dragged && !g.longPressed -> cb(null)
+                                    reportSelection(
+                                        page.selectionForGesture(book, g, scrollInsetPx, if (page.opener) openerTopMarginPx else topMarginPx, rendered),
+                                        g,
+                                        sheetCoords,
+                                    )
+                                !g.dragged && !g.longPressed -> reportSelection(null, g, sheetCoords)
                             }
                         }
                         val recordDown = rememberUpdatedState { downPos[0] = scrollState.position }
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                             Box(Modifier.width(sheetWidth).height(viewHeight).background(paper).clipToBounds()
+                                .onGloballyPositioned { sheetCoords = it }
                                 .readingSpot(scrollSpot, onDown = recordDown).testTag("book-sheet-0")) {
                                 val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -
                                     pages.take(index + 1).count { it.chapter == page.chapter }
@@ -631,22 +673,27 @@ internal fun BookPageView(
             val isLast = spread && side == visibleColumns - 1
             val inset = if (isLast) rightInset + with(density) { extraPx.toDp() } else leftInset
             val rendered = remember(page) { mutableMapOf<Int, TextLayoutResult>() }
+            var sheetCoords by remember(page) { mutableStateOf<LayoutCoordinates?>(null) }
             val scale = sheetWidthPx.toFloat() / (sheetWidthPx + extraPx)
             val sheetSpot = rememberUpdatedState { g: ReadingPointerGesture ->
                 state.anchor = spotAnchor(pages, index, spread, side, g.down, g.up, g.dragged,
                     sheetWidthPx.toFloat(), measurer, typography, widthPx, ::sheetScale) ?: state.anchor
-                val cb = latestOnSelectText ?: return@rememberUpdatedState
+                if (latestOnSelectText == null) return@rememberUpdatedState
                 when {
-                    windowsPaged && !g.isTouch && g.dragged -> cb(book.highlightedPassage(selection.selectedTexts))
+                    windowsPaged && !g.isTouch && g.dragged -> reportSelection(book.highlightedPassage(selection.selectedTexts), g, sheetCoords)
                     g.longPressed || (!g.isTouch && g.dragged) -> {
                         val local = if (extraPx == 0) g else g.copy(down = g.down / scale, up = g.up / scale)
-                        cb(page?.selectionForGesture(book, local, with(density) { inset.toPx() },
-                            if (page.opener) openerTopMarginPx else topMarginPx, rendered))
+                        reportSelection(
+                            page?.selectionForGesture(book, local, with(density) { inset.toPx() },
+                                if (page.opener) openerTopMarginPx else topMarginPx, rendered),
+                            g,
+                            sheetCoords,
+                        )
                     }
-                    !g.dragged -> cb(null)
+                    !g.dragged -> reportSelection(null, g, sheetCoords)
                 }
             }
-            Box(sheetModifier.background(paper).clipToBounds().readingSpot(sheetSpot, ignoreDown)
+            Box(sheetModifier.background(paper).clipToBounds().onGloballyPositioned { sheetCoords = it }.readingSpot(sheetSpot, ignoreDown)
                 .testTag("book-sheet-$side")) {
                 if (page != null) {
                     val remaining = if (immersive) null else pages.count { it.chapter == page.chapter } -

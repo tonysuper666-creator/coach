@@ -9,7 +9,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
@@ -39,7 +43,7 @@ import kotlin.math.roundToInt
 private const val FallbackPdfAspect = 0.7071f
 private const val TouchPdfRasterLimit = 3072
 
-internal data class PdfSelection(val page: Int, val range: ReaderTextRange, val top: Float)
+internal data class PdfSelection(val page: Int, val range: ReaderTextRange, val top: Float, val boundsInRoot: Rect? = null)
 
 internal data class PdfDestination(val page: Int, val fraction: Float = 0f, val reveal: Boolean = false, val revision: Int = 0)
 
@@ -389,6 +393,7 @@ private fun OriginalPdfLeaf(
     onRenderWidth: (Int) -> Unit = {},
 ) {
     var pixelWidth by remember { mutableIntStateOf(0) }
+    var leafCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var retry by remember { mutableIntStateOf(0) }
     val reveal = reading.destination.takeIf { it.page == page.number && it.reveal }
     val zoom = if (originalPdfTouchEnabled) remember(page.number, reveal) { PdfTouchZoom() } else null
@@ -412,14 +417,27 @@ private fun OriginalPdfLeaf(
         onResize = { pixelWidth = it.width }, onRetry = { layers.invalidate(page.number); retry++ },
         onSelection = { range ->
             reading.selection = range?.let {
-                val top = layer?.let { unit -> PdfTextSelection.boxesForVerifiedRange(unit, page.text, range).firstOrNull()?.y }
-                PdfSelection(page.number, range, top?.toFloat() ?: 0f)
+                val boxes = layer?.let { unit -> PdfTextSelection.boxesForVerifiedRange(unit, page.text, range) }.orEmpty()
+                val top = boxes.firstOrNull()?.y
+                val activeCoords = leafCoords?.takeIf { it.isAttached }
+                val rootBounds = if (boxes.isNotEmpty() && activeCoords != null && activeCoords.size.width > 0 && activeCoords.size.height > 0) {
+                    val w = activeCoords.size.width.toFloat()
+                    val h = activeCoords.size.height.toFloat()
+                    val minX = boxes.minOf { it.x.toFloat() } * w
+                    val minY = boxes.minOf { it.y.toFloat() } * h
+                    val maxX = boxes.maxOf { (it.x + it.width).toFloat() } * w
+                    val maxY = boxes.maxOf { (it.y + it.height).toFloat() } * h
+                    val tl = activeCoords.localToRoot(Offset(minX, minY))
+                    val br = activeCoords.localToRoot(Offset(maxX, maxY))
+                    Rect(minOf(tl.x, br.x), minOf(tl.y, br.y), maxOf(tl.x, br.x), maxOf(tl.y, br.y))
+                } else null
+                PdfSelection(page.number, range, top?.toFloat() ?: 0f, rootBounds)
             }
             if (range != null && !active) {
                 reading.focus(page.number)
                 onPage(page.number)
             }
-        }, modifier = modifier.testTag("original-pdf-page-${page.number}"), roundPdfCorners = true,
+        }, modifier = modifier.onGloballyPositioned { leafCoords = it }.testTag("original-pdf-page-${page.number}"), roundPdfCorners = true,
         active = active, inactivePage = page.number, knownAspect = aspect,
         touchZoom = zoom,
     )

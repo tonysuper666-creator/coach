@@ -39,6 +39,7 @@ internal fun MarginWhisperStrip(
     onExpandCompanion: () -> Unit,
     onJumpAnchorPage: (Int) -> Unit,
     onDismiss: () -> Unit,
+    onNeverShowAgain: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -73,6 +74,20 @@ internal fun MarginWhisperStrip(
                     .pointerHoverIcon(PointerIcon.Hand)
                     .testTag("margin-whisper-toggle"),
             )
+            if (onNeverShowAgain != null) {
+                Text(
+                    text = "不再提示",
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    color = colors.fgTertiary,
+                    modifier = Modifier
+                        .focusProperties { canFocus = false }
+                        .clickable(role = Role.Button, onClick = onNeverShowAgain)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("margin-whisper-never-again"),
+                )
+            }
             Text(
                 text = "×",
                 fontSize = 12.sp,
@@ -139,6 +154,7 @@ internal fun EndOfSectionCheckpointCard(
     data: EndOfSectionCheckpointData,
     onAnswer: (BookCompanionQuiz, String, Boolean) -> Unit,
     onDismiss: () -> Unit,
+    onNeverShowAgain: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CoachTheme.colors
@@ -167,6 +183,19 @@ internal fun EndOfSectionCheckpointCard(
                 text = "本节收尾 · ${data.sectionTitle} · 可直接按下一页跳过。",
                 modifier = Modifier.weight(1f),
             )
+            if (onNeverShowAgain != null) {
+                Text(
+                    text = "不再提示",
+                    fontSize = 12.sp,
+                    color = colors.fgTertiary,
+                    modifier = Modifier
+                        .focusProperties { canFocus = false }
+                        .clickable(role = Role.Button, onClick = onNeverShowAgain)
+                        .pointerHoverIcon(PointerIcon.Hand)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("checkpoint-never-again"),
+                )
+            }
             Text(
                 text = "略过",
                 fontSize = 12.sp,

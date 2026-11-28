@@ -85,7 +85,6 @@ class R1860ImmersiveDragSelectionTest {
             val library = TextbookLibrary(root.resolve("library"))
             val book = library.importBook(file)
             library.saveTextView(book.id, true)
-            BookHudPreferenceStore(library.directory).markDismissed(book.id)
             val explainer = RecordingExplainer(root.resolve("home"), library)
             runSkikoComposeUiTest(size = Size(2160f, 1350f), density = Density(1.5f)) {
                 openReader(library, book, 1, explainer)
@@ -146,6 +145,7 @@ class R1860ImmersiveDragSelectionTest {
         val root = Files.createTempDirectory("coach-r1860-long-")
         try {
             val library = TextbookLibrary(root.resolve("library"))
+            BookHudPreferenceStore(library.directory).setPinned(true)
             val book = library.importBook(root.resolve("long.md").also { Files.writeString(it, longBook()) })
             assertTrue(book.pages.size > 64, "fixture needs background layout: ${book.pages.size} import pages")
             val anchorPage = book.pages.first { ANCHOR_SENTENCE in it.text }.number
@@ -223,6 +223,7 @@ class R1860ImmersiveDragSelectionTest {
         val root = Files.createTempDirectory("coach-r1860-corner-")
         try {
             val library = TextbookLibrary(root.resolve("library"))
+            BookHudPreferenceStore(library.directory).setPinned(true)
             val book = library.importBook(root.resolve("corner.md").also { Files.writeString(it, cornerBook()) })
             val cornerPage = book.pages.first { CORNER_SENTENCE in it.text }.number
             assertTrue(cornerPage > 1, "corner sentence must not sit on the first import page")

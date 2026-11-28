@@ -72,7 +72,8 @@ class LiteratureGoldTest {
             val labels = Path.of(checkNotNull(javaClass.getResource("/literature-gold/sentences.tsv")).toURI())
             val rows = Files.readAllLines(labels).map { it.split('\t', limit = 4) }
             val library = TextbookLibrary(root)
-            for ((name, count) in mapOf("ocr-bands" to 6, "covered-ocr" to 7, "offset-crop" to 4, "printed-notes" to 12)) {
+            for ((name, count) in mapOf("ocr-bands" to 6, "covered-ocr" to 7, "offset-crop" to 4,
+                    "printed-notes" to 12, "image-text" to 12)) {
                 val book = library.literatureBook(library.importBook(labels.resolveSibling("$name.pdf")).id)
                 val notes = rows.filter { it[0] == name && it[2] == "note" }
                 kotlin.test.assertEquals(count, notes.size)

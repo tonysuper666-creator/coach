@@ -512,6 +512,52 @@ class StanceExplanationTest {
     }
 
     /**
+     * QA 安全回归：丢句日志只能输出本次来源包 `pack.byAnchor` 中已知的 anchor 编号，
+     * 形状 / 句数 / 非法 anchor 三处分支中模型填入的未知字符串必须统一记为 `invalid`，绝不进入日志。
+     */
+    @Test
+    fun dropLogNeverEmitsUntrustedModelAnchorStrings() {
+        val bookHash = "7".repeat(64)
+        val canary = "SYNTHETIC_SECRET_BOOK_TEXT_CANARY_98765"
+        val pack = StanceSourcePack.fromSourcePack(
+            SourcePack(listOf(SourcePage("$bookHash:p1:0", 1, "Only pears grow in this orchard."))),
+            BookStance.KNOWLEDGE,
+        )
+        val payload = """
+            {"paragraphs":[{"layer":"book","sentences":[
+                {"text":"含换行\n的非法形状。","anchors":["$canary","S1"]},
+                {"text":"第一句。第二句超出单句限制。","anchors":["$canary"]},
+                {"text":"果园里只种梨。","anchors":["S1","$canary"],"quote":"Only pears grow in this orchard."}
+            ]}],"boundary":null}
+        """.trimIndent()
+        val capturedLogs = mutableListOf<String>()
+        val res = assertNotNull(checkedStancePayload(payload, pack, BookStance.KNOWLEDGE, onDropLog = capturedLogs::add))
+        assertEquals(3, res.droppedSentences)
+        assertEquals(3, capturedLogs.size)
+        assertEquals(
+            listOf(
+                "COACH stance.drop stance=knowledge reason=SHAPE anchors=invalid,S1",
+                "COACH stance.drop stance=knowledge reason=SENTENCE_COUNT anchors=invalid",
+                "COACH stance.drop stance=knowledge reason=ANCHOR anchors=S1,invalid",
+            ),
+            capturedLogs,
+        )
+        assertTrue(capturedLogs.none { canary in it }, "未知模型字符串绝不能出现在丢句日志中")
+
+        // 同时验证默认 SLF4J 日志输出路径也不会泄露未知字符串
+        val prevErr = System.err
+        val errBuf = java.io.ByteArrayOutputStream()
+        try {
+            System.setErr(java.io.PrintStream(errBuf, true, Charsets.UTF_8))
+            assertNotNull(checkedStancePayload(payload, pack, BookStance.KNOWLEDGE))
+        } finally {
+            System.setErr(prevErr)
+        }
+        val stderrText = errBuf.toString(Charsets.UTF_8)
+        assertFalse(canary in stderrText, "默认服务端日志输出绝不能包含未知 anchor 字符串")
+    }
+
+    /**
      * 规则 2、3、4、8：结构违规整次拒绝（触发重试），包括推想含第一人称、书外带页码、只看原文带书外、超 5 段。
      */
     @Test

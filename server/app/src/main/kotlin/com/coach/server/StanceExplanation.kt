@@ -907,9 +907,15 @@ internal object ServerQuoteLocator {
 
 private val STANCE_DROP_LOG = LoggerFactory.getLogger("coach.reader")
 
-private fun logStanceDrop(stance: BookStance, reason: String, anchors: List<String> = emptyList()) {
-    val anchorTag = if (anchors.isEmpty()) "none" else anchors.joinToString(",")
-    STANCE_DROP_LOG.info("COACH stance.drop stance={} reason={} anchors={}", stance.wire, reason, anchorTag)
+internal fun formatStanceDropLog(
+    stance: BookStance,
+    reason: String,
+    anchors: List<String>,
+    knownAnchors: Set<String>,
+): String {
+    val sanitized = anchors.map { if (it in knownAnchors) it else "invalid" }.distinct()
+    val anchorTag = if (sanitized.isEmpty()) "none" else sanitized.joinToString(",")
+    return "COACH stance.drop stance=${stance.wire} reason=$reason anchors=$anchorTag"
 }
 
 private val STANCE_LOCATOR_REGEX = Regex(
@@ -958,7 +964,12 @@ internal fun checkedStancePayload(
     effectiveReadThroughPage: Int? = null,
     strictSinglePageOnly: Boolean = false,
     onReject: (ReaderFormatReason) -> Unit = {},
+    onDropLog: (String) -> Unit = STANCE_DROP_LOG::info,
 ): CheckedStanceResult? {
+    val knownAnchors = pack.byAnchor.keys
+    fun logDrop(reason: String, anchors: List<String> = emptyList()) {
+        onDropLog(formatStanceDropLog(stance, reason, anchors, knownAnchors))
+    }
     fun reject(reason: ReaderFormatReason): CheckedStanceResult? {
         onReject(reason)
         return null
@@ -1060,7 +1071,7 @@ internal fun checkedStancePayload(
                 for (rawSent in rawSentences) {
                     val sentObj = rawSent as? JsonObject
                     if (sentObj == null) {
-                        logStanceDrop(stance, "SHAPE")
+                        logDrop("SHAPE")
                         droppedSentences++
                         continue
                     }
@@ -1070,19 +1081,19 @@ internal fun checkedStancePayload(
                     if (text.isNullOrEmpty() || '\n' in text || '\r' in text || '【' in text || '】' in text ||
                         STANCE_LOCATOR_REGEX.containsMatchIn(text)
                     ) {
-                        logStanceDrop(stance, "SHAPE", rawAnchorIds)
+                        logDrop("SHAPE", rawAnchorIds)
                         droppedSentences++
                         continue
                     }
                     // 规则 1：按句末标点切必须只有一句
                     if (StanceSentenceSplitter.countSentences(text) != 1) {
-                        logStanceDrop(stance, "SENTENCE_COUNT", rawAnchorIds)
+                        logDrop("SENTENCE_COUNT", rawAnchorIds)
                         droppedSentences++
                         continue
                     }
                     val anchorsArr = sentObj["anchors"] as? JsonArray
                     if (anchorsArr == null || anchorsArr.isEmpty()) {
-                        logStanceDrop(stance, "ANCHOR")
+                        logDrop("ANCHOR")
                         droppedSentences++
                         continue
                     }
@@ -1090,7 +1101,7 @@ internal fun checkedStancePayload(
                     if (anchorIds.size != anchorsArr.size || anchorIds.distinct().size != anchorIds.size ||
                         anchorIds.any { it !in pack.byAnchor }
                     ) {
-                        logStanceDrop(stance, "ANCHOR", anchorIds)
+                        logDrop("ANCHOR", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1102,7 +1113,7 @@ internal fun checkedStancePayload(
                             if (strictSinglePageOnly) b.pdfPage != effectiveReadThroughPage else b.pdfPage > effectiveReadThroughPage
                         }
                         if (violated) {
-                            logStanceDrop(stance, "OUT_OF_RANGE", anchorIds)
+                            logDrop("OUT_OF_RANGE", anchorIds)
                             outOfRange++
                             droppedSentences++
                             continue
@@ -1114,7 +1125,7 @@ internal fun checkedStancePayload(
                         val hasMain = blocks.any { it.classicalKind == ClassicalSpanKind.MAIN_TEXT }
                         val hasComment = blocks.any { it.classicalKind != ClassicalSpanKind.MAIN_TEXT }
                         if (hasMain && hasComment) {
-                            logStanceDrop(stance, "CLASSIC_MIXED", anchorIds)
+                            logDrop("CLASSIC_MIXED", anchorIds)
                             droppedSentences++
                             continue
                         }
@@ -1124,7 +1135,7 @@ internal fun checkedStancePayload(
                     val sentenceGate = SourceCitationGate(pack.anchorTextMap)
                     val checked = sentenceGate.push(text + anchorIds.joinToString("") { "【$it】" }) + sentenceGate.finish(true)
                     if (sentenceGate.accepted != 1 || checked.isEmpty()) {
-                        logStanceDrop(stance, "INLINE_QUOTE", anchorIds)
+                        logDrop("INLINE_QUOTE", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1154,7 +1165,7 @@ internal fun checkedStancePayload(
                     }
                     val hasExplicitQuote = singleQuote != null || quotesByAnchor.isNotEmpty()
                     if (!hasExplicitQuote && !passesSameScriptSupport(text, blocks)) {
-                        logStanceDrop(stance, "CLAIM_SUPPORT", anchorIds)
+                        logDrop("CLAIM_SUPPORT", anchorIds)
                         droppedSentences++
                         continue
                     }
@@ -1210,14 +1221,14 @@ internal fun checkedStancePayload(
                         }
                     }
                     if (quoteFailed || citations.isEmpty()) {
-                        logStanceDrop(stance, "QUOTE_LOCATE", failedAnchor?.let(::listOf) ?: anchorIds)
+                        logDrop("QUOTE_LOCATE", failedAnchor?.let(::listOf) ?: anchorIds)
                         droppedSentences++
                         continue
                     }
 
                     // 规则 1：词面粗筛，陈述与该句所引原句毫不相干就丢句；不判断语义蕴含（见 StanceClaimSupport 注释）
                     if (!StanceClaimSupport.isSupported(text, citations, blocks)) {
-                        logStanceDrop(stance, "CLAIM_SUPPORT", anchorIds)
+                        logDrop("CLAIM_SUPPORT", anchorIds)
                         droppedSentences++
                         continue
                     }

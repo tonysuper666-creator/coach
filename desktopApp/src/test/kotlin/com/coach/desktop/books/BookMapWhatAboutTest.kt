@@ -539,10 +539,15 @@ class BookMapWhatAboutTest {
                     bookId: String,
                     mode: String,
                     input: JsonObject,
+                    onBusy: (String) -> Unit,
                     onProgress: (Int, Long?, String) -> Unit,
                 ): CourseServerCallResult = error("BOOK_MAP must not trigger streaming pack fetch")
 
-                override suspend fun fetchBookMapBatch(bookId: String, input: JsonObject): CourseServerCallResult =
+                override suspend fun fetchBookMapBatch(
+                    bookId: String,
+                    input: JsonObject,
+                    onBusy: (String) -> Unit,
+                ): CourseServerCallResult =
                     error("Saved map must load from local SQLite with zero server calls")
             }
 

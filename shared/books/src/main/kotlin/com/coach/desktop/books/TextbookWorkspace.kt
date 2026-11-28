@@ -85,6 +85,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var guideCourse by remember { mutableStateOf<String?>(null) }
     var comparisonCourse by remember { mutableStateOf<String?>(null) }
     var followCourse by remember { mutableStateOf<String?>(null) }
+    val courseUiPreferences = remember(controller.library) { CourseUiPreferenceStore(controller.library.directory) }
+    var spoilerMutedCourseIds by remember { mutableStateOf(emptySet<String>()) }
     val aiEnabled = LocalReadingAiExplain.current
     val currentAiEnabled by rememberUpdatedState(aiEnabled)
     val booklistJudge = remember(explainer) {
@@ -448,6 +450,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         )
                         ui.screen == BookScreen.COURSE && ui.activeCourseDetail != null -> {
                             val detail = checkNotNull(ui.activeCourseDetail)
+                            // 换课才读一次盘，避免每帧都去碰文件
+                            val spoilerMutedSaved = remember(detail.courseId) {
+                                courseUiPreferences.isSpoilerNoticeMuted(detail.courseId)
+                            }
                             if (followCourse == detail.courseId) {
                                 val followIds = detail.materials
                                     .filter { it.format.equals("pdf", ignoreCase = true) }
@@ -548,6 +554,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     run { controller.updateCourseExamProfile(detail.courseId, profile) }
                                 },
                                 onDismissNotice = controller::dismissCourseNotice,
+                                spoilerNoticeMuted = spoilerMutedSaved || detail.courseId in spoilerMutedCourseIds,
+                                onMuteSpoilerNotice = {
+                                    courseUiPreferences.muteSpoilerNotice(detail.courseId)
+                                    spoilerMutedCourseIds = spoilerMutedCourseIds + detail.courseId
+                                },
                                 intake = ui.courseIntake?.takeIf { it.courseId == detail.courseId },
                                 onChangeIntakeType = { key, role -> run { controller.changeCourseIntakeType(detail.courseId, key, role) } },
                                 onDismissIntake = controller::dismissCourseIntake,
